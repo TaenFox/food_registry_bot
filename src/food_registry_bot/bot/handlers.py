@@ -1,22 +1,25 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 
 from aiogram import Router
 from aiogram import F
 from aiogram.filters import Command
 from aiogram.types import Message
-from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT, build_main_keyboard
-from food_registry_bot.bot.payloads import NormalizedJournalPayload
 from food_registry_bot.db.models import EntryType
 from food_registry_bot.db.repositories import EntryItemCreate, EntryRepository, UserRepository
 from food_registry_bot.db.session import session_scope
+from food_registry_bot.extraction import (
+    InvalidExtractionPayload,
+    StructuredPayloadExtractionService,
+    ValidExtractionPayload,
+)
 
 router = Router()
+extraction_service = StructuredPayloadExtractionService()
 
 
 def ensure_user_registered(message: Message, session: Session) -> tuple[bool, int]:
@@ -29,14 +32,6 @@ def ensure_user_registered(message: Message, session: Session) -> tuple[bool, in
         username=telegram_user.username,
     )
     return created, user.id
-
-
-def parse_normalized_journal_payload(message_text: str) -> NormalizedJournalPayload | None:
-    stripped_text = message_text.strip()
-    if not stripped_text.startswith("{"):
-        return None
-
-    return NormalizedJournalPayload.model_validate_json(stripped_text)
 
 
 def present_item_name(name: str) -> str:
@@ -70,7 +65,7 @@ def build_saved_items_confirmation(items: list[EntryItemCreate]) -> str:
     return "\n".join(lines)
 
 
-def build_normalized_payload_confirmation(payload: NormalizedJournalPayload) -> str:
+def build_extracted_payload_confirmation(payload) -> str:
     lines = ["Сохранил:"]
     for entry in payload.entries:
         for item in entry.items:
@@ -153,11 +148,11 @@ async def handle_message(message: Message, session_factory: sessionmaker[Session
         )
         return
 
-    try:
-        normalized_payload = parse_normalized_journal_payload(source_text)
-    except (ValidationError, json.JSONDecodeError):
+    extraction_result = extraction_service.extract_from_text(source_text)
+
+    if isinstance(extraction_result, InvalidExtractionPayload):
         await message.answer(
-            "Не удалось разобрать JSON. Ожидаю объект вида {'entries': [...]} с type и items.",
+            extraction_result.message,
             reply_markup=build_main_keyboard(),
         )
         return
@@ -165,21 +160,21 @@ async def handle_message(message: Message, session_factory: sessionmaker[Session
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
 
-        if normalized_payload is not None:
-            for normalized_entry in normalized_payload.entries:
+        if isinstance(extraction_result, ValidExtractionPayload):
+            for extracted_entry in extraction_result.payload.entries:
                 EntryRepository(session).create(
                     user_id=user_id,
-                    entry_type=normalized_entry.type,
-                    occurred_at=normalized_entry.occurred_at or datetime.now(timezone.utc),
+                    entry_type=extracted_entry.type,
+                    occurred_at=extracted_entry.occurred_at or datetime.now(timezone.utc),
                     source_text=None,
                     items=[
                         EntryItemCreate(
                             name=item.name,
                             quantity=item.quantity,
                             unit=item.unit,
-                            source_type="normalized_json",
+                            source_type="extraction_payload",
                         )
-                        for item in normalized_entry.items
+                        for item in extracted_entry.items
                     ],
                 )
         else:
@@ -192,9 +187,9 @@ async def handle_message(message: Message, session_factory: sessionmaker[Session
                 items=saved_items,
             )
 
-    if normalized_payload is not None:
+    if isinstance(extraction_result, ValidExtractionPayload):
         await message.answer(
-            build_normalized_payload_confirmation(normalized_payload),
+            build_extracted_payload_confirmation(extraction_result.payload),
             reply_markup=build_main_keyboard(),
         )
         return

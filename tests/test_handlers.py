@@ -112,11 +112,11 @@ async def test_json_message_creates_food_and_water_entries() -> None:
     assert saved_items[0].name == "гречка"
     assert saved_items[0].quantity == 200
     assert saved_items[0].unit == "g"
-    assert saved_items[0].source_type == "normalized_json"
+    assert saved_items[0].source_type == "extraction_payload"
     assert saved_items[1].name == "water"
     assert saved_items[1].quantity == 250
     assert saved_items[1].unit == "ml"
-    assert saved_items[1].source_type == "normalized_json"
+    assert saved_items[1].source_type == "extraction_payload"
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         "Сохранил:\n- гречка: 200 г\n- вода: 250 мл",
@@ -140,7 +140,7 @@ async def test_invalid_json_message_returns_validation_error() -> None:
     assert entries_count == 0
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Не удалось разобрать JSON. Ожидаю объект вида {'entries': [...]} с type и items.",
+        "Не удалось разобрать structured payload. Ожидаю объект вида {'entries': [...]} с type, items и name.",
     )
     assert message.answer.await_args.kwargs["reply_markup"] is not None
 
