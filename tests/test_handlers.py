@@ -1,3 +1,4 @@
+from io import BytesIO
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -9,6 +10,12 @@ from food_registry_bot.bot.handlers import handle_message, handle_recent, handle
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT
 from food_registry_bot.db.base import Base
 from food_registry_bot.db.models import Entry, EntryItem, EntryType, User
+from food_registry_bot.extraction import (
+    ExtractedJournalEntry,
+    ExtractedJournalItem,
+    ExtractedJournalPayload,
+    ValidExtractionPayload,
+)
 
 
 def create_session_factory() -> sessionmaker[Session]:
@@ -109,14 +116,17 @@ async def test_json_message_creates_food_and_water_entries() -> None:
     assert [entry.entry_type for entry in saved_entries] == [EntryType.FOOD, EntryType.WATER]
     assert saved_entries[0].source_text is None
     assert saved_entries[1].source_text is None
+    assert saved_entries[0].extraction_provider == "structured_payload"
+    assert saved_entries[0].extraction_model is None
+    assert '"entries"' in saved_entries[0].extraction_raw_payload
     assert saved_items[0].name == "гречка"
     assert saved_items[0].quantity == 200
     assert saved_items[0].unit == "g"
-    assert saved_items[0].source_type == "normalized_json"
+    assert saved_items[0].source_type == "extraction_payload"
     assert saved_items[1].name == "water"
     assert saved_items[1].quantity == 250
     assert saved_items[1].unit == "ml"
-    assert saved_items[1].source_type == "normalized_json"
+    assert saved_items[1].source_type == "extraction_payload"
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         "Сохранил:\n- гречка: 200 г\n- вода: 250 мл",
@@ -140,7 +150,7 @@ async def test_invalid_json_message_returns_validation_error() -> None:
     assert entries_count == 0
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Не удалось разобрать JSON. Ожидаю объект вида {'entries': [...]} с type и items.",
+        "Не удалось разобрать structured payload. Ожидаю объект вида {'entries': [...]} с type, items и name.",
     )
     assert message.answer.await_args.kwargs["reply_markup"] is not None
 
@@ -212,3 +222,96 @@ async def test_water_button_creates_water_entry() -> None:
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == ("Сохранил:\n- вода: 250 мл",)
     assert message.answer.await_args.kwargs["reply_markup"] is not None
+
+
+async def test_photo_message_creates_entries_from_extraction_service() -> None:
+    session_factory = create_session_factory()
+    extraction_service = SimpleNamespace(
+        extract=lambda request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.FOOD,
+                        items=[
+                            ExtractedJournalItem(name="омлет"),
+                            ExtractedJournalItem(name="тост"),
+                        ],
+                    )
+                ]
+            ),
+            extraction_provider="structured_payload",
+            extraction_model=None,
+            raw_payload='{"entries":[{"type":"food","items":[{"name":"омлет"},{"name":"тост"}]}]}',
+        )
+    )
+    message = SimpleNamespace(
+        text=None,
+        caption="омлет с тостом",
+        photo=[SimpleNamespace(file_id="small"), SimpleNamespace(file_id="large")],
+        from_user=SimpleNamespace(id=1009, username="photo_user"),
+        bot=SimpleNamespace(download=AsyncMock(return_value=BytesIO(b"image-bytes"))),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(message, session_factory, extraction_service=extraction_service)
+
+    with session_factory() as session:
+        saved_user = session.query(User).filter_by(telegram_user_id=1009).one()
+        saved_entry = session.query(Entry).filter_by(user_id=saved_user.id).one()
+        saved_items = session.query(EntryItem).filter_by(entry_id=saved_entry.id).order_by(EntryItem.id).all()
+
+    assert saved_entry.entry_type == EntryType.FOOD
+    assert saved_entry.source_text is None
+    assert saved_entry.extraction_provider == "structured_payload"
+    assert '"entries"' in saved_entry.extraction_raw_payload
+    assert [(item.name, item.source_type) for item in saved_items] == [
+        ("омлет", "extraction_payload"),
+        ("тост", "extraction_payload"),
+    ]
+    message.bot.download.assert_awaited_once()
+    assert message.bot.download.await_args.args[0].file_id == "large"
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("Сохранил:\n- омлет\n- тост",)
+    assert message.answer.await_args.kwargs["reply_markup"] is not None
+
+
+async def test_empty_message_returns_updated_unsupported_text() -> None:
+    session_factory = create_session_factory()
+    message = SimpleNamespace(
+        text=None,
+        caption=None,
+        photo=[],
+        from_user=SimpleNamespace(id=1010, username="empty_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(message, session_factory)
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Пока поддерживаются текстовые сообщения, фото еды и кнопка воды.",
+    )
+
+
+async def test_photo_message_returns_provider_unsupported_error_when_extraction_not_attempted() -> None:
+    session_factory = create_session_factory()
+    extraction_service = SimpleNamespace(extract=lambda _request: None)
+    message = SimpleNamespace(
+        text=None,
+        caption=None,
+        photo=[SimpleNamespace(file_id="large")],
+        from_user=SimpleNamespace(id=1011, username="photo_user"),
+        bot=SimpleNamespace(download=AsyncMock(return_value=BytesIO(b"image-bytes"))),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(message, session_factory, extraction_service=extraction_service)
+
+    with session_factory() as session:
+        entries_count = session.query(Entry).count()
+
+    assert entries_count == 0
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Текущий extraction provider не смог обработать фото.",
+    )

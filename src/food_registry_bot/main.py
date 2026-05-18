@@ -3,6 +3,7 @@ import asyncio
 from food_registry_bot.bot.factory import create_bot, create_dispatcher
 from food_registry_bot.config import get_settings
 from food_registry_bot.db.session import create_session_factory
+from food_registry_bot.extraction.factory import create_extraction_service
 
 
 async def run() -> None:
@@ -11,7 +12,10 @@ async def run() -> None:
         raise RuntimeError("BOT_TOKEN is not configured")
 
     bot = create_bot(settings.bot_token)
-    dispatcher = create_dispatcher(create_session_factory())
+    dispatcher = create_dispatcher(
+        create_session_factory(),
+        extraction_service=create_extraction_service(settings),
+    )
     await dispatcher.start_polling(bot)
 
 

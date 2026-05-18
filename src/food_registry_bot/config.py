@@ -6,6 +6,7 @@ from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import enum
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SECRETS_DIR = PROJECT_ROOT.parent / f"{PROJECT_ROOT.name}_local"
@@ -24,6 +25,11 @@ def get_secrets_env_file() -> Path:
     return SECRETS_ENV_FILE
 
 
+class ExtractionProvider(str, enum.Enum):
+    STRUCTURED_PAYLOAD = "structured_payload"
+    LLM = "llm"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=SECRETS_ENV_FILE,
@@ -33,6 +39,12 @@ class Settings(BaseSettings):
 
     app_env: str = "local"
     bot_token: Optional[str] = Field(default=None, alias="BOT_TOKEN")
+    extraction_provider: ExtractionProvider = Field(
+        default=ExtractionProvider.STRUCTURED_PAYLOAD,
+        alias="EXTRACTION_PROVIDER",
+    )
+    llm_model: str = Field(default="gpt-5-mini", alias="LLM_MODEL")
+    openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
 
     postgres_host: str = Field(default="localhost", alias="POSTGRES_HOST")
     postgres_port: int = Field(default=5432, alias="POSTGRES_PORT")

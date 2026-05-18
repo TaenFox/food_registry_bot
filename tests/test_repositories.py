@@ -44,6 +44,25 @@ def test_entry_repository_creates_entry_for_user() -> None:
     assert entry.source_text == "яблоко"
 
 
+def test_entry_repository_persists_extraction_trace() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=252, username="trace")
+
+    entry = EntryRepository(session).create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+        extraction_provider="openai_responses",
+        extraction_model="gpt-5-mini",
+        extraction_raw_payload='{"entries":[{"type":"food","items":[{"name":"яблоко"}]}]}',
+        items=[EntryItemCreate(name="яблоко")],
+    )
+
+    assert entry.extraction_provider == "openai_responses"
+    assert entry.extraction_model == "gpt-5-mini"
+    assert entry.extraction_raw_payload == '{"entries":[{"type":"food","items":[{"name":"яблоко"}]}]}'
+
+
 def test_entry_repository_creates_water_entry() -> None:
     session = create_test_session()
     user = UserRepository(session).create(telegram_user_id=303, username="water")

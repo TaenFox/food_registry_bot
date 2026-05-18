@@ -60,6 +60,9 @@ class Entry(Base):
         Enum(MealType, name="meal_type", values_callable=enum_values)
     )
     source_text: Mapped[Optional[str]] = mapped_column(Text)
+    extraction_provider: Mapped[Optional[str]] = mapped_column(String(64))
+    extraction_model: Mapped[Optional[str]] = mapped_column(String(128))
+    extraction_raw_payload: Mapped[Optional[str]] = mapped_column(Text)
     llm_comment: Mapped[Optional[str]] = mapped_column(Text)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(
