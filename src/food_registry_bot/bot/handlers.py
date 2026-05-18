@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from aiogram import Router
 from aiogram import F
 from aiogram.filters import Command
 from aiogram.types import Message
+from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT, build_main_keyboard
+from food_registry_bot.bot.payloads import NormalizedJournalPayload
 from food_registry_bot.db.models import EntryType
 from food_registry_bot.db.repositories import EntryItemCreate, EntryRepository, UserRepository
 from food_registry_bot.db.session import session_scope
@@ -26,6 +29,30 @@ def ensure_user_registered(message: Message, session: Session) -> tuple[bool, in
         username=telegram_user.username,
     )
     return created, user.id
+
+
+def parse_normalized_journal_payload(message_text: str) -> NormalizedJournalPayload | None:
+    stripped_text = message_text.strip()
+    if not stripped_text.startswith("{"):
+        return None
+
+    return NormalizedJournalPayload.model_validate_json(stripped_text)
+
+
+def format_saved_item_line(name: str, quantity: int | None, unit: str | None) -> str:
+    if quantity is None:
+        return f"- {name}"
+    if unit is None:
+        return f"- {name}: {quantity}"
+    return f"- {name}: {quantity} {unit}"
+
+
+def build_normalized_payload_confirmation(payload: NormalizedJournalPayload) -> str:
+    lines = [f"Сохранил {len(payload.entries)} записей из JSON:"]
+    for entry in payload.entries:
+        for item in entry.items:
+            lines.append(format_saved_item_line(item.name, item.quantity, item.unit))
+    return "\n".join(lines)
 
 
 @router.message(Command("start"))
@@ -76,17 +103,49 @@ async def handle_message(message: Message, session_factory: sessionmaker[Session
         )
         return
 
+    try:
+        normalized_payload = parse_normalized_journal_payload(source_text)
+    except (ValidationError, json.JSONDecodeError):
+        await message.answer(
+            "Не удалось разобрать JSON. Ожидаю объект вида {'entries': [...]} с type и items.",
+            reply_markup=build_main_keyboard(),
+        )
+        return
+
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
-        EntryRepository(session).create(
-            user_id=user_id,
-            entry_type=EntryType.FOOD,
-            occurred_at=datetime.now(timezone.utc),
-            source_text=source_text,
-            items=[EntryItemCreate(name=source_text)],
-        )
 
-    await message.answer(
-        "Запись сохранена как еда.",
-        reply_markup=build_main_keyboard(),
-    )
+        if normalized_payload is not None:
+            for normalized_entry in normalized_payload.entries:
+                EntryRepository(session).create(
+                    user_id=user_id,
+                    entry_type=normalized_entry.type,
+                    occurred_at=normalized_entry.occurred_at or datetime.now(timezone.utc),
+                    source_text=None,
+                    items=[
+                        EntryItemCreate(
+                            name=item.name,
+                            quantity=item.quantity,
+                            unit=item.unit,
+                            source_type="normalized_json",
+                        )
+                        for item in normalized_entry.items
+                    ],
+                )
+        else:
+            EntryRepository(session).create(
+                user_id=user_id,
+                entry_type=EntryType.FOOD,
+                occurred_at=datetime.now(timezone.utc),
+                source_text=source_text,
+                items=[EntryItemCreate(name=source_text)],
+            )
+
+    if normalized_payload is not None:
+        await message.answer(
+            build_normalized_payload_confirmation(normalized_payload),
+            reply_markup=build_main_keyboard(),
+        )
+        return
+
+    await message.answer("Запись сохранена как еда.", reply_markup=build_main_keyboard())

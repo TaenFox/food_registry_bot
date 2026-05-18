@@ -85,6 +85,65 @@ async def test_first_regular_message_creates_user_and_food_entry() -> None:
     assert message.answer.await_args.kwargs["reply_markup"] is not None
 
 
+async def test_json_message_creates_food_and_water_entries() -> None:
+    session_factory = create_session_factory()
+    message = SimpleNamespace(
+        text=(
+            '{"entries": ['
+            '{"type": "food", "items": [{"name": "гречка", "quantity": 200, "unit": "g"}]}, '
+            '{"type": "water", "items": [{"name": "water", "quantity": 250, "unit": "ml"}]}'
+            "]}"
+        ),
+        from_user=SimpleNamespace(id=1005, username="json_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(message, session_factory)
+
+    with session_factory() as session:
+        saved_user = session.query(User).filter_by(telegram_user_id=1005).one()
+        saved_entries = session.query(Entry).filter_by(user_id=saved_user.id).order_by(Entry.id).all()
+        saved_items = session.query(EntryItem).order_by(EntryItem.id).all()
+
+    assert [entry.entry_type for entry in saved_entries] == [EntryType.FOOD, EntryType.WATER]
+    assert saved_entries[0].source_text is None
+    assert saved_entries[1].source_text is None
+    assert saved_items[0].name == "гречка"
+    assert saved_items[0].quantity == 200
+    assert saved_items[0].unit == "g"
+    assert saved_items[0].source_type == "normalized_json"
+    assert saved_items[1].name == "water"
+    assert saved_items[1].quantity == 250
+    assert saved_items[1].unit == "ml"
+    assert saved_items[1].source_type == "normalized_json"
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Сохранил 2 записей из JSON:\n- гречка: 200 g\n- water: 250 ml",
+    )
+    assert message.answer.await_args.kwargs["reply_markup"] is not None
+
+
+async def test_invalid_json_message_returns_validation_error() -> None:
+    session_factory = create_session_factory()
+    message = SimpleNamespace(
+        text='{"entries": [{"type": "food"}]}',
+        from_user=SimpleNamespace(id=1006, username="bad_json_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(message, session_factory)
+
+    with session_factory() as session:
+        entries_count = session.query(Entry).count()
+
+    assert entries_count == 0
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Не удалось разобрать JSON. Ожидаю объект вида {'entries': [...]} с type и items.",
+    )
+    assert message.answer.await_args.kwargs["reply_markup"] is not None
+
+
 async def test_water_button_creates_water_entry() -> None:
     session_factory = create_session_factory()
     message = SimpleNamespace(
