@@ -55,6 +55,23 @@ def build_normalized_payload_confirmation(payload: NormalizedJournalPayload) -> 
     return "\n".join(lines)
 
 
+def build_recent_entries_response(entries: list) -> str:
+    if not entries:
+        return "Пока нет сохранённых записей."
+
+    lines = ["Последние записи:"]
+    for entry in entries:
+        item_texts = [
+            format_saved_item_line(item.name, item.quantity, item.unit).removeprefix("- ")
+            for item in sorted(entry.items, key=lambda current: current.position)
+        ]
+        if item_texts:
+            lines.append("- " + ", ".join(item_texts))
+        else:
+            lines.append("- запись без позиций")
+    return "\n".join(lines)
+
+
 @router.message(Command("start"))
 async def handle_start(message: Message, session_factory: sessionmaker[Session]) -> None:
     with session_scope(session_factory) as session:
@@ -76,6 +93,15 @@ async def handle_start(message: Message, session_factory: sessionmaker[Session])
 @router.message(Command("health"))
 async def handle_health(message: Message) -> None:
     await message.answer("ok")
+
+
+@router.message(Command("recent"))
+async def handle_recent(message: Message, session_factory: sessionmaker[Session]) -> None:
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        entries = EntryRepository(session).list_recent_for_user(user_id=user_id, limit=5)
+
+    await message.answer(build_recent_entries_response(entries), reply_markup=build_main_keyboard())
 
 
 @router.message(F.text == WATER_250_ML_BUTTON_TEXT)

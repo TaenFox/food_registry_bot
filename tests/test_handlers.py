@@ -1,10 +1,11 @@
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from food_registry_bot.bot.handlers import handle_message, handle_start, handle_water_250_ml
+from food_registry_bot.bot.handlers import handle_message, handle_recent, handle_start, handle_water_250_ml
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT
 from food_registry_bot.db.base import Base
 from food_registry_bot.db.models import Entry, EntryItem, EntryType, User
@@ -141,6 +142,50 @@ async def test_invalid_json_message_returns_validation_error() -> None:
     assert message.answer.await_args.args == (
         "Не удалось разобрать JSON. Ожидаю объект вида {'entries': [...]} с type и items.",
     )
+    assert message.answer.await_args.kwargs["reply_markup"] is not None
+
+
+async def test_recent_returns_latest_entries_for_user() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        user = User(telegram_user_id=1007, username="recent_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        first_entry = Entry(user_id=user.id, entry_type=EntryType.FOOD, source_text="яблоко", occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc))
+        second_entry = Entry(user_id=user.id, entry_type=EntryType.WATER, source_text="250 мл", occurred_at=datetime(2026, 5, 18, 11, 0, tzinfo=timezone.utc))
+        session.add_all([first_entry, second_entry])
+        session.flush()
+
+        session.add(EntryItem(entry_id=first_entry.id, position=0, name="яблоко"))
+        session.add(EntryItem(entry_id=second_entry.id, position=0, name="water", quantity=250, unit="ml"))
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=1007, username="recent_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent(message, session_factory)
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Последние записи:\n- water: 250 ml\n- яблоко",
+    )
+    assert message.answer.await_args.kwargs["reply_markup"] is not None
+
+
+async def test_recent_returns_empty_state_when_no_entries_exist() -> None:
+    session_factory = create_session_factory()
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=1008, username="empty_recent_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent(message, session_factory)
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("Пока нет сохранённых записей.",)
     assert message.answer.await_args.kwargs["reply_markup"] is not None
 
 

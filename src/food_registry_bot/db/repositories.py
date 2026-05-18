@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from food_registry_bot.db.models import Entry, EntryItem, EntryType, MealType, User
 
@@ -103,3 +103,13 @@ class EntryRepository:
 
         self._session.flush()
         return entry
+
+    def list_recent_for_user(self, *, user_id: int, limit: int = 5) -> list[Entry]:
+        statement = (
+            select(Entry)
+            .where(Entry.user_id == user_id)
+            .options(selectinload(Entry.items))
+            .order_by(Entry.occurred_at.desc(), Entry.id.desc())
+            .limit(limit)
+        )
+        return list(self._session.scalars(statement))

@@ -65,3 +65,28 @@ def test_entry_repository_creates_water_entry() -> None:
     assert item.name == "water"
     assert item.quantity == 250
     assert item.unit == "ml"
+
+
+def test_entry_repository_lists_recent_entries_in_descending_order() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=404, username="recent")
+    repository = EntryRepository(session)
+
+    older_entry = repository.create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        source_text="яблоко",
+        items=[EntryItemCreate(name="яблоко")],
+    )
+    newer_entry = repository.create(
+        user_id=user.id,
+        entry_type=EntryType.WATER,
+        occurred_at=datetime(2026, 5, 18, 11, 0, tzinfo=timezone.utc),
+        source_text="250 мл",
+        items=[EntryItemCreate(name="water", quantity=250, unit="ml")],
+    )
+
+    recent_entries = repository.list_recent_for_user(user_id=user.id, limit=5)
+
+    assert [entry.id for entry in recent_entries] == [newer_entry.id, older_entry.id]
