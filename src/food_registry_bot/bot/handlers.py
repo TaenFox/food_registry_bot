@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import BytesIO
 from datetime import datetime, timezone
 
 from aiogram import Router
@@ -13,8 +14,10 @@ from food_registry_bot.db.models import EntryType
 from food_registry_bot.db.repositories import EntryItemCreate, EntryRepository, UserRepository
 from food_registry_bot.db.session import session_scope
 from food_registry_bot.extraction import (
+    ExtractionImageInput,
     InvalidExtractionPayload,
     JournalExtractionService,
+    JournalExtractionRequest,
     StructuredPayloadExtractionService,
     ValidExtractionPayload,
 )
@@ -91,6 +94,23 @@ def build_recent_entries_response(entries: list) -> str:
     return "\n".join(lines)
 
 
+async def build_extraction_request(message: Message) -> JournalExtractionRequest | None:
+    message_text = getattr(message, "text", None) or getattr(message, "caption", None)
+    photo_sizes = getattr(message, "photo", None) or []
+    if photo_sizes:
+        photo_buffer = BytesIO()
+        await message.bot.download(photo_sizes[-1], destination=photo_buffer)
+        return JournalExtractionRequest(
+            text=message_text,
+            images=(ExtractionImageInput(data=photo_buffer.getvalue(), media_type="image/jpeg"),),
+        )
+
+    if message_text and message_text.strip():
+        return JournalExtractionRequest(text=message_text)
+
+    return None
+
+
 @router.message(Command("start"))
 async def handle_start(message: Message, session_factory: sessionmaker[Session]) -> None:
     with session_scope(session_factory) as session:
@@ -145,19 +165,26 @@ async def handle_message(
     session_factory: sessionmaker[Session],
     extraction_service: JournalExtractionService = default_extraction_service,
 ) -> None:
-    source_text = (message.text or "").strip()
-    if not source_text:
+    extraction_request = await build_extraction_request(message)
+    if extraction_request is None:
         await message.answer(
-            "Пока поддерживаются текстовые сообщения и кнопка воды.",
+            "Пока поддерживаются текстовые сообщения, фото еды и кнопка воды.",
             reply_markup=build_main_keyboard(),
         )
         return
 
-    extraction_result = extraction_service.extract_from_text(source_text)
+    extraction_result = extraction_service.extract(extraction_request)
 
     if isinstance(extraction_result, InvalidExtractionPayload):
         await message.answer(
             extraction_result.message,
+            reply_markup=build_main_keyboard(),
+        )
+        return
+
+    if extraction_result is None and extraction_request.images:
+        await message.answer(
+            "Текущий extraction provider не смог обработать фото.",
             reply_markup=build_main_keyboard(),
         )
         return
@@ -183,12 +210,12 @@ async def handle_message(
                     ],
                 )
         else:
-            saved_items = [EntryItemCreate(name=source_text)]
+            saved_items = [EntryItemCreate(name=extraction_request.text)]
             EntryRepository(session).create(
                 user_id=user_id,
                 entry_type=EntryType.FOOD,
                 occurred_at=datetime.now(timezone.utc),
-                source_text=source_text,
+                source_text=extraction_request.text,
                 items=saved_items,
             )
 

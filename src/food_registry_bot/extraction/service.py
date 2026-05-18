@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from food_registry_bot.extraction.contract import ExtractedJournalPayload
 from food_registry_bot.extraction.llm_client import LLMExtractionClient, LLMExtractionClientError
+from food_registry_bot.extraction.request import JournalExtractionRequest
 
 
 @dataclass(frozen=True)
@@ -21,17 +22,23 @@ class InvalidExtractionPayload:
 
 
 class JournalExtractionService(Protocol):
-    def extract_from_text(
-        self, message_text: str
+    def extract(
+        self, request: JournalExtractionRequest
     ) -> ValidExtractionPayload | InvalidExtractionPayload | None:
         """Extract a structured journal payload or return None when extraction is not attempted."""
 
 
 class StructuredPayloadExtractionService:
-    def extract_from_text(
-        self, message_text: str
+    def extract(
+        self, request: JournalExtractionRequest
     ) -> ValidExtractionPayload | InvalidExtractionPayload | None:
-        stripped_text = message_text.strip()
+        if request.images:
+            return None
+
+        if request.text is None:
+            return None
+
+        stripped_text = request.text.strip()
         if not stripped_text.startswith("{"):
             return None
 
@@ -52,11 +59,11 @@ class LLMExtractionService:
     def __init__(self, client: LLMExtractionClient) -> None:
         self._client = client
 
-    def extract_from_text(
-        self, message_text: str
+    def extract(
+        self, request: JournalExtractionRequest
     ) -> ValidExtractionPayload | InvalidExtractionPayload | None:
         try:
-            raw_payload = self._client.extract_journal_payload(message_text)
+            raw_payload = self._client.extract_journal_payload(request)
         except LLMExtractionClientError:
             return InvalidExtractionPayload(
                 message="Не удалось получить structured payload от LLM."

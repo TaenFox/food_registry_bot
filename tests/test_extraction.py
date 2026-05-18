@@ -4,7 +4,9 @@ import pytest
 
 from food_registry_bot.config import ExtractionProvider, Settings
 from food_registry_bot.extraction import (
+    ExtractionImageInput,
     InvalidExtractionPayload,
+    JournalExtractionRequest,
     LLMExtractionClientError,
     LLMExtractionService,
     OpenAIResponsesExtractionClient,
@@ -17,7 +19,7 @@ from food_registry_bot.extraction import (
 def test_structured_payload_service_returns_none_for_plain_text() -> None:
     service = StructuredPayloadExtractionService()
 
-    result = service.extract_from_text("гречка с курицей")
+    result = service.extract(JournalExtractionRequest(text="гречка с курицей"))
 
     assert result is None
 
@@ -25,11 +27,15 @@ def test_structured_payload_service_returns_none_for_plain_text() -> None:
 def test_structured_payload_service_parses_multiple_entries() -> None:
     service = StructuredPayloadExtractionService()
 
-    result = service.extract_from_text(
-        '{"entries": ['
-        '{"type": "food", "items": [{"name": "гречка", "quantity": 200, "unit": "г"}]}, '
-        '{"type": "water", "items": [{"name": "вода", "quantity": 250, "unit": "мл"}]}'
-        "]}"
+    result = service.extract(
+        JournalExtractionRequest(
+            text=(
+                '{"entries": ['
+                '{"type": "food", "items": [{"name": "гречка", "quantity": 200, "unit": "г"}]}, '
+                '{"type": "water", "items": [{"name": "вода", "quantity": 250, "unit": "мл"}]}'
+                "]}"
+            )
+        )
     )
 
     assert isinstance(result, ValidExtractionPayload)
@@ -42,44 +48,58 @@ def test_structured_payload_service_parses_multiple_entries() -> None:
 def test_structured_payload_service_rejects_unit_without_quantity() -> None:
     service = StructuredPayloadExtractionService()
 
-    result = service.extract_from_text(
-        '{"entries": [{"type": "food", "items": [{"name": "гречка", "unit": "г"}]}]}'
+    result = service.extract(
+        JournalExtractionRequest(
+            text='{"entries": [{"type": "food", "items": [{"name": "гречка", "unit": "г"}]}]}'
+        )
     )
 
     assert isinstance(result, InvalidExtractionPayload)
 
 
+def test_structured_payload_service_returns_none_for_photo_request() -> None:
+    service = StructuredPayloadExtractionService()
+
+    result = service.extract(
+        JournalExtractionRequest(
+            images=(ExtractionImageInput(data=b"image-bytes", media_type="image/jpeg"),)
+        )
+    )
+
+    assert result is None
+
+
 def test_llm_extraction_service_validates_client_response() -> None:
     client = SimpleNamespace(
-        extract_journal_payload=lambda _message_text: (
+        extract_journal_payload=lambda _request: (
             '{"entries": [{"type": "food", "items": [{"name": "гречка"}]}]}'
         )
     )
     service = LLMExtractionService(client=client)
 
-    result = service.extract_from_text("съел гречку")
+    result = service.extract(JournalExtractionRequest(text="съел гречку"))
 
     assert isinstance(result, ValidExtractionPayload)
     assert result.payload.entries[0].items[0].name == "гречка"
 
 
 def test_llm_extraction_service_rejects_invalid_client_response() -> None:
-    client = SimpleNamespace(extract_journal_payload=lambda _message_text: '{"entries": []}')
+    client = SimpleNamespace(extract_journal_payload=lambda _request: '{"entries": []}')
     service = LLMExtractionService(client=client)
 
-    result = service.extract_from_text("съел гречку")
+    result = service.extract(JournalExtractionRequest(text="съел гречку"))
 
     assert isinstance(result, InvalidExtractionPayload)
 
 
 def test_llm_extraction_service_handles_client_errors() -> None:
-    def raise_client_error(_message_text: str) -> str:
+    def raise_client_error(_request: JournalExtractionRequest) -> str:
         raise LLMExtractionClientError("boom")
 
     client = SimpleNamespace(extract_journal_payload=raise_client_error)
     service = LLMExtractionService(client=client)
 
-    result = service.extract_from_text("съел гречку")
+    result = service.extract(JournalExtractionRequest(text="съел гречку"))
 
     assert result == InvalidExtractionPayload(
         message="Не удалось получить structured payload от LLM."
@@ -87,7 +107,10 @@ def test_llm_extraction_service_handles_client_errors() -> None:
 
 
 def test_factory_uses_structured_payload_provider_by_default() -> None:
-    settings = Settings()
+    settings = Settings.model_construct(
+        extraction_provider=ExtractionProvider.STRUCTURED_PAYLOAD,
+        llm_model="gpt-5-mini",
+    )
 
     service = create_extraction_service(settings)
 
@@ -111,7 +134,7 @@ def test_factory_builds_llm_service_when_client_provided() -> None:
         llm_model="gpt-5-mini",
     )
     client = SimpleNamespace(
-        extract_journal_payload=lambda _message_text: (
+        extract_journal_payload=lambda _request: (
             '{"entries": [{"type": "water", "items": [{"name": "вода", "quantity": 250, "unit": "мл"}]}]}'
         )
     )
@@ -135,7 +158,7 @@ def test_openai_client_returns_output_text_from_sdk_response() -> None:
         client=sdk_client,
     )
 
-    result = client.extract_journal_payload("съел гречку")
+    result = client.extract_journal_payload(JournalExtractionRequest(text="съел гречку"))
 
     assert '"entries"' in result
 
@@ -151,4 +174,34 @@ def test_openai_client_raises_on_empty_sdk_output() -> None:
     )
 
     with pytest.raises(LLMExtractionClientError, match="empty extraction response"):
-        client.extract_journal_payload("съел гречку")
+        client.extract_journal_payload(JournalExtractionRequest(text="съел гречку"))
+
+
+def test_openai_client_builds_multimodal_input() -> None:
+    calls: list[dict] = []
+
+    def create_response(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(output_text='{"entries": [{"type": "food", "items": [{"name": "омлет"}]}]}')
+
+    sdk_client = SimpleNamespace(responses=SimpleNamespace(create=create_response))
+    client = OpenAIResponsesExtractionClient(
+        api_key="test-key",
+        model="gpt-5-mini",
+        client=sdk_client,
+    )
+
+    client.extract_journal_payload(
+        JournalExtractionRequest(
+            text="омлет на фото",
+            images=(ExtractionImageInput(data=b"image-bytes", media_type="image/jpeg"),),
+        )
+    )
+
+    content = calls[0]["input"][0]["content"]
+    assert calls[0]["instructions"]
+    assert content[0]["type"] == "input_text"
+    assert "json" in content[0]["text"]
+    assert content[1] == {"type": "input_text", "text": "омлет на фото"}
+    assert content[2]["type"] == "input_image"
+    assert content[2]["image_url"].startswith("data:image/jpeg;base64,")

@@ -234,6 +234,12 @@ LLM в проекте не сводится только к классифика
 
 Если включён `EXTRACTION_PROVIDER=llm`, приложение использует `OPENAI_API_KEY` и `LLM_MODEL` для создания OpenAI adapter. Сам Telegram handler при этом не меняется: он по-прежнему работает только с extraction service boundary.
 
+На текущем этапе direct LLM extraction поддерживает:
+
+- text-only сообщения;
+- одно фото еды с опциональным caption;
+- тот же `entries` extraction contract на выходе, что и для structured payload режима.
+
 ## Документация
 
 - `README.md` описывает проект на верхнем уровне;
