@@ -42,3 +42,19 @@ def test_entry_repository_creates_entry_for_user() -> None:
     assert entry.user_id == user.id
     assert entry.entry_type == EntryType.FOOD
     assert entry.source_text == "яблоко"
+
+
+def test_entry_repository_creates_water_entry() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=303, username="water")
+
+    entry = EntryRepository(session).create(
+        user_id=user.id,
+        entry_type=EntryType.WATER,
+        occurred_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+        source_text="250 мл",
+    )
+
+    assert entry.user_id == user.id
+    assert entry.entry_type == EntryType.WATER
+    assert entry.source_text == "250 мл"
