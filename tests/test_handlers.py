@@ -91,8 +91,8 @@ async def test_json_message_creates_food_and_water_entries() -> None:
     message = SimpleNamespace(
         text=(
             '{"entries": ['
-            '{"type": "food", "items": [{"name": "гречка", "quantity": 200, "unit": "g"}]}, '
-            '{"type": "water", "items": [{"name": "water", "quantity": 250, "unit": "ml"}]}'
+            '{"type": "food", "items": [{"name": "гречка", "quantity": 200, "unit": "г"}]}, '
+            '{"type": "water", "items": [{"name": "вода", "quantity": 250, "unit": "мл"}]}'
             "]}"
         ),
         from_user=SimpleNamespace(id=1005, username="json_user"),
@@ -119,7 +119,7 @@ async def test_json_message_creates_food_and_water_entries() -> None:
     assert saved_items[1].source_type == "normalized_json"
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сохранил 2 записей из JSON:\n- гречка: 200 g\n- water: 250 ml",
+        "Сохранил 2 записей из JSON:\n- гречка: 200 г\n- вода: 250 мл",
     )
     assert message.answer.await_args.kwargs["reply_markup"] is not None
 
@@ -170,7 +170,7 @@ async def test_recent_returns_latest_entries_for_user() -> None:
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Последние записи:\n- water: 250 ml\n- яблоко",
+        "Последние записи:\n- вода: 250 мл\n- яблоко",
     )
     assert message.answer.await_args.kwargs["reply_markup"] is not None
 

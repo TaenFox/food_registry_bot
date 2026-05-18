@@ -39,12 +39,28 @@ def parse_normalized_journal_payload(message_text: str) -> NormalizedJournalPayl
     return NormalizedJournalPayload.model_validate_json(stripped_text)
 
 
+def present_item_name(name: str) -> str:
+    if name == "water":
+        return "вода"
+    return name
+
+
+def present_unit(unit: str | None) -> str | None:
+    if unit == "ml":
+        return "мл"
+    if unit == "g":
+        return "г"
+    return unit
+
+
 def format_saved_item_line(name: str, quantity: int | None, unit: str | None) -> str:
+    presented_name = present_item_name(name)
+    presented_unit = present_unit(unit)
     if quantity is None:
-        return f"- {name}"
-    if unit is None:
-        return f"- {name}: {quantity}"
-    return f"- {name}: {quantity} {unit}"
+        return f"- {presented_name}"
+    if presented_unit is None:
+        return f"- {presented_name}: {quantity}"
+    return f"- {presented_name}: {quantity} {presented_unit}"
 
 
 def build_normalized_payload_confirmation(payload: NormalizedJournalPayload) -> str:
