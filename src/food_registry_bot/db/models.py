@@ -10,6 +10,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from food_registry_bot.db.base import Base
 
 
+def enum_values(enum_cls: type[enum.Enum]) -> list[str]:
+    return [member.value for member in enum_cls]
+
+
 class EntryType(str, enum.Enum):
     FOOD = "food"
     WATER = "water"
@@ -49,8 +53,12 @@ class Entry(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    entry_type: Mapped[EntryType] = mapped_column(Enum(EntryType, name="entry_type"))
-    meal_type: Mapped[Optional[MealType]] = mapped_column(Enum(MealType, name="meal_type"))
+    entry_type: Mapped[EntryType] = mapped_column(
+        Enum(EntryType, name="entry_type", values_callable=enum_values)
+    )
+    meal_type: Mapped[Optional[MealType]] = mapped_column(
+        Enum(MealType, name="meal_type", values_callable=enum_values)
+    )
     source_text: Mapped[Optional[str]] = mapped_column(Text)
     llm_comment: Mapped[Optional[str]] = mapped_column(Text)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
