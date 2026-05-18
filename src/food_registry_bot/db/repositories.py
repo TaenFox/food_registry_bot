@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -16,7 +16,8 @@ from food_registry_bot.db.models import (
     SupportedMetric,
     User,
 )
-from food_registry_bot.nutrition import PreparedNutritionRequest, ResolvedNutritionEstimate
+if TYPE_CHECKING:
+    from food_registry_bot.nutrition.journal_adapter import PreparedNutritionRequest, ResolvedNutritionEstimate
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,18 @@ class EntryRepository:
             .options(selectinload(Entry.items))
             .order_by(Entry.occurred_at.desc(), Entry.id.desc())
             .limit(limit)
+        )
+        return list(self._session.scalars(statement))
+
+    def list_by_ids(self, *, entry_ids: list[int]) -> list[Entry]:
+        if not entry_ids:
+            return []
+
+        statement = (
+            select(Entry)
+            .where(Entry.id.in_(entry_ids))
+            .options(selectinload(Entry.items))
+            .order_by(Entry.id.asc())
         )
         return list(self._session.scalars(statement))
 

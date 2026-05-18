@@ -24,6 +24,12 @@ from food_registry_bot.nutrition.service import (
     StaticNutritionEstimationService,
     ValidNutritionPayload,
 )
+from food_registry_bot.nutrition.use_cases import (
+    FailedNutritionEstimation,
+    SkippedNutritionEstimation,
+    StoredEntryNutritionEstimationUseCase,
+    SuccessfulNutritionEstimation,
+)
 
 __all__ = [
     "InvalidNutritionPayload",
@@ -41,7 +47,11 @@ __all__ = [
     "OpenAIResponsesNutritionClient",
     "PreparedNutritionRequest",
     "ResolvedNutritionEstimate",
+    "FailedNutritionEstimation",
+    "SkippedNutritionEstimation",
     "StaticNutritionEstimationService",
+    "StoredEntryNutritionEstimationUseCase",
+    "SuccessfulNutritionEstimation",
     "ValidNutritionPayload",
     "create_nutrition_service",
     "prepare_nutrition_request_from_entries",
