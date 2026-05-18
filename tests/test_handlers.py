@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from food_registry_bot.bot.handlers import handle_message, handle_start, handle_water_250_ml
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT
 from food_registry_bot.db.base import Base
-from food_registry_bot.db.models import Entry, EntryType, User
+from food_registry_bot.db.models import Entry, EntryItem, EntryType, User
 
 
 def create_session_factory() -> sessionmaker[Session]:
@@ -69,9 +69,13 @@ async def test_water_button_creates_water_entry() -> None:
     with session_factory() as session:
         saved_user = session.query(User).filter_by(telegram_user_id=1003).one()
         saved_entry = session.query(Entry).filter_by(user_id=saved_user.id).one()
+        saved_item = session.query(EntryItem).filter_by(entry_id=saved_entry.id).one()
 
     assert saved_entry.entry_type == EntryType.WATER
     assert saved_entry.source_text == "250 мл"
+    assert saved_item.name == "water"
+    assert saved_item.quantity == 250
+    assert saved_item.unit == "ml"
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == ("Записал воду: 250 мл.",)
     assert message.answer.await_args.kwargs["reply_markup"] is not None

@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 from datetime import datetime
+from dataclasses import dataclass
 from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from food_registry_bot.db.models import Entry, EntryType, MealType, User
+from food_registry_bot.db.models import Entry, EntryItem, EntryType, MealType, User
+
+
+@dataclass(frozen=True)
+class EntryItemCreate:
+    name: str
+    quantity: int | None = None
+    unit: str | None = None
+    confidence: str | None = None
+    source_type: str | None = None
 
 
 class UserRepository:
@@ -65,6 +75,7 @@ class EntryRepository:
         meal_type: MealType | None = None,
         source_text: str | None = None,
         llm_comment: str | None = None,
+        items: list[EntryItemCreate] | None = None,
     ) -> Entry:
         entry = Entry(
             user_id=user_id,
@@ -75,5 +86,20 @@ class EntryRepository:
             occurred_at=occurred_at,
         )
         self._session.add(entry)
+        self._session.flush()
+
+        for position, item in enumerate(items or []):
+            self._session.add(
+                EntryItem(
+                    entry_id=entry.id,
+                    position=position,
+                    name=item.name,
+                    quantity=item.quantity,
+                    unit=item.unit,
+                    confidence=item.confidence,
+                    source_type=item.source_type,
+                )
+            )
+
         self._session.flush()
         return entry

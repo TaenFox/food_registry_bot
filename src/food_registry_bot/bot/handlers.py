@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT, build_main_keyboard
 from food_registry_bot.db.models import EntryType
-from food_registry_bot.db.repositories import EntryRepository, UserRepository
+from food_registry_bot.db.repositories import EntryItemCreate, EntryRepository, UserRepository
 from food_registry_bot.db.session import session_scope
 
 router = Router()
@@ -60,6 +60,7 @@ async def handle_water_250_ml(message: Message, session_factory: sessionmaker[Se
             entry_type=EntryType.WATER,
             occurred_at=datetime.now(timezone.utc),
             source_text="250 мл",
+            items=[EntryItemCreate(name="water", quantity=250, unit="ml")],
         )
 
     await message.answer("Записал воду: 250 мл.", reply_markup=build_main_keyboard())

@@ -4,8 +4,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.db.base import Base
-from food_registry_bot.db.models import EntryType
-from food_registry_bot.db.repositories import EntryRepository, UserRepository
+from food_registry_bot.db.models import EntryItem, EntryType
+from food_registry_bot.db.repositories import EntryItemCreate, EntryRepository, UserRepository
 
 
 def create_test_session() -> Session:
@@ -53,8 +53,15 @@ def test_entry_repository_creates_water_entry() -> None:
         entry_type=EntryType.WATER,
         occurred_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
         source_text="250 мл",
+        items=[EntryItemCreate(name="water", quantity=250, unit="ml")],
     )
+
+    item = session.query(EntryItem).filter_by(entry_id=entry.id).one()
 
     assert entry.user_id == user.id
     assert entry.entry_type == EntryType.WATER
     assert entry.source_text == "250 мл"
+    assert item.position == 0
+    assert item.name == "water"
+    assert item.quantity == 250
+    assert item.unit == "ml"
