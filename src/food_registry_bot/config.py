@@ -1,15 +1,32 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SECRETS_DIR = PROJECT_ROOT.parent / f"{PROJECT_ROOT.name}_local"
+SECRETS_ENV_FILE = SECRETS_DIR / ".env"
+
+
+def get_project_root() -> Path:
+    return PROJECT_ROOT
+
+
+def get_secrets_dir() -> Path:
+    return SECRETS_DIR
+
+
+def get_secrets_env_file() -> Path:
+    return SECRETS_ENV_FILE
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=SECRETS_ENV_FILE,
         env_file_encoding="utf-8",
         case_sensitive=False,
     )
