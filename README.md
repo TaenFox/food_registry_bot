@@ -230,9 +230,9 @@ LLM в проекте не сводится только к классифика
 Для extraction layer на текущем этапе поддерживаются два режима:
 
 - `EXTRACTION_PROVIDER=structured_payload` - дев-режим, где бот принимает уже нормализованный structured payload;
-- `EXTRACTION_PROVIDER=llm` - режим для прямой LLM-интеграции через отдельный extraction client.
+- `EXTRACTION_PROVIDER=llm` - режим для прямой LLM-интеграции через OpenAI Responses API.
 
-Если включён `EXTRACTION_PROVIDER=llm`, приложение ожидает, что при сборке ему будет передан подключённый LLM client adapter. Сам Telegram handler при этом не меняется: он по-прежнему работает только с extraction service boundary.
+Если включён `EXTRACTION_PROVIDER=llm`, приложение использует `OPENAI_API_KEY` и `LLM_MODEL` для создания OpenAI adapter. Сам Telegram handler при этом не меняется: он по-прежнему работает только с extraction service boundary.
 
 ## Документация
 

@@ -7,7 +7,7 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from food_registry_bot.extraction.contract import ExtractedJournalPayload
-from food_registry_bot.extraction.llm_client import LLMExtractionClient
+from food_registry_bot.extraction.llm_client import LLMExtractionClient, LLMExtractionClientError
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,13 @@ class LLMExtractionService:
     def extract_from_text(
         self, message_text: str
     ) -> ValidExtractionPayload | InvalidExtractionPayload | None:
-        raw_payload = self._client.extract_journal_payload(message_text)
+        try:
+            raw_payload = self._client.extract_journal_payload(message_text)
+        except LLMExtractionClientError:
+            return InvalidExtractionPayload(
+                message="Не удалось получить structured payload от LLM."
+            )
+
         if not raw_payload.strip():
             return InvalidExtractionPayload(
                 message="LLM вернула пустой structured payload для записи журнала."

@@ -4,7 +4,8 @@ from food_registry_bot.extraction.contract import (
     ExtractedJournalPayload,
 )
 from food_registry_bot.extraction.factory import create_extraction_service
-from food_registry_bot.extraction.llm_client import LLMExtractionClient
+from food_registry_bot.extraction.llm_client import LLMExtractionClient, LLMExtractionClientError
+from food_registry_bot.extraction.openai_client import OpenAIResponsesExtractionClient
 from food_registry_bot.extraction.service import (
     InvalidExtractionPayload,
     JournalExtractionService,
@@ -20,7 +21,9 @@ __all__ = [
     "InvalidExtractionPayload",
     "JournalExtractionService",
     "LLMExtractionClient",
+    "LLMExtractionClientError",
     "LLMExtractionService",
+    "OpenAIResponsesExtractionClient",
     "StructuredPayloadExtractionService",
     "ValidExtractionPayload",
     "create_extraction_service",

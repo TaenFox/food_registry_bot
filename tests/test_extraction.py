@@ -5,7 +5,9 @@ import pytest
 from food_registry_bot.config import ExtractionProvider, Settings
 from food_registry_bot.extraction import (
     InvalidExtractionPayload,
+    LLMExtractionClientError,
     LLMExtractionService,
+    OpenAIResponsesExtractionClient,
     StructuredPayloadExtractionService,
     ValidExtractionPayload,
     create_extraction_service,
@@ -70,6 +72,20 @@ def test_llm_extraction_service_rejects_invalid_client_response() -> None:
     assert isinstance(result, InvalidExtractionPayload)
 
 
+def test_llm_extraction_service_handles_client_errors() -> None:
+    def raise_client_error(_message_text: str) -> str:
+        raise LLMExtractionClientError("boom")
+
+    client = SimpleNamespace(extract_journal_payload=raise_client_error)
+    service = LLMExtractionService(client=client)
+
+    result = service.extract_from_text("съел гречку")
+
+    assert result == InvalidExtractionPayload(
+        message="Не удалось получить structured payload от LLM."
+    )
+
+
 def test_factory_uses_structured_payload_provider_by_default() -> None:
     settings = Settings()
 
@@ -78,13 +94,14 @@ def test_factory_uses_structured_payload_provider_by_default() -> None:
     assert isinstance(service, StructuredPayloadExtractionService)
 
 
-def test_factory_requires_llm_client_for_llm_provider() -> None:
+def test_factory_requires_api_key_for_llm_provider() -> None:
     settings = Settings.model_construct(
         extraction_provider=ExtractionProvider.LLM,
         llm_model="gpt-5-mini",
+        openai_api_key=None,
     )
 
-    with pytest.raises(RuntimeError, match="EXTRACTION_PROVIDER=llm"):
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         create_extraction_service(settings)
 
 
@@ -102,3 +119,36 @@ def test_factory_builds_llm_service_when_client_provided() -> None:
     service = create_extraction_service(settings, llm_client=client)
 
     assert isinstance(service, LLMExtractionService)
+
+
+def test_openai_client_returns_output_text_from_sdk_response() -> None:
+    sdk_client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=lambda **_kwargs: SimpleNamespace(
+                output_text='{"entries": [{"type": "food", "items": [{"name": "гречка"}]}]}'
+            )
+        )
+    )
+    client = OpenAIResponsesExtractionClient(
+        api_key="test-key",
+        model="gpt-5-mini",
+        client=sdk_client,
+    )
+
+    result = client.extract_journal_payload("съел гречку")
+
+    assert '"entries"' in result
+
+
+def test_openai_client_raises_on_empty_sdk_output() -> None:
+    sdk_client = SimpleNamespace(
+        responses=SimpleNamespace(create=lambda **_kwargs: SimpleNamespace(output_text=""))
+    )
+    client = OpenAIResponsesExtractionClient(
+        api_key="test-key",
+        model="gpt-5-mini",
+        client=sdk_client,
+    )
+
+    with pytest.raises(LLMExtractionClientError, match="empty extraction response"):
+        client.extract_journal_payload("съел гречку")
