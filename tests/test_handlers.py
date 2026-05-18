@@ -41,6 +41,7 @@ async def test_regular_message_reuses_existing_user() -> None:
         session.commit()
 
     message = SimpleNamespace(
+        text="яблоко",
         from_user=SimpleNamespace(id=1002, username="known_user"),
         answer=AsyncMock(),
     )
@@ -49,10 +50,38 @@ async def test_regular_message_reuses_existing_user() -> None:
 
     with session_factory() as session:
         users_count = session.query(User).filter_by(telegram_user_id=1002).count()
+        saved_entry = session.query(Entry).filter_by(user_id=1).one()
+        saved_item = session.query(EntryItem).filter_by(entry_id=saved_entry.id).one()
 
     assert users_count == 1
+    assert saved_entry.entry_type == EntryType.FOOD
+    assert saved_entry.source_text == "яблоко"
+    assert saved_item.name == "яблоко"
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Сообщение получено. Пока можно добавить воду кнопкой ниже.",)
+    assert message.answer.await_args.args == ("Запись сохранена как еда.",)
+    assert message.answer.await_args.kwargs["reply_markup"] is not None
+
+
+async def test_first_regular_message_creates_user_and_food_entry() -> None:
+    session_factory = create_session_factory()
+    message = SimpleNamespace(
+        text="гречка с курицей",
+        from_user=SimpleNamespace(id=1004, username="food_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(message, session_factory)
+
+    with session_factory() as session:
+        saved_user = session.query(User).filter_by(telegram_user_id=1004).one()
+        saved_entry = session.query(Entry).filter_by(user_id=saved_user.id).one()
+        saved_item = session.query(EntryItem).filter_by(entry_id=saved_entry.id).one()
+
+    assert saved_entry.entry_type == EntryType.FOOD
+    assert saved_entry.source_text == "гречка с курицей"
+    assert saved_item.name == "гречка с курицей"
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("Запись сохранена как еда.",)
     assert message.answer.await_args.kwargs["reply_markup"] is not None
 
 

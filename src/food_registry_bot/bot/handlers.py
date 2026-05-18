@@ -68,17 +68,25 @@ async def handle_water_250_ml(message: Message, session_factory: sessionmaker[Se
 
 @router.message()
 async def handle_message(message: Message, session_factory: sessionmaker[Session]) -> None:
-    with session_scope(session_factory) as session:
-        created, _ = ensure_user_registered(message, session)
-
-    if created:
+    source_text = (message.text or "").strip()
+    if not source_text:
         await message.answer(
-            "Профиль создан. Для первой записи можно нажать кнопку воды.",
+            "Пока поддерживаются текстовые сообщения и кнопка воды.",
             reply_markup=build_main_keyboard(),
         )
         return
 
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        EntryRepository(session).create(
+            user_id=user_id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime.now(timezone.utc),
+            source_text=source_text,
+            items=[EntryItemCreate(name=source_text)],
+        )
+
     await message.answer(
-        "Сообщение получено. Пока можно добавить воду кнопкой ниже.",
+        "Запись сохранена как еда.",
         reply_markup=build_main_keyboard(),
     )
