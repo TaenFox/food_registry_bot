@@ -16,6 +16,9 @@ dependencies = [
     "sqlalchemy>=2.0,<3.0",
 ]
 
+[project.scripts]
+food-registry-bot = "food_registry_bot.main:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3,<9.0",
