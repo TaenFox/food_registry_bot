@@ -3,11 +3,16 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from food_registry_bot.db.models import Entry, EntryItem, EntryType
+from food_registry_bot.extraction import ExtractedJournalEntry, ExtractedJournalItem, ExtractedJournalPayload
 from food_registry_bot.nutrition import (
     InvalidNutritionPayload,
     LLMNutritionEstimationService,
     NutritionEstimationRequest,
     NutritionPayloadClientError,
+    prepare_nutrition_request_from_entries,
+    prepare_nutrition_request_from_extracted_payload,
+    resolve_nutrition_estimates,
     StaticNutritionEstimationService,
     ValidNutritionPayload,
 )
@@ -143,3 +148,103 @@ def test_llm_nutrition_service_handles_client_errors() -> None:
     assert result == InvalidNutritionPayload(
         message="Не удалось получить structured payload от nutrition provider."
     )
+
+
+def test_prepare_nutrition_request_from_extracted_payload_filters_supported_food_items() -> None:
+    payload = ExtractedJournalPayload(
+        entries=[
+            ExtractedJournalEntry(
+                type=EntryType.FOOD,
+                items=[
+                    ExtractedJournalItem(name="гречка", quantity=200, unit="г"),
+                    ExtractedJournalItem(name="омлет"),
+                ],
+            ),
+            ExtractedJournalEntry(
+                type=EntryType.WATER,
+                items=[ExtractedJournalItem(name="вода", quantity=250, unit="мл")],
+            ),
+        ]
+    )
+
+    prepared_request = prepare_nutrition_request_from_extracted_payload(payload)
+
+    assert prepared_request is not None
+    assert [item.client_item_id for item in prepared_request.request.items] == ["entry-0:item-0"]
+    assert prepared_request.request.items[0].name == "гречка"
+    assert prepared_request.request.items[0].quantity == 200
+    assert prepared_request.request.items[0].unit.value == "g"
+
+
+def test_prepare_nutrition_request_from_extracted_payload_returns_none_without_supported_items() -> None:
+    payload = ExtractedJournalPayload(
+        entries=[
+            ExtractedJournalEntry(
+                type=EntryType.FOOD,
+                items=[ExtractedJournalItem(name="омлет")],
+            ),
+            ExtractedJournalEntry(
+                type=EntryType.WATER,
+                items=[ExtractedJournalItem(name="вода", quantity=250, unit="мл")],
+            ),
+        ]
+    )
+
+    assert prepare_nutrition_request_from_extracted_payload(payload) is None
+
+
+def test_prepare_nutrition_request_from_entries_filters_supported_food_items() -> None:
+    entry = Entry(id=42, user_id=1, entry_type=EntryType.FOOD, occurred_at="2026-05-18T10:00:00Z")
+    entry.items = [
+        EntryItem(position=1, name="соус", quantity=30, unit="ml"),
+        EntryItem(position=0, name="курица", quantity=150, unit="g"),
+        EntryItem(position=2, name="омлет", quantity=None, unit=None),
+    ]
+    water_entry = Entry(id=43, user_id=1, entry_type=EntryType.WATER, occurred_at="2026-05-18T10:05:00Z")
+    water_entry.items = [EntryItem(position=0, name="water", quantity=250, unit="ml")]
+
+    prepared_request = prepare_nutrition_request_from_entries([entry, water_entry])
+
+    assert prepared_request is not None
+    assert [item.client_item_id for item in prepared_request.request.items] == [
+        "entry-42:item-0",
+        "entry-42:item-1",
+    ]
+    assert [item.name for item in prepared_request.request.items] == ["курица", "соус"]
+
+
+def test_resolve_nutrition_estimates_returns_results_in_request_order() -> None:
+    prepared_request = prepare_nutrition_request_from_extracted_payload(
+        ExtractedJournalPayload(
+            entries=[
+                ExtractedJournalEntry(
+                    type=EntryType.FOOD,
+                    items=[
+                        ExtractedJournalItem(name="гречка", quantity=200, unit="г"),
+                        ExtractedJournalItem(name="курица", quantity=150, unit="г"),
+                    ],
+                )
+            ]
+        )
+    )
+    assert prepared_request is not None
+
+    service = StaticNutritionEstimationService(
+        raw_payload=(
+            '{"items": ['
+            '{"client_item_id": "entry-0:item-1", "calories": 248, "protein": 46.5, "fat": 5.4, "carbs": 0.0}, '
+            '{"client_item_id": "entry-0:item-0", "calories": 220, "protein": 7.6, "fat": 2.2, "carbs": 42.8}'
+            "]}"
+        )
+    )
+    result = service.estimate(prepared_request.request)
+    assert isinstance(result, ValidNutritionPayload)
+
+    estimates = resolve_nutrition_estimates(prepared_request, result.payload)
+
+    assert [estimate.item_ref.client_item_id for estimate in estimates] == [
+        "entry-0:item-0",
+        "entry-0:item-1",
+    ]
+    assert estimates[0].calories == 220
+    assert estimates[1].protein == 46.5
