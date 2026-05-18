@@ -133,6 +133,7 @@
 - скачивает самое крупное фото из сообщения;
 - передаёт фото и caption в extraction layer;
 - ожидает тот же normalizованный `entries` payload, что и для текстового extraction contract;
+- на текущем шаге просит LLM возвращать `item.name` на русском языке, даже если фото отправлено без caption;
 - для каждого элемента в `entries` создаёт отдельный `entry`;
 - помечает созданные через этот сценарий `entry_items` как `source_type = extraction_payload`.
 

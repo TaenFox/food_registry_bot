@@ -23,6 +23,14 @@ class OpenAIResponsesExtractionClient:
         self._model = model
         self._client = client or self._build_sdk_client(api_key=api_key)
 
+    @property
+    def provider_name(self) -> str:
+        return "openai_responses"
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
     def extract_journal_payload(self, request: JournalExtractionRequest) -> str:
         if not request.text and not request.images:
             raise LLMExtractionClientError("Cannot extract journal payload from empty text")
@@ -97,6 +105,10 @@ class OpenAIResponsesExtractionClient:
             f"{json.dumps(schema, ensure_ascii=False)}. "
             "Use 'food' or 'water' for entry type. "
             "If one message contains both food and water, return separate entries. "
+            "Return item names in Russian. "
+            "If the message or caption is in Russian, keep natural Russian food names. "
+            "If there is no text or caption, still name visible foods in Russian. "
+            "Do not switch item names to English unless the item is a fixed brand or label that should stay unchanged. "
             "If quantity is missing, omit quantity and unit. "
             "If time is not clearly stated, omit occurred_at. "
             "For food photos, extract only what is visible or clearly implied by caption text."

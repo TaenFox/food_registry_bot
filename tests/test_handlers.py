@@ -116,6 +116,9 @@ async def test_json_message_creates_food_and_water_entries() -> None:
     assert [entry.entry_type for entry in saved_entries] == [EntryType.FOOD, EntryType.WATER]
     assert saved_entries[0].source_text is None
     assert saved_entries[1].source_text is None
+    assert saved_entries[0].extraction_provider == "structured_payload"
+    assert saved_entries[0].extraction_model is None
+    assert '"entries"' in saved_entries[0].extraction_raw_payload
     assert saved_items[0].name == "гречка"
     assert saved_items[0].quantity == 200
     assert saved_items[0].unit == "g"
@@ -235,7 +238,10 @@ async def test_photo_message_creates_entries_from_extraction_service() -> None:
                         ],
                     )
                 ]
-            )
+            ),
+            extraction_provider="structured_payload",
+            extraction_model=None,
+            raw_payload='{"entries":[{"type":"food","items":[{"name":"омлет"},{"name":"тост"}]}]}',
         )
     )
     message = SimpleNamespace(
@@ -256,6 +262,8 @@ async def test_photo_message_creates_entries_from_extraction_service() -> None:
 
     assert saved_entry.entry_type == EntryType.FOOD
     assert saved_entry.source_text is None
+    assert saved_entry.extraction_provider == "structured_payload"
+    assert '"entries"' in saved_entry.extraction_raw_payload
     assert [(item.name, item.source_type) for item in saved_items] == [
         ("омлет", "extraction_payload"),
         ("тост", "extraction_payload"),

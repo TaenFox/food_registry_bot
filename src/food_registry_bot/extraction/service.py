@@ -14,6 +14,9 @@ from food_registry_bot.extraction.request import JournalExtractionRequest
 @dataclass(frozen=True)
 class ValidExtractionPayload:
     payload: ExtractedJournalPayload
+    extraction_provider: str
+    extraction_model: str | None
+    raw_payload: str
 
 
 @dataclass(frozen=True)
@@ -52,7 +55,12 @@ class StructuredPayloadExtractionService:
                 )
             )
 
-        return ValidExtractionPayload(payload=payload)
+        return ValidExtractionPayload(
+            payload=payload,
+            extraction_provider="structured_payload",
+            extraction_model=None,
+            raw_payload=stripped_text,
+        )
 
 
 class LLMExtractionService:
@@ -84,4 +92,9 @@ class LLMExtractionService:
                 )
             )
 
-        return ValidExtractionPayload(payload=payload)
+        return ValidExtractionPayload(
+            payload=payload,
+            extraction_provider=self._client.provider_name,
+            extraction_model=self._client.model_name,
+            raw_payload=raw_payload,
+        )

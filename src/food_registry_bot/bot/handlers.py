@@ -199,6 +199,9 @@ async def handle_message(
                     entry_type=extracted_entry.type,
                     occurred_at=extracted_entry.occurred_at or datetime.now(timezone.utc),
                     source_text=None,
+                    extraction_provider=extraction_result.extraction_provider,
+                    extraction_model=extraction_result.extraction_model,
+                    extraction_raw_payload=extraction_result.raw_payload,
                     items=[
                         EntryItemCreate(
                             name=item.name,

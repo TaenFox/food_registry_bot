@@ -74,6 +74,9 @@ class EntryRepository:
         occurred_at: datetime,
         meal_type: MealType | None = None,
         source_text: str | None = None,
+        extraction_provider: str | None = None,
+        extraction_model: str | None = None,
+        extraction_raw_payload: str | None = None,
         llm_comment: str | None = None,
         items: list[EntryItemCreate] | None = None,
     ) -> Entry:
@@ -82,6 +85,9 @@ class EntryRepository:
             entry_type=entry_type,
             meal_type=meal_type,
             source_text=source_text,
+            extraction_provider=extraction_provider,
+            extraction_model=extraction_model,
+            extraction_raw_payload=extraction_raw_payload,
             llm_comment=llm_comment,
             occurred_at=occurred_at,
         )

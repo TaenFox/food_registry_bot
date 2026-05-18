@@ -10,5 +10,13 @@ class LLMExtractionClientError(RuntimeError):
 
 
 class LLMExtractionClient(Protocol):
+    @property
+    def provider_name(self) -> str:
+        ...
+
+    @property
+    def model_name(self) -> str:
+        ...
+
     def extract_journal_payload(self, request: JournalExtractionRequest) -> str:
         """Return a JSON string matching the extraction contract."""

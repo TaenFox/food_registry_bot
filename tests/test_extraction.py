@@ -40,6 +40,9 @@ def test_structured_payload_service_parses_multiple_entries() -> None:
 
     assert isinstance(result, ValidExtractionPayload)
     assert [entry.type.value for entry in result.payload.entries] == ["food", "water"]
+    assert result.extraction_provider == "structured_payload"
+    assert result.extraction_model is None
+    assert '"entries"' in result.raw_payload
     assert result.payload.entries[0].items[0].unit == "g"
     assert result.payload.entries[1].items[0].name == "water"
     assert result.payload.entries[1].items[0].unit == "ml"
@@ -71,6 +74,8 @@ def test_structured_payload_service_returns_none_for_photo_request() -> None:
 
 def test_llm_extraction_service_validates_client_response() -> None:
     client = SimpleNamespace(
+        provider_name="openai_responses",
+        model_name="gpt-5-mini",
         extract_journal_payload=lambda _request: (
             '{"entries": [{"type": "food", "items": [{"name": "гречка"}]}]}'
         )
@@ -80,11 +85,18 @@ def test_llm_extraction_service_validates_client_response() -> None:
     result = service.extract(JournalExtractionRequest(text="съел гречку"))
 
     assert isinstance(result, ValidExtractionPayload)
+    assert result.extraction_provider == "openai_responses"
+    assert result.extraction_model == "gpt-5-mini"
+    assert result.raw_payload == '{"entries": [{"type": "food", "items": [{"name": "гречка"}]}]}'
     assert result.payload.entries[0].items[0].name == "гречка"
 
 
 def test_llm_extraction_service_rejects_invalid_client_response() -> None:
-    client = SimpleNamespace(extract_journal_payload=lambda _request: '{"entries": []}')
+    client = SimpleNamespace(
+        provider_name="openai_responses",
+        model_name="gpt-5-mini",
+        extract_journal_payload=lambda _request: '{"entries": []}',
+    )
     service = LLMExtractionService(client=client)
 
     result = service.extract(JournalExtractionRequest(text="съел гречку"))
@@ -96,7 +108,11 @@ def test_llm_extraction_service_handles_client_errors() -> None:
     def raise_client_error(_request: JournalExtractionRequest) -> str:
         raise LLMExtractionClientError("boom")
 
-    client = SimpleNamespace(extract_journal_payload=raise_client_error)
+    client = SimpleNamespace(
+        provider_name="openai_responses",
+        model_name="gpt-5-mini",
+        extract_journal_payload=raise_client_error,
+    )
     service = LLMExtractionService(client=client)
 
     result = service.extract(JournalExtractionRequest(text="съел гречку"))
@@ -134,6 +150,8 @@ def test_factory_builds_llm_service_when_client_provided() -> None:
         llm_model="gpt-5-mini",
     )
     client = SimpleNamespace(
+        provider_name="openai_responses",
+        model_name="gpt-5-mini",
         extract_journal_payload=lambda _request: (
             '{"entries": [{"type": "water", "items": [{"name": "вода", "quantity": 250, "unit": "мл"}]}]}'
         )
@@ -158,6 +176,8 @@ def test_openai_client_returns_output_text_from_sdk_response() -> None:
         client=sdk_client,
     )
 
+    assert client.provider_name == "openai_responses"
+    assert client.model_name == "gpt-5-mini"
     result = client.extract_journal_payload(JournalExtractionRequest(text="съел гречку"))
 
     assert '"entries"' in result
@@ -200,6 +220,7 @@ def test_openai_client_builds_multimodal_input() -> None:
 
     content = calls[0]["input"][0]["content"]
     assert calls[0]["instructions"]
+    assert "Return item names in Russian" in calls[0]["instructions"]
     assert content[0]["type"] == "input_text"
     assert "json" in content[0]["text"]
     assert content[1] == {"type": "input_text", "text": "омлет на фото"}
