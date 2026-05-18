@@ -14,12 +14,13 @@ from food_registry_bot.db.repositories import EntryItemCreate, EntryRepository, 
 from food_registry_bot.db.session import session_scope
 from food_registry_bot.extraction import (
     InvalidExtractionPayload,
+    JournalExtractionService,
     StructuredPayloadExtractionService,
     ValidExtractionPayload,
 )
 
 router = Router()
-extraction_service = StructuredPayloadExtractionService()
+default_extraction_service = StructuredPayloadExtractionService()
 
 
 def ensure_user_registered(message: Message, session: Session) -> tuple[bool, int]:
@@ -139,7 +140,11 @@ async def handle_water_250_ml(message: Message, session_factory: sessionmaker[Se
 
 
 @router.message()
-async def handle_message(message: Message, session_factory: sessionmaker[Session]) -> None:
+async def handle_message(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    extraction_service: JournalExtractionService = default_extraction_service,
+) -> None:
     source_text = (message.text or "").strip()
     if not source_text:
         await message.answer(

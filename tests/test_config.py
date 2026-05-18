@@ -1,4 +1,4 @@
-from food_registry_bot.config import get_project_root, get_secrets_dir, get_secrets_env_file
+from food_registry_bot.config import ExtractionProvider, Settings, get_project_root, get_secrets_dir, get_secrets_env_file
 
 
 def test_project_root_points_to_repository() -> None:
@@ -13,3 +13,10 @@ def test_secrets_dir_is_project_specific_sibling_directory() -> None:
 
 def test_secrets_env_file_lives_inside_sibling_secrets_directory() -> None:
     assert get_secrets_env_file() == get_secrets_dir() / ".env"
+
+
+def test_settings_default_to_structured_payload_extraction() -> None:
+    settings = Settings()
+
+    assert settings.extraction_provider == ExtractionProvider.STRUCTURED_PAYLOAD
+    assert settings.llm_model == "gpt-5-mini"

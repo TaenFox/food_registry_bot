@@ -227,6 +227,13 @@ LLM в проекте не сводится только к классифика
 
 Скрипт создаёт sibling-каталог `food_registry_bot_local`, добавляет в него `.env` с болванкой переменных и `README.md` с пояснением назначения каталога.
 
+Для extraction layer на текущем этапе поддерживаются два режима:
+
+- `EXTRACTION_PROVIDER=structured_payload` - дев-режим, где бот принимает уже нормализованный structured payload;
+- `EXTRACTION_PROVIDER=llm` - режим для прямой LLM-интеграции через отдельный extraction client.
+
+Если включён `EXTRACTION_PROVIDER=llm`, приложение ожидает, что при сборке ему будет передан подключённый LLM client adapter. Сам Telegram handler при этом не меняется: он по-прежнему работает только с extraction service boundary.
+
 ## Документация
 
 - `README.md` описывает проект на верхнем уровне;
