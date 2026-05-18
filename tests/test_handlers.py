@@ -1,0 +1,55 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from food_registry_bot.bot.handlers import handle_message, handle_start
+from food_registry_bot.db.base import Base
+from food_registry_bot.db.models import User
+
+
+def create_session_factory() -> sessionmaker[Session]:
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, expire_on_commit=False, class_=Session)
+
+
+async def test_start_creates_user_on_first_message() -> None:
+    session_factory = create_session_factory()
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=1001, username="new_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_start(message, session_factory)
+
+    with session_factory() as session:
+        saved_user = session.query(User).filter_by(telegram_user_id=1001).one()
+
+    assert saved_user.username == "new_user"
+    message.answer.assert_awaited_once_with(
+        "Привет. Профиль создан, бот готов принимать записи."
+    )
+
+
+async def test_regular_message_reuses_existing_user() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        session.add(User(telegram_user_id=1002, username="known_user", timezone="Europe/Moscow"))
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=1002, username="known_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(message, session_factory)
+
+    with session_factory() as session:
+        users_count = session.query(User).filter_by(telegram_user_id=1002).count()
+
+    assert users_count == 1
+    message.answer.assert_awaited_once_with(
+        "Сообщение получено. Базовый приём сообщений уже подключён."
+    )
