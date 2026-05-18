@@ -60,6 +60,55 @@ def test_structured_payload_service_rejects_unit_without_quantity() -> None:
     assert isinstance(result, InvalidExtractionPayload)
 
 
+def test_structured_payload_service_rejects_quantity_without_unit() -> None:
+    service = StructuredPayloadExtractionService()
+
+    result = service.extract(
+        JournalExtractionRequest(
+            text='{"entries": [{"type": "food", "items": [{"name": "гречка", "quantity": 200}]}]}'
+        )
+    )
+
+    assert isinstance(result, InvalidExtractionPayload)
+
+
+def test_structured_payload_service_rejects_non_base_food_unit() -> None:
+    service = StructuredPayloadExtractionService()
+
+    result = service.extract(
+        JournalExtractionRequest(
+            text='{"entries": [{"type": "food", "items": [{"name": "яблоко", "quantity": 2, "unit": "pcs"}]}]}'
+        )
+    )
+
+    assert isinstance(result, InvalidExtractionPayload)
+
+
+def test_structured_payload_service_rejects_non_base_water_unit() -> None:
+    service = StructuredPayloadExtractionService()
+
+    result = service.extract(
+        JournalExtractionRequest(
+            text='{"entries": [{"type": "water", "items": [{"name": "вода", "quantity": 1, "unit": "l"}]}]}'
+        )
+    )
+
+    assert isinstance(result, InvalidExtractionPayload)
+
+
+def test_structured_payload_service_allows_milliliters_for_liquid_food_item() -> None:
+    service = StructuredPayloadExtractionService()
+
+    result = service.extract(
+        JournalExtractionRequest(
+            text='{"entries": [{"type": "food", "items": [{"name": "соус", "quantity": 25, "unit": "ml"}]}]}'
+        )
+    )
+
+    assert isinstance(result, ValidExtractionPayload)
+    assert result.payload.entries[0].items[0].unit == "ml"
+
+
 def test_structured_payload_service_returns_none_for_photo_request() -> None:
     service = StructuredPayloadExtractionService()
 
@@ -221,6 +270,13 @@ def test_openai_client_builds_multimodal_input() -> None:
     content = calls[0]["input"][0]["content"]
     assert calls[0]["instructions"]
     assert "Return item names in Russian" in calls[0]["instructions"]
+    assert "save it as one item and do not decompose it into guessed ingredients" in calls[0]["instructions"]
+    assert "prefer grams for food and milliliters for water or drinks" in calls[0]["instructions"]
+    assert "for liquid food items like dipping sauces, milliliters are also allowed" in calls[0]["instructions"]
+    assert "Do not return a bare number without a unit" in calls[0]["instructions"]
+    assert "estimate the weight of one piece first and then sum them" in calls[0]["instructions"]
+    assert "If a dipping sauce is served separately" in calls[0]["instructions"]
+    assert "round to a reasonable step such as 25 grams" in calls[0]["instructions"]
     assert content[0]["type"] == "input_text"
     assert "json" in content[0]["text"]
     assert content[1] == {"type": "input_text", "text": "омлет на фото"}
