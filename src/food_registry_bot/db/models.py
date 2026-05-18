@@ -102,3 +102,50 @@ class EntryItem(Base):
     )
 
     entry: Mapped["Entry"] = relationship(back_populates="items")
+    metrics: Mapped[list["EntryItemMetric"]] = relationship(
+        back_populates="entry_item",
+        cascade="all, delete-orphan",
+    )
+
+
+class SupportedMetric(Base):
+    __tablename__ = "supported_metrics"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    unit: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    entry_item_metrics: Mapped[list["EntryItemMetric"]] = relationship(back_populates="metric")
+
+
+class EntryItemMetric(Base):
+    __tablename__ = "entry_item_metrics"
+    __table_args__ = (
+        UniqueConstraint(
+            "entry_item_id",
+            "metric_id",
+            name="uq_entry_item_metrics_entry_item_id_metric_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    entry_item_id: Mapped[int] = mapped_column(ForeignKey("entry_items.id"), index=True)
+    metric_id: Mapped[int] = mapped_column(ForeignKey("supported_metrics.id"), index=True)
+    value: Mapped[float]
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    entry_item: Mapped["EntryItem"] = relationship(back_populates="metrics")
+    metric: Mapped["SupportedMetric"] = relationship(back_populates="entry_item_metrics")

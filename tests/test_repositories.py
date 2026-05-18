@@ -1,17 +1,44 @@
 from datetime import datetime, timezone
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.db.base import Base
-from food_registry_bot.db.models import EntryItem, EntryType
-from food_registry_bot.db.repositories import EntryItemCreate, EntryRepository, UserRepository
+from food_registry_bot.db.models import EntryItem, EntryItemMetric, EntryType, SupportedMetric
+from food_registry_bot.db.repositories import (
+    EntryItemCreate,
+    EntryItemMetricRepository,
+    EntryItemMetricValue,
+    EntryRepository,
+    NutritionEstimatePersistenceService,
+    SupportedMetricRepository,
+    UserRepository,
+)
+from food_registry_bot.extraction import ExtractedJournalEntry, ExtractedJournalItem, ExtractedJournalPayload
+from food_registry_bot.nutrition import (
+    prepare_nutrition_request_from_entries,
+    prepare_nutrition_request_from_extracted_payload,
+    resolve_nutrition_estimates,
+    StaticNutritionEstimationService,
+    ValidNutritionPayload,
+)
 
 
 def create_test_session() -> Session:
     engine = create_engine("sqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine, expire_on_commit=False, class_=Session)()
+    session = sessionmaker(bind=engine, expire_on_commit=False, class_=Session)()
+    session.add_all(
+        [
+            SupportedMetric(code="calories", name="Calories", unit="kcal"),
+            SupportedMetric(code="protein", name="Protein", unit="g"),
+            SupportedMetric(code="fat", name="Fat", unit="g"),
+            SupportedMetric(code="carbs", name="Carbs", unit="g"),
+        ]
+    )
+    session.commit()
+    return session
 
 
 def test_user_repository_creates_user_once() -> None:
@@ -109,3 +136,135 @@ def test_entry_repository_lists_recent_entries_in_descending_order() -> None:
     recent_entries = repository.list_recent_for_user(user_id=user.id, limit=5)
 
     assert [entry.id for entry in recent_entries] == [newer_entry.id, older_entry.id]
+
+
+def test_supported_metric_repository_lists_seeded_metrics() -> None:
+    session = create_test_session()
+
+    metrics = SupportedMetricRepository(session).list_all()
+
+    assert [metric.code for metric in metrics] == ["calories", "protein", "fat", "carbs"]
+
+
+def test_entry_item_metric_repository_upserts_metric_values() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=505, username="metric_user")
+    entry = EntryRepository(session).create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+        items=[EntryItemCreate(name="гречка", quantity=200, unit="g")],
+    )
+    entry_item = session.query(EntryItem).filter_by(entry_id=entry.id, position=0).one()
+    repository = EntryItemMetricRepository(session)
+
+    repository.upsert_metrics(
+        entry_item_id=entry_item.id,
+        metric_values=[
+            EntryItemMetricValue(code="calories", value=220.0),
+            EntryItemMetricValue(code="protein", value=7.6),
+        ],
+    )
+    repository.upsert_metrics(
+        entry_item_id=entry_item.id,
+        metric_values=[
+            EntryItemMetricValue(code="calories", value=230.0),
+            EntryItemMetricValue(code="protein", value=8.1),
+        ],
+    )
+
+    saved_metrics = (
+        session.query(EntryItemMetric)
+        .join(SupportedMetric, SupportedMetric.id == EntryItemMetric.metric_id)
+        .filter(EntryItemMetric.entry_item_id == entry_item.id)
+        .order_by(SupportedMetric.code.asc())
+        .all()
+    )
+
+    assert len(saved_metrics) == 2
+    assert [(metric.metric.code, metric.value) for metric in saved_metrics] == [
+        ("calories", 230.0),
+        ("protein", 8.1),
+    ]
+
+
+def test_nutrition_persistence_service_saves_metrics_for_saved_entries() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=606, username="nutrition_user")
+    entry = EntryRepository(session).create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        items=[
+            EntryItemCreate(name="гречка", quantity=200, unit="g"),
+            EntryItemCreate(name="курица", quantity=150, unit="g"),
+        ],
+    )
+
+    prepared_request = prepare_nutrition_request_from_entries([entry])
+    assert prepared_request is not None
+
+    nutrition_result = StaticNutritionEstimationService(
+        raw_payload=(
+            '{"items": ['
+            '{"client_item_id": "entry-' + str(entry.id) + ':item-0", "calories": 220, "protein": 7.6, "fat": 2.2, "carbs": 42.8}, '
+            '{"client_item_id": "entry-' + str(entry.id) + ':item-1", "calories": 248, "protein": 46.5, "fat": 5.4, "carbs": 0.0}'
+            "]}"
+        )
+    ).estimate(prepared_request.request)
+    assert isinstance(nutrition_result, ValidNutritionPayload)
+    resolved_estimates = resolve_nutrition_estimates(prepared_request, nutrition_result.payload)
+
+    saved_metrics = NutritionEstimatePersistenceService(session).save_resolved_estimates_for_entries(
+        prepared_request=prepared_request,
+        resolved_estimates=resolved_estimates,
+    )
+
+    assert len(saved_metrics) == 8
+    persisted_metrics = (
+        session.query(EntryItemMetric)
+        .join(SupportedMetric, SupportedMetric.id == EntryItemMetric.metric_id)
+        .order_by(EntryItemMetric.entry_item_id.asc(), SupportedMetric.code.asc())
+        .all()
+    )
+    assert len(persisted_metrics) == 8
+    assert [(metric.entry_item.position, metric.metric.code, metric.value) for metric in persisted_metrics] == [
+        (0, "calories", 220.0),
+        (0, "carbs", 42.8),
+        (0, "fat", 2.2),
+        (0, "protein", 7.6),
+        (1, "calories", 248.0),
+        (1, "carbs", 0.0),
+        (1, "fat", 5.4),
+        (1, "protein", 46.5),
+    ]
+
+
+def test_prepare_and_persist_extracted_payload_requires_saved_entry_items() -> None:
+    session = create_test_session()
+    prepared_request = prepare_nutrition_request_from_extracted_payload(
+        ExtractedJournalPayload(
+            entries=[
+                ExtractedJournalEntry(
+                    type=EntryType.FOOD,
+                    items=[ExtractedJournalItem(name="гречка", quantity=200, unit="г")],
+                )
+            ]
+        )
+    )
+    assert prepared_request is not None
+    nutrition_result = StaticNutritionEstimationService(
+        raw_payload=(
+            '{"items": ['
+            '{"client_item_id": "entry-0:item-0", "calories": 220, "protein": 7.6, "fat": 2.2, "carbs": 42.8}'
+            "]}"
+        )
+    ).estimate(prepared_request.request)
+    assert isinstance(nutrition_result, ValidNutritionPayload)
+    resolved_estimates = resolve_nutrition_estimates(prepared_request, nutrition_result.payload)
+
+    with pytest.raises(ValueError, match="was not found"):
+        NutritionEstimatePersistenceService(session).save_resolved_estimates_for_entries(
+            prepared_request=prepared_request,
+            resolved_estimates=resolved_estimates,
+        )

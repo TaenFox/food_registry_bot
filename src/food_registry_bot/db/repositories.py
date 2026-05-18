@@ -7,7 +7,16 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from food_registry_bot.db.models import Entry, EntryItem, EntryType, MealType, User
+from food_registry_bot.db.models import (
+    Entry,
+    EntryItem,
+    EntryItemMetric,
+    EntryType,
+    MealType,
+    SupportedMetric,
+    User,
+)
+from food_registry_bot.nutrition import PreparedNutritionRequest, ResolvedNutritionEstimate
 
 
 @dataclass(frozen=True)
@@ -17,6 +26,12 @@ class EntryItemCreate:
     unit: str | None = None
     confidence: str | None = None
     source_type: str | None = None
+
+
+@dataclass(frozen=True)
+class EntryItemMetricValue:
+    code: str
+    value: float
 
 
 class UserRepository:
@@ -119,3 +134,122 @@ class EntryRepository:
             .limit(limit)
         )
         return list(self._session.scalars(statement))
+
+
+class SupportedMetricRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def list_all(self) -> list[SupportedMetric]:
+        statement = select(SupportedMetric).order_by(SupportedMetric.id.asc())
+        return list(self._session.scalars(statement))
+
+    def get_by_code_map(self, codes: list[str]) -> dict[str, SupportedMetric]:
+        statement = select(SupportedMetric).where(SupportedMetric.code.in_(codes))
+        metrics = list(self._session.scalars(statement))
+        return {metric.code: metric for metric in metrics}
+
+
+class EntryItemMetricRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def upsert_metrics(
+        self,
+        *,
+        entry_item_id: int,
+        metric_values: list[EntryItemMetricValue],
+    ) -> list[EntryItemMetric]:
+        supported_metrics = SupportedMetricRepository(self._session).get_by_code_map(
+            [metric_value.code for metric_value in metric_values]
+        )
+        if len(supported_metrics) != len({metric_value.code for metric_value in metric_values}):
+            raise ValueError("Unknown supported metric code in metric_values")
+
+        saved_metrics: list[EntryItemMetric] = []
+        for metric_value in metric_values:
+            supported_metric = supported_metrics[metric_value.code]
+            statement = select(EntryItemMetric).where(
+                EntryItemMetric.entry_item_id == entry_item_id,
+                EntryItemMetric.metric_id == supported_metric.id,
+            )
+            existing_metric = self._session.scalar(statement)
+            if existing_metric is None:
+                existing_metric = EntryItemMetric(
+                    entry_item_id=entry_item_id,
+                    metric_id=supported_metric.id,
+                    value=metric_value.value,
+                )
+                self._session.add(existing_metric)
+            else:
+                existing_metric.value = metric_value.value
+            saved_metrics.append(existing_metric)
+
+        self._session.flush()
+        return saved_metrics
+
+
+class NutritionEstimatePersistenceService:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+        self._metric_repository = EntryItemMetricRepository(session)
+
+    def save_resolved_estimates_for_entries(
+        self,
+        *,
+        prepared_request: PreparedNutritionRequest,
+        resolved_estimates: list[ResolvedNutritionEstimate],
+    ) -> list[EntryItemMetric]:
+        persisted_item_refs = {
+            item_ref.client_item_id: (
+                int(item_ref.entry_key.removeprefix("entry-")),
+                int(item_ref.item_key.removeprefix("item-")),
+            )
+            for item_ref in prepared_request.item_refs
+            if item_ref.entry_key.startswith("entry-")
+            and item_ref.item_key.startswith("item-")
+            and item_ref.entry_key.removeprefix("entry-").isdigit()
+            and item_ref.item_key.removeprefix("item-").isdigit()
+        }
+        entry_ids = {entry_id for entry_id, _position in persisted_item_refs.values()}
+        entry_items = list(
+            self._session.scalars(
+                select(EntryItem).where(EntryItem.entry_id.in_(entry_ids)) if entry_ids else select(EntryItem).where(False)
+            )
+        )
+        entry_item_ids_by_pair = {
+            (item.entry_id, item.position): item.id
+            for item in entry_items
+        }
+
+        saved_metrics: list[EntryItemMetric] = []
+        expected_client_item_ids = {item.client_item_id for item in prepared_request.item_refs}
+        for estimate in resolved_estimates:
+            if estimate.item_ref.client_item_id not in expected_client_item_ids:
+                raise ValueError("Resolved nutrition estimate does not belong to prepared_request")
+
+            entry_item_pair = persisted_item_refs.get(estimate.item_ref.client_item_id)
+            if entry_item_pair is None:
+                raise ValueError(
+                    f"Entry item for client_item_id {estimate.item_ref.client_item_id!r} was not found"
+                )
+
+            entry_item_id = entry_item_ids_by_pair.get(entry_item_pair)
+            if entry_item_id is None:
+                raise ValueError(
+                    f"Entry item for client_item_id {estimate.item_ref.client_item_id!r} was not found"
+                )
+
+            saved_metrics.extend(
+                self._metric_repository.upsert_metrics(
+                    entry_item_id=entry_item_id,
+                    metric_values=[
+                        EntryItemMetricValue(code="calories", value=float(estimate.calories)),
+                        EntryItemMetricValue(code="protein", value=estimate.protein),
+                        EntryItemMetricValue(code="fat", value=estimate.fat),
+                        EntryItemMetricValue(code="carbs", value=estimate.carbs),
+                    ],
+                )
+            )
+
+        return saved_metrics
