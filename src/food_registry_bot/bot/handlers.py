@@ -63,8 +63,15 @@ def format_saved_item_line(name: str, quantity: int | None, unit: str | None) ->
     return f"- {presented_name}: {quantity} {presented_unit}"
 
 
+def build_saved_items_confirmation(items: list[EntryItemCreate]) -> str:
+    lines = ["Сохранил:"]
+    for item in items:
+        lines.append(format_saved_item_line(item.name, item.quantity, item.unit))
+    return "\n".join(lines)
+
+
 def build_normalized_payload_confirmation(payload: NormalizedJournalPayload) -> str:
-    lines = [f"Сохранил {len(payload.entries)} записей из JSON:"]
+    lines = ["Сохранил:"]
     for entry in payload.entries:
         for item in entry.items:
             lines.append(format_saved_item_line(item.name, item.quantity, item.unit))
@@ -122,6 +129,7 @@ async def handle_recent(message: Message, session_factory: sessionmaker[Session]
 
 @router.message(F.text == WATER_250_ML_BUTTON_TEXT)
 async def handle_water_250_ml(message: Message, session_factory: sessionmaker[Session]) -> None:
+    saved_items = [EntryItemCreate(name="water", quantity=250, unit="ml")]
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
         EntryRepository(session).create(
@@ -129,10 +137,10 @@ async def handle_water_250_ml(message: Message, session_factory: sessionmaker[Se
             entry_type=EntryType.WATER,
             occurred_at=datetime.now(timezone.utc),
             source_text="250 мл",
-            items=[EntryItemCreate(name="water", quantity=250, unit="ml")],
+            items=saved_items,
         )
 
-    await message.answer("Записал воду: 250 мл.", reply_markup=build_main_keyboard())
+    await message.answer(build_saved_items_confirmation(saved_items), reply_markup=build_main_keyboard())
 
 
 @router.message()
@@ -175,12 +183,13 @@ async def handle_message(message: Message, session_factory: sessionmaker[Session
                     ],
                 )
         else:
+            saved_items = [EntryItemCreate(name=source_text)]
             EntryRepository(session).create(
                 user_id=user_id,
                 entry_type=EntryType.FOOD,
                 occurred_at=datetime.now(timezone.utc),
                 source_text=source_text,
-                items=[EntryItemCreate(name=source_text)],
+                items=saved_items,
             )
 
     if normalized_payload is not None:
@@ -190,4 +199,4 @@ async def handle_message(message: Message, session_factory: sessionmaker[Session
         )
         return
 
-    await message.answer("Запись сохранена как еда.", reply_markup=build_main_keyboard())
+    await message.answer(build_saved_items_confirmation(saved_items), reply_markup=build_main_keyboard())

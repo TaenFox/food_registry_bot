@@ -59,7 +59,7 @@ async def test_regular_message_reuses_existing_user() -> None:
     assert saved_entry.source_text == "яблоко"
     assert saved_item.name == "яблоко"
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Запись сохранена как еда.",)
+    assert message.answer.await_args.args == ("Сохранил:\n- яблоко",)
     assert message.answer.await_args.kwargs["reply_markup"] is not None
 
 
@@ -82,7 +82,7 @@ async def test_first_regular_message_creates_user_and_food_entry() -> None:
     assert saved_entry.source_text == "гречка с курицей"
     assert saved_item.name == "гречка с курицей"
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Запись сохранена как еда.",)
+    assert message.answer.await_args.args == ("Сохранил:\n- гречка с курицей",)
     assert message.answer.await_args.kwargs["reply_markup"] is not None
 
 
@@ -119,7 +119,7 @@ async def test_json_message_creates_food_and_water_entries() -> None:
     assert saved_items[1].source_type == "normalized_json"
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сохранил 2 записей из JSON:\n- гречка: 200 г\n- вода: 250 мл",
+        "Сохранил:\n- гречка: 200 г\n- вода: 250 мл",
     )
     assert message.answer.await_args.kwargs["reply_markup"] is not None
 
@@ -210,5 +210,5 @@ async def test_water_button_creates_water_entry() -> None:
     assert saved_item.quantity == 250
     assert saved_item.unit == "ml"
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Записал воду: 250 мл.",)
+    assert message.answer.await_args.args == ("Сохранил:\n- вода: 250 мл",)
     assert message.answer.await_args.kwargs["reply_markup"] is not None
