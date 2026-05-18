@@ -30,6 +30,11 @@ class ExtractionProvider(str, enum.Enum):
     LLM = "llm"
 
 
+class NutritionProvider(str, enum.Enum):
+    STATIC = "static"
+    LLM = "llm"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=SECRETS_ENV_FILE,
@@ -44,6 +49,11 @@ class Settings(BaseSettings):
         alias="EXTRACTION_PROVIDER",
     )
     llm_model: str = Field(default="gpt-5-mini", alias="LLM_MODEL")
+    nutrition_provider: NutritionProvider = Field(
+        default=NutritionProvider.STATIC,
+        alias="NUTRITION_PROVIDER",
+    )
+    nutrition_model: str = Field(default="gpt-5-mini", alias="NUTRITION_MODEL")
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
 
     postgres_host: str = Field(default="localhost", alias="POSTGRES_HOST")

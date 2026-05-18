@@ -1,5 +1,6 @@
 from food_registry_bot.config import (
     ExtractionProvider,
+    NutritionProvider,
     Settings,
     get_project_root,
     get_secrets_dir,
@@ -25,7 +26,11 @@ def test_settings_default_to_structured_payload_extraction() -> None:
     settings = Settings.model_construct(
         extraction_provider=ExtractionProvider.STRUCTURED_PAYLOAD,
         llm_model="gpt-5-mini",
+        nutrition_provider=NutritionProvider.STATIC,
+        nutrition_model="gpt-5-mini",
     )
 
     assert settings.extraction_provider == ExtractionProvider.STRUCTURED_PAYLOAD
     assert settings.llm_model == "gpt-5-mini"
+    assert settings.nutrition_provider == NutritionProvider.STATIC
+    assert settings.nutrition_model == "gpt-5-mini"

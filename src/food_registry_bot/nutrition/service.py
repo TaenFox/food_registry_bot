@@ -7,6 +7,7 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from food_registry_bot.nutrition.contract import NutritionEstimationPayload, NutritionEstimationRequest
+from food_registry_bot.nutrition.llm_client import LLMNutritionClientError
 
 
 @dataclass(frozen=True)
@@ -20,10 +21,6 @@ class ValidNutritionPayload:
 @dataclass(frozen=True)
 class InvalidNutritionPayload:
     message: str
-
-
-class NutritionPayloadClientError(RuntimeError):
-    """Raised when the underlying nutrition client cannot produce a payload."""
 
 
 class NutritionPayloadClient(Protocol):
@@ -109,7 +106,7 @@ class LLMNutritionEstimationService:
     ) -> ValidNutritionPayload | InvalidNutritionPayload:
         try:
             raw_payload = self._client.estimate_nutrition_payload(request)
-        except NutritionPayloadClientError:
+        except LLMNutritionClientError:
             return InvalidNutritionPayload(
                 message="Не удалось получить structured payload от nutrition provider."
             )
