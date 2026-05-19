@@ -17,11 +17,11 @@ from food_registry_bot.db.repositories import (
 )
 from food_registry_bot.extraction import ExtractedJournalEntry, ExtractedJournalItem, ExtractedJournalPayload
 from food_registry_bot.nutrition import (
+    StaticNutritionEstimationService,
+    ValidNutritionPayload,
     prepare_nutrition_request_from_entries,
     prepare_nutrition_request_from_extracted_payload,
     resolve_nutrition_estimates,
-    StaticNutritionEstimationService,
-    ValidNutritionPayload,
 )
 
 
@@ -39,6 +39,25 @@ def create_test_session() -> Session:
     )
     session.commit()
     return session
+
+
+def build_metric_payload(item_ids: list[str], *, confidence: str = "medium") -> str:
+    import json
+
+    items = []
+    for index, item_id in enumerate(item_ids):
+        items.append(
+            {
+                "client_item_id": item_id,
+                "metrics": [
+                    {"code": "calories", "value": 220.0 + index, "confidence": confidence},
+                    {"code": "protein", "value": 7.6 + index, "confidence": confidence},
+                    {"code": "fat", "value": 2.2 + index, "confidence": confidence},
+                    {"code": "carbs", "value": 42.8 + index, "confidence": confidence},
+                ],
+            }
+        )
+    return json.dumps({"items": items}, ensure_ascii=False)
 
 
 def test_user_repository_creates_user_once() -> None:
@@ -161,15 +180,15 @@ def test_entry_item_metric_repository_upserts_metric_values() -> None:
     repository.upsert_metrics(
         entry_item_id=entry_item.id,
         metric_values=[
-            EntryItemMetricValue(code="calories", value=220.0),
-            EntryItemMetricValue(code="protein", value=7.6),
+            EntryItemMetricValue(code="calories", value=220.0, confidence="high"),
+            EntryItemMetricValue(code="protein", value=7.6, confidence="medium"),
         ],
     )
     repository.upsert_metrics(
         entry_item_id=entry_item.id,
         metric_values=[
-            EntryItemMetricValue(code="calories", value=230.0),
-            EntryItemMetricValue(code="protein", value=8.1),
+            EntryItemMetricValue(code="calories", value=230.0, confidence="medium"),
+            EntryItemMetricValue(code="protein", value=8.1, confidence="low"),
         ],
     )
 
@@ -182,9 +201,9 @@ def test_entry_item_metric_repository_upserts_metric_values() -> None:
     )
 
     assert len(saved_metrics) == 2
-    assert [(metric.metric.code, metric.value) for metric in saved_metrics] == [
-        ("calories", 230.0),
-        ("protein", 8.1),
+    assert [(metric.metric.code, metric.value, metric.confidence) for metric in saved_metrics] == [
+        ("calories", 230.0, "medium"),
+        ("protein", 8.1, "low"),
     ]
 
 
@@ -205,11 +224,9 @@ def test_nutrition_persistence_service_saves_metrics_for_saved_entries() -> None
     assert prepared_request is not None
 
     nutrition_result = StaticNutritionEstimationService(
-        raw_payload=(
-            '{"items": ['
-            '{"client_item_id": "entry-' + str(entry.id) + ':item-0", "calories": 220, "protein": 7.6, "fat": 2.2, "carbs": 42.8}, '
-            '{"client_item_id": "entry-' + str(entry.id) + ':item-1", "calories": 248, "protein": 46.5, "fat": 5.4, "carbs": 0.0}'
-            "]}"
+        raw_payload=build_metric_payload(
+            [f"entry-{entry.id}:item-0", f"entry-{entry.id}:item-1"],
+            confidence="medium",
         )
     ).estimate(prepared_request.request)
     assert isinstance(nutrition_result, ValidNutritionPayload)
@@ -228,15 +245,18 @@ def test_nutrition_persistence_service_saves_metrics_for_saved_entries() -> None
         .all()
     )
     assert len(persisted_metrics) == 8
-    assert [(metric.entry_item.position, metric.metric.code, metric.value) for metric in persisted_metrics] == [
-        (0, "calories", 220.0),
-        (0, "carbs", 42.8),
-        (0, "fat", 2.2),
-        (0, "protein", 7.6),
-        (1, "calories", 248.0),
-        (1, "carbs", 0.0),
-        (1, "fat", 5.4),
-        (1, "protein", 46.5),
+    assert [
+        (metric.entry_item.position, metric.metric.code, metric.value, metric.confidence)
+        for metric in persisted_metrics
+    ] == [
+        (0, "calories", 220.0, "medium"),
+        (0, "carbs", 42.8, "medium"),
+        (0, "fat", 2.2, "medium"),
+        (0, "protein", 7.6, "medium"),
+        (1, "calories", 221.0, "medium"),
+        (1, "carbs", 43.8, "medium"),
+        (1, "fat", 3.2, "medium"),
+        (1, "protein", 8.6, "medium"),
     ]
 
 
@@ -254,11 +274,7 @@ def test_prepare_and_persist_extracted_payload_requires_saved_entry_items() -> N
     )
     assert prepared_request is not None
     nutrition_result = StaticNutritionEstimationService(
-        raw_payload=(
-            '{"items": ['
-            '{"client_item_id": "entry-0:item-0", "calories": 220, "protein": 7.6, "fat": 2.2, "carbs": 42.8}'
-            "]}"
-        )
+        raw_payload=build_metric_payload(["entry-0:item-0"])
     ).estimate(prepared_request.request)
     assert isinstance(nutrition_result, ValidNutritionPayload)
     resolved_estimates = resolve_nutrition_estimates(prepared_request, nutrition_result.payload)

@@ -33,6 +33,7 @@ class EntryItemCreate:
 class EntryItemMetricValue:
     code: str
     value: float
+    confidence: str
 
 
 class UserRepository:
@@ -192,10 +193,12 @@ class EntryItemMetricRepository:
                     entry_item_id=entry_item_id,
                     metric_id=supported_metric.id,
                     value=metric_value.value,
+                    confidence=metric_value.confidence,
                 )
                 self._session.add(existing_metric)
             else:
                 existing_metric.value = metric_value.value
+                existing_metric.confidence = metric_value.confidence
             saved_metrics.append(existing_metric)
 
         self._session.flush()
@@ -257,10 +260,12 @@ class NutritionEstimatePersistenceService:
                 self._metric_repository.upsert_metrics(
                     entry_item_id=entry_item_id,
                     metric_values=[
-                        EntryItemMetricValue(code="calories", value=float(estimate.calories)),
-                        EntryItemMetricValue(code="protein", value=estimate.protein),
-                        EntryItemMetricValue(code="fat", value=estimate.fat),
-                        EntryItemMetricValue(code="carbs", value=estimate.carbs),
+                        EntryItemMetricValue(
+                            code=metric.code,
+                            value=metric.value,
+                            confidence=metric.confidence.value,
+                        )
+                        for metric in estimate.metrics
                     ],
                 )
             )

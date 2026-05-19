@@ -21,9 +21,22 @@ from food_registry_bot.extraction import (
     StructuredPayloadExtractionService,
     ValidExtractionPayload,
 )
+from food_registry_bot.nutrition import (
+    FailedNutritionEstimation,
+    NutritionEstimationService,
+    SkippedNutritionEstimation,
+    StaticNutritionEstimationService,
+    StoredEntryNutritionEstimationUseCase,
+    SuccessfulNutritionEstimation,
+)
 
 router = Router()
 default_extraction_service = StructuredPayloadExtractionService()
+default_nutrition_service = StaticNutritionEstimationService(raw_payload="")
+
+
+class FoodWriteFlowError(RuntimeError):
+    pass
 
 
 def ensure_user_registered(message: Message, session: Session) -> tuple[bool, int]:
@@ -69,11 +82,24 @@ def build_saved_items_confirmation(items: list[EntryItemCreate]) -> str:
     return "\n".join(lines)
 
 
-def build_extracted_payload_confirmation(payload) -> str:
+def build_extracted_payload_confirmation(payload, nutrition_result: SuccessfulNutritionEstimation | None = None) -> str:
     lines = ["Сохранил:"]
     for entry in payload.entries:
         for item in entry.items:
             lines.append(format_saved_item_line(item.name, item.quantity, item.unit))
+
+    if nutrition_result is not None:
+        lines.extend(
+            [
+                "",
+                "КБЖУ по еде:",
+                f"- калории: {round(nutrition_result.metric_totals.get('calories', 0.0), 1)} ккал",
+                f"- белки: {round(nutrition_result.metric_totals.get('protein', 0.0), 1)} г",
+                f"- жиры: {round(nutrition_result.metric_totals.get('fat', 0.0), 1)} г",
+                f"- углеводы: {round(nutrition_result.metric_totals.get('carbs', 0.0), 1)} г",
+            ]
+        )
+
     return "\n".join(lines)
 
 
@@ -164,6 +190,7 @@ async def handle_message(
     message: Message,
     session_factory: sessionmaker[Session],
     extraction_service: JournalExtractionService = default_extraction_service,
+    nutrition_service: NutritionEstimationService = default_nutrition_service,
 ) -> None:
     extraction_request = await build_extraction_request(message)
     if extraction_request is None:
@@ -182,19 +209,22 @@ async def handle_message(
         )
         return
 
-    if extraction_result is None and extraction_request.images:
+    if extraction_result is None:
         await message.answer(
-            "Текущий extraction provider не смог обработать фото.",
+            "Текущий extraction provider не смог обработать сообщение с едой.",
             reply_markup=build_main_keyboard(),
         )
         return
 
-    with session_scope(session_factory) as session:
-        _, user_id = ensure_user_registered(message, session)
+    nutrition_result: SuccessfulNutritionEstimation | None = None
+    try:
+        with session_scope(session_factory) as session:
+            _, user_id = ensure_user_registered(message, session)
 
-        if isinstance(extraction_result, ValidExtractionPayload):
+            saved_entries = []
+            food_entry_ids: list[int] = []
             for extracted_entry in extraction_result.payload.entries:
-                EntryRepository(session).create(
+                saved_entry = EntryRepository(session).create(
                     user_id=user_id,
                     entry_type=extracted_entry.type,
                     occurred_at=extracted_entry.occurred_at or datetime.now(timezone.utc),
@@ -212,21 +242,25 @@ async def handle_message(
                         for item in extracted_entry.items
                     ],
                 )
-        else:
-            saved_items = [EntryItemCreate(name=extraction_request.text)]
-            EntryRepository(session).create(
-                user_id=user_id,
-                entry_type=EntryType.FOOD,
-                occurred_at=datetime.now(timezone.utc),
-                source_text=extraction_request.text,
-                items=saved_items,
-            )
+                saved_entries.append(saved_entry)
+                if extracted_entry.type is EntryType.FOOD:
+                    food_entry_ids.append(saved_entry.id)
 
-    if isinstance(extraction_result, ValidExtractionPayload):
-        await message.answer(
-            build_extracted_payload_confirmation(extraction_result.payload),
-            reply_markup=build_main_keyboard(),
-        )
+            if food_entry_ids:
+                nutrition_flow_result = StoredEntryNutritionEstimationUseCase(
+                    session,
+                    nutrition_service,
+                ).run(entry_ids=food_entry_ids)
+                if isinstance(nutrition_flow_result, FailedNutritionEstimation):
+                    raise FoodWriteFlowError(nutrition_flow_result.message)
+                if isinstance(nutrition_flow_result, SkippedNutritionEstimation):
+                    raise FoodWriteFlowError(nutrition_flow_result.reason)
+                nutrition_result = nutrition_flow_result
+    except FoodWriteFlowError as exc:
+        await message.answer(str(exc), reply_markup=build_main_keyboard())
         return
 
-    await message.answer(build_saved_items_confirmation(saved_items), reply_markup=build_main_keyboard())
+    await message.answer(
+        build_extracted_payload_confirmation(extraction_result.payload, nutrition_result),
+        reply_markup=build_main_keyboard(),
+    )

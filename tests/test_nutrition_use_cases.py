@@ -31,6 +31,25 @@ def create_test_session() -> Session:
     return session
 
 
+def build_metric_payload(item_ids: list[str], *, confidence: str = "medium") -> str:
+    import json
+
+    items = []
+    for index, item_id in enumerate(item_ids):
+        items.append(
+            {
+                "client_item_id": item_id,
+                "metrics": [
+                    {"code": "calories", "value": 220.0 + index, "confidence": confidence},
+                    {"code": "protein", "value": 7.6 + index, "confidence": confidence},
+                    {"code": "fat", "value": 2.2 + index, "confidence": confidence},
+                    {"code": "carbs", "value": 42.8 + index, "confidence": confidence},
+                ],
+            }
+        )
+    return json.dumps({"items": items}, ensure_ascii=False)
+
+
 def test_use_case_saves_metrics_for_supported_saved_items() -> None:
     session = create_test_session()
     user = UserRepository(session).create(telegram_user_id=701, username="pipeline_user")
@@ -46,12 +65,7 @@ def test_use_case_saves_metrics_for_supported_saved_items() -> None:
     use_case = StoredEntryNutritionEstimationUseCase(
         session,
         StaticNutritionEstimationService(
-            raw_payload=(
-                '{"items": ['
-                '{"client_item_id": "entry-' + str(entry.id) + ':item-0", "calories": 220, "protein": 7.6, "fat": 2.2, "carbs": 42.8}, '
-                '{"client_item_id": "entry-' + str(entry.id) + ':item-1", "calories": 248, "protein": 46.5, "fat": 5.4, "carbs": 0.0}'
-                "]}"
-            )
+            raw_payload=build_metric_payload([f"entry-{entry.id}:item-0", f"entry-{entry.id}:item-1"])
         ),
     )
 
@@ -61,6 +75,12 @@ def test_use_case_saves_metrics_for_supported_saved_items() -> None:
     assert result.entry_ids == [entry.id]
     assert result.estimated_item_count == 2
     assert result.saved_metric_count == 8
+    assert result.metric_totals == {
+        "calories": 441.0,
+        "protein": 16.2,
+        "fat": 5.4,
+        "carbs": 86.6,
+    }
     assert session.query(EntryItemMetric).count() == 8
 
 
@@ -76,9 +96,9 @@ def test_use_case_skips_when_entries_not_found() -> None:
     assert result == SkippedNutritionEstimation(reason="No entries found for nutrition estimation.")
 
 
-def test_use_case_skips_when_entries_have_no_supported_food_items() -> None:
+def test_use_case_estimates_item_without_quantity() -> None:
     session = create_test_session()
-    user = UserRepository(session).create(telegram_user_id=702, username="skip_user")
+    user = UserRepository(session).create(telegram_user_id=702, username="estimate_user")
     entry = EntryRepository(session).create(
         user_id=user.id,
         entry_type=EntryType.FOOD,
@@ -87,14 +107,15 @@ def test_use_case_skips_when_entries_have_no_supported_food_items() -> None:
     )
     use_case = StoredEntryNutritionEstimationUseCase(
         session,
-        StaticNutritionEstimationService(raw_payload='{"items": []}'),
+        StaticNutritionEstimationService(
+            raw_payload=build_metric_payload([f"entry-{entry.id}:item-0"], confidence="low")
+        ),
     )
 
     result = use_case.run(entry_ids=[entry.id])
 
-    assert result == SkippedNutritionEstimation(
-        reason="No supported food items with quantity and unit found for nutrition estimation."
-    )
+    assert isinstance(result, SuccessfulNutritionEstimation)
+    assert result.saved_metric_count == 4
 
 
 def test_use_case_returns_failed_when_nutrition_payload_is_invalid() -> None:
@@ -109,7 +130,7 @@ def test_use_case_returns_failed_when_nutrition_payload_is_invalid() -> None:
     use_case = StoredEntryNutritionEstimationUseCase(
         session,
         StaticNutritionEstimationService(
-            raw_payload='{"items": [{"client_item_id": "entry-1:item-0", "calories": 220}]}'
+            raw_payload='{"items": [{"client_item_id": "entry-1:item-0", "metrics": []}]}'
         ),
     )
 

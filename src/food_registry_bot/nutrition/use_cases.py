@@ -17,6 +17,7 @@ class SuccessfulNutritionEstimation:
     entry_ids: list[int]
     estimated_item_count: int
     saved_metric_count: int
+    metric_totals: dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -64,9 +65,14 @@ class StoredEntryNutritionEstimationUseCase:
             prepared_request=prepared_request,
             resolved_estimates=resolved_estimates,
         )
+        metric_totals: dict[str, float] = {}
+        for estimate in resolved_estimates:
+            for metric in estimate.metrics:
+                metric_totals[metric.code] = metric_totals.get(metric.code, 0.0) + metric.value
 
         return SuccessfulNutritionEstimation(
             entry_ids=[entry.id for entry in entries],
             estimated_item_count=len(resolved_estimates),
             saved_metric_count=len(saved_metrics),
+            metric_totals=metric_totals,
         )

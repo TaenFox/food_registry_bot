@@ -6,6 +6,7 @@ from typing import Iterable
 from food_registry_bot.db.models import Entry, EntryType
 from food_registry_bot.extraction.contract import ExtractedJournalPayload
 from food_registry_bot.nutrition.contract import (
+    NutritionConfidence,
     NutritionEstimationItemInput,
     NutritionEstimationPayload,
     NutritionEstimationRequest,
@@ -18,8 +19,8 @@ class NutritionJournalItemRef:
     entry_key: str
     item_key: str
     name: str
-    quantity: int
-    unit: str
+    quantity: int | None
+    unit: str | None
 
 
 @dataclass(frozen=True)
@@ -29,20 +30,20 @@ class PreparedNutritionRequest:
 
 
 @dataclass(frozen=True)
+class ResolvedNutritionMetric:
+    code: str
+    value: float
+    confidence: NutritionConfidence
+
+
+@dataclass(frozen=True)
 class ResolvedNutritionEstimate:
     item_ref: NutritionJournalItemRef
-    calories: int
-    protein: float
-    fat: float
-    carbs: float
+    metrics: list[ResolvedNutritionMetric]
 
 
-def _is_supported_food_item(*, entry_type: EntryType, quantity: int | None, unit: str | None) -> bool:
-    if entry_type is not EntryType.FOOD:
-        return False
-    if quantity is None or unit is None:
-        return False
-    return unit in {"g", "ml"}
+def _is_supported_food_item(*, entry_type: EntryType) -> bool:
+    return entry_type is EntryType.FOOD
 
 
 def _build_prepared_request(item_refs: Iterable[NutritionJournalItemRef]) -> PreparedNutritionRequest | None:
@@ -72,14 +73,10 @@ def prepare_nutrition_request_from_extracted_payload(
     item_refs: list[NutritionJournalItemRef] = []
 
     for entry_index, entry in enumerate(payload.entries):
-        for item_index, item in enumerate(entry.items):
-            if not _is_supported_food_item(
-                entry_type=entry.type,
-                quantity=item.quantity,
-                unit=item.unit,
-            ):
-                continue
+        if not _is_supported_food_item(entry_type=entry.type):
+            continue
 
+        for item_index, item in enumerate(entry.items):
             item_refs.append(
                 NutritionJournalItemRef(
                     client_item_id=f"entry-{entry_index}:item-{item_index}",
@@ -98,14 +95,10 @@ def prepare_nutrition_request_from_entries(entries: Iterable[Entry]) -> Prepared
     item_refs: list[NutritionJournalItemRef] = []
 
     for entry in entries:
-        for item in sorted(entry.items, key=lambda current: current.position):
-            if not _is_supported_food_item(
-                entry_type=entry.entry_type,
-                quantity=item.quantity,
-                unit=item.unit,
-            ):
-                continue
+        if not _is_supported_food_item(entry_type=entry.entry_type):
+            continue
 
+        for item in sorted(entry.items, key=lambda current: current.position):
             item_refs.append(
                 NutritionJournalItemRef(
                     client_item_id=f"entry-{entry.id}:item-{item.position}",
@@ -129,10 +122,14 @@ def resolve_nutrition_estimates(
     return [
         ResolvedNutritionEstimate(
             item_ref=item_ref,
-            calories=items_by_client_id[item_ref.client_item_id].calories,
-            protein=items_by_client_id[item_ref.client_item_id].protein,
-            fat=items_by_client_id[item_ref.client_item_id].fat,
-            carbs=items_by_client_id[item_ref.client_item_id].carbs,
+            metrics=[
+                ResolvedNutritionMetric(
+                    code=metric.code,
+                    value=metric.value,
+                    confidence=metric.confidence,
+                )
+                for metric in items_by_client_id[item_ref.client_item_id].metrics
+            ],
         )
         for item_ref in prepared_request.item_refs
     ]

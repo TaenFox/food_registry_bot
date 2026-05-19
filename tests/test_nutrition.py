@@ -15,16 +15,17 @@ from food_registry_bot.extraction import (
 )
 from food_registry_bot.nutrition import (
     InvalidNutritionPayload,
-    LLMNutritionEstimationService,
     LLMNutritionClientError,
+    LLMNutritionEstimationService,
+    NutritionConfidence,
     NutritionEstimationRequest,
     OpenAIResponsesNutritionClient,
+    StaticNutritionEstimationService,
+    ValidNutritionPayload,
     create_nutrition_service,
     prepare_nutrition_request_from_entries,
     prepare_nutrition_request_from_extracted_payload,
     resolve_nutrition_estimates,
-    StaticNutritionEstimationService,
-    ValidNutritionPayload,
 )
 
 
@@ -40,20 +41,38 @@ def build_request() -> NutritionEstimationRequest:
                 },
                 {
                     "client_item_id": "entry-1:item-1",
-                    "name": "курица",
-                    "quantity": 150,
-                    "unit": "g",
+                    "name": "омлет",
                 },
             ]
         }
     )
 
 
+def build_metric_payload(item_ids: list[str], *, confidence: str = "medium") -> str:
+    items = []
+    for index, item_id in enumerate(item_ids):
+        items.append(
+            {
+                "client_item_id": item_id,
+                "metrics": [
+                    {"code": "calories", "value": 220.0 + index, "confidence": confidence},
+                    {"code": "protein", "value": 7.6 + index, "confidence": confidence},
+                    {"code": "fat", "value": 2.2 + index, "confidence": confidence},
+                    {"code": "carbs", "value": 42.8 + index, "confidence": confidence},
+                ],
+            }
+        )
+    import json
+
+    return json.dumps({"items": items}, ensure_ascii=False)
+
+
 def test_nutrition_request_normalizes_supported_units() -> None:
     request = build_request()
 
     assert request.items[0].unit.value == "g"
-    assert request.items[1].unit.value == "g"
+    assert request.items[1].quantity is None
+    assert request.items[1].unit is None
 
 
 def test_nutrition_request_rejects_duplicate_client_item_ids() -> None:
@@ -64,15 +83,26 @@ def test_nutrition_request_rejects_duplicate_client_item_ids() -> None:
                     {
                         "client_item_id": "entry-1:item-0",
                         "name": "гречка",
-                        "quantity": 200,
-                        "unit": "g",
                     },
                     {
                         "client_item_id": "entry-1:item-0",
                         "name": "курица",
-                        "quantity": 150,
-                        "unit": "g",
                     },
+                ]
+            }
+        )
+
+
+def test_nutrition_request_rejects_quantity_without_unit() -> None:
+    with pytest.raises(ValidationError, match="quantity requires unit"):
+        NutritionEstimationRequest.model_validate(
+            {
+                "items": [
+                    {
+                        "client_item_id": "entry-1:item-0",
+                        "name": "гречка",
+                        "quantity": 200,
+                    }
                 ]
             }
         )
@@ -80,12 +110,7 @@ def test_nutrition_request_rejects_duplicate_client_item_ids() -> None:
 
 def test_static_nutrition_service_validates_payload() -> None:
     service = StaticNutritionEstimationService(
-        raw_payload=(
-            '{"items": ['
-            '{"client_item_id": "entry-1:item-0", "calories": 220, "protein": 7.6, "fat": 2.2, "carbs": 42.8}, '
-            '{"client_item_id": "entry-1:item-1", "calories": 248, "protein": 46.5, "fat": 5.4, "carbs": 0.0}'
-            "]}"
-        ),
+        raw_payload=build_metric_payload(["entry-1:item-0", "entry-1:item-1"]),
         model_name="nutrition-stub-v1",
     )
 
@@ -94,13 +119,17 @@ def test_static_nutrition_service_validates_payload() -> None:
     assert isinstance(result, ValidNutritionPayload)
     assert result.nutrition_provider == "static_nutrition_stub"
     assert result.nutrition_model == "nutrition-stub-v1"
-    assert result.payload.items[0].calories == 220
-    assert result.payload.items[1].protein == 46.5
+    assert result.payload.items[0].metrics[0].code == "calories"
+    assert result.payload.items[1].metrics[1].value == 8.6
 
 
 def test_static_nutrition_service_rejects_missing_metrics() -> None:
     service = StaticNutritionEstimationService(
-        raw_payload='{"items": [{"client_item_id": "entry-1:item-0", "calories": 220, "protein": 7.6, "fat": 2.2}]}'
+        raw_payload=(
+            '{"items": [{"client_item_id": "entry-1:item-0", "metrics": ['
+            '{"code": "calories", "value": 220, "confidence": "medium"}'
+            "]}]}"
+        )
     )
 
     result = service.estimate(build_request())
@@ -110,11 +139,7 @@ def test_static_nutrition_service_rejects_missing_metrics() -> None:
 
 def test_static_nutrition_service_rejects_payload_with_missing_requested_item() -> None:
     service = StaticNutritionEstimationService(
-        raw_payload=(
-            '{"items": ['
-            '{"client_item_id": "entry-1:item-0", "calories": 220, "protein": 7.6, "fat": 2.2, "carbs": 42.8}'
-            "]}"
-        )
+        raw_payload=build_metric_payload(["entry-1:item-0"])
     )
 
     result = service.estimate(build_request())
@@ -126,11 +151,8 @@ def test_llm_nutrition_service_validates_client_response() -> None:
     client = SimpleNamespace(
         provider_name="openai_responses",
         model_name="gpt-5-mini",
-        estimate_nutrition_payload=lambda _request: (
-            '{"items": ['
-            '{"client_item_id": "entry-1:item-0", "calories": 220, "protein": 7.6, "fat": 2.2, "carbs": 42.8}, '
-            '{"client_item_id": "entry-1:item-1", "calories": 248, "protein": 46.5, "fat": 5.4, "carbs": 0.0}'
-            "]} "
+        estimate_nutrition_payload=lambda _request: build_metric_payload(
+            ["entry-1:item-0", "entry-1:item-1"]
         ),
     )
     service = LLMNutritionEstimationService(client=client)
@@ -190,11 +212,8 @@ def test_factory_builds_llm_service_when_client_provided() -> None:
     client = SimpleNamespace(
         provider_name="openai_responses",
         model_name="gpt-5-mini",
-        estimate_nutrition_payload=lambda _request: (
-            '{"items": ['
-            '{"client_item_id": "entry-1:item-0", "calories": 220, "protein": 7.6, "fat": 2.2, "carbs": 42.8}, '
-            '{"client_item_id": "entry-1:item-1", "calories": 248, "protein": 46.5, "fat": 5.4, "carbs": 0.0}'
-            "]}"
+        estimate_nutrition_payload=lambda _request: build_metric_payload(
+            ["entry-1:item-0", "entry-1:item-1"]
         ),
     )
 
@@ -207,12 +226,7 @@ def test_openai_nutrition_client_returns_output_text_from_sdk_response() -> None
     sdk_client = SimpleNamespace(
         responses=SimpleNamespace(
             create=lambda **_kwargs: SimpleNamespace(
-                output_text=(
-                    '{"items": ['
-                    '{"client_item_id": "entry-1:item-0", "calories": 220, "protein": 7.6, "fat": 2.2, "carbs": 42.8}, '
-                    '{"client_item_id": "entry-1:item-1", "calories": 248, "protein": 46.5, "fat": 5.4, "carbs": 0.0}'
-                    "]} "
-                )
+                output_text=build_metric_payload(["entry-1:item-0", "entry-1:item-1"])
             )
         )
     )
@@ -248,14 +262,7 @@ def test_openai_nutrition_client_builds_request_with_json_contract() -> None:
 
     def create_response(**kwargs):
         calls.append(kwargs)
-        return SimpleNamespace(
-            output_text=(
-                '{"items": ['
-                '{"client_item_id": "entry-1:item-0", "calories": 220, "protein": 7.6, "fat": 2.2, "carbs": 42.8}, '
-                '{"client_item_id": "entry-1:item-1", "calories": 248, "protein": 46.5, "fat": 5.4, "carbs": 0.0}'
-                "]} "
-            )
-        )
+        return SimpleNamespace(output_text=build_metric_payload(["entry-1:item-0", "entry-1:item-1"]))
 
     sdk_client = SimpleNamespace(responses=SimpleNamespace(create=create_response))
     client = OpenAIResponsesNutritionClient(
@@ -270,13 +277,13 @@ def test_openai_nutrition_client_builds_request_with_json_contract() -> None:
     assert calls[0]["instructions"]
     assert "Return only valid json matching this schema exactly" in calls[0]["instructions"]
     assert "same client_item_id as in the request" in calls[0]["instructions"]
-    assert "Do not add explanations, confidence, ranges, or extra fields" in calls[0]["instructions"]
+    assert "Return confidence for every metric using only low, medium, or high" in calls[0]["instructions"]
     assert content[0]["type"] == "input_text"
     assert content[1]["type"] == "input_text"
     assert '"client_item_id": "entry-1:item-0"' in content[1]["text"]
 
 
-def test_prepare_nutrition_request_from_extracted_payload_filters_supported_food_items() -> None:
+def test_prepare_nutrition_request_from_extracted_payload_includes_food_items_without_quantity() -> None:
     payload = ExtractedJournalPayload(
         entries=[
             ExtractedJournalEntry(
@@ -296,30 +303,14 @@ def test_prepare_nutrition_request_from_extracted_payload_filters_supported_food
     prepared_request = prepare_nutrition_request_from_extracted_payload(payload)
 
     assert prepared_request is not None
-    assert [item.client_item_id for item in prepared_request.request.items] == ["entry-0:item-0"]
-    assert prepared_request.request.items[0].name == "гречка"
-    assert prepared_request.request.items[0].quantity == 200
-    assert prepared_request.request.items[0].unit.value == "g"
+    assert [item.client_item_id for item in prepared_request.request.items] == [
+        "entry-0:item-0",
+        "entry-0:item-1",
+    ]
+    assert prepared_request.request.items[1].quantity is None
 
 
-def test_prepare_nutrition_request_from_extracted_payload_returns_none_without_supported_items() -> None:
-    payload = ExtractedJournalPayload(
-        entries=[
-            ExtractedJournalEntry(
-                type=EntryType.FOOD,
-                items=[ExtractedJournalItem(name="омлет")],
-            ),
-            ExtractedJournalEntry(
-                type=EntryType.WATER,
-                items=[ExtractedJournalItem(name="вода", quantity=250, unit="мл")],
-            ),
-        ]
-    )
-
-    assert prepare_nutrition_request_from_extracted_payload(payload) is None
-
-
-def test_prepare_nutrition_request_from_entries_filters_supported_food_items() -> None:
+def test_prepare_nutrition_request_from_entries_includes_food_items_without_quantity() -> None:
     entry = Entry(id=42, user_id=1, entry_type=EntryType.FOOD, occurred_at="2026-05-18T10:00:00Z")
     entry.items = [
         EntryItem(position=1, name="соус", quantity=30, unit="ml"),
@@ -335,8 +326,8 @@ def test_prepare_nutrition_request_from_entries_filters_supported_food_items() -
     assert [item.client_item_id for item in prepared_request.request.items] == [
         "entry-42:item-0",
         "entry-42:item-1",
+        "entry-42:item-2",
     ]
-    assert [item.name for item in prepared_request.request.items] == ["курица", "соус"]
 
 
 def test_resolve_nutrition_estimates_returns_results_in_request_order() -> None:
@@ -356,12 +347,7 @@ def test_resolve_nutrition_estimates_returns_results_in_request_order() -> None:
     assert prepared_request is not None
 
     service = StaticNutritionEstimationService(
-        raw_payload=(
-            '{"items": ['
-            '{"client_item_id": "entry-0:item-1", "calories": 248, "protein": 46.5, "fat": 5.4, "carbs": 0.0}, '
-            '{"client_item_id": "entry-0:item-0", "calories": 220, "protein": 7.6, "fat": 2.2, "carbs": 42.8}'
-            "]}"
-        )
+        raw_payload=build_metric_payload(["entry-0:item-1", "entry-0:item-0"])
     )
     result = service.estimate(prepared_request.request)
     assert isinstance(result, ValidNutritionPayload)
@@ -372,8 +358,8 @@ def test_resolve_nutrition_estimates_returns_results_in_request_order() -> None:
         "entry-0:item-0",
         "entry-0:item-1",
     ]
-    assert estimates[0].calories == 220
-    assert estimates[1].protein == 46.5
+    assert estimates[0].metrics[0].code == "calories"
+    assert estimates[0].metrics[0].confidence is NutritionConfidence.MEDIUM
 
 
 def test_extraction_to_nutrition_pipeline_on_structured_payload() -> None:
@@ -384,7 +370,7 @@ def test_extraction_to_nutrition_pipeline_on_structured_payload() -> None:
                 '{"entries": ['
                 '{"type": "food", "items": [{"name": "гречка", "quantity": 200, "unit": "г"}]}, '
                 '{"type": "water", "items": [{"name": "вода", "quantity": 250, "unit": "мл"}]}, '
-                '{"type": "food", "items": [{"name": "курица", "quantity": 150, "unit": "г"}]}'
+                '{"type": "food", "items": [{"name": "курица"}]}'
                 "]}"
             ),
         )
@@ -399,12 +385,7 @@ def test_extraction_to_nutrition_pipeline_on_structured_payload() -> None:
     ]
 
     nutrition_service = StaticNutritionEstimationService(
-        raw_payload=(
-            '{"items": ['
-            '{"client_item_id": "entry-0:item-0", "calories": 220, "protein": 7.6, "fat": 2.2, "carbs": 42.8}, '
-            '{"client_item_id": "entry-2:item-0", "calories": 248, "protein": 46.5, "fat": 5.4, "carbs": 0.0}'
-            "]}"
-        )
+        raw_payload=build_metric_payload(["entry-0:item-0", "entry-2:item-0"], confidence="low")
     )
     nutrition_result = nutrition_service.estimate(prepared_request.request)
 
@@ -412,4 +393,4 @@ def test_extraction_to_nutrition_pipeline_on_structured_payload() -> None:
     estimates = resolve_nutrition_estimates(prepared_request, nutrition_result.payload)
 
     assert [estimate.item_ref.name for estimate in estimates] == ["гречка", "курица"]
-    assert [estimate.calories for estimate in estimates] == [220, 248]
+    assert all(metric.confidence is NutritionConfidence.LOW for metric in estimates[1].metrics)

@@ -1,8 +1,11 @@
 from food_registry_bot.nutrition.contract import (
+    NutritionConfidence,
     NutritionEstimationItemInput,
     NutritionEstimationItemResult,
+    NutritionMetricResult,
     NutritionEstimationPayload,
     NutritionEstimationRequest,
+    SUPPORTED_NUTRITION_METRIC_CODES,
     NutritionUnit,
 )
 from food_registry_bot.nutrition.factory import create_nutrition_service
@@ -36,13 +39,16 @@ __all__ = [
     "LLMNutritionEstimationService",
     "LLMNutritionClient",
     "LLMNutritionClientError",
+    "NutritionConfidence",
     "NutritionEstimationItemInput",
     "NutritionEstimationItemResult",
     "NutritionEstimationPayload",
     "NutritionEstimationRequest",
     "NutritionJournalItemRef",
+    "NutritionMetricResult",
     "NutritionEstimationService",
     "NutritionPayloadClient",
+    "SUPPORTED_NUTRITION_METRIC_CODES",
     "NutritionUnit",
     "OpenAIResponsesNutritionClient",
     "PreparedNutritionRequest",

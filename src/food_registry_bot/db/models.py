@@ -137,6 +137,7 @@ class EntryItemMetric(Base):
     entry_item_id: Mapped[int] = mapped_column(ForeignKey("entry_items.id"), index=True)
     metric_id: Mapped[int] = mapped_column(ForeignKey("supported_metrics.id"), index=True)
     value: Mapped[float]
+    confidence: Mapped[str] = mapped_column(String(32), default="medium")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

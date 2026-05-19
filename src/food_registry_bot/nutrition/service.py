@@ -85,7 +85,7 @@ class StaticNutritionEstimationService:
             return InvalidNutritionPayload(
                 message=(
                     "Nutrition service вернул невалидный structured payload. "
-                    "Ожидаю объект вида {'items': [...]} с client_item_id, calories, protein, fat и carbs."
+                    "Ожидаю объект вида {'items': [...]} с client_item_id и metrics[]."
                 )
             )
 
@@ -122,7 +122,7 @@ class LLMNutritionEstimationService:
             return InvalidNutritionPayload(
                 message=(
                     "Nutrition provider вернул невалидный structured payload. "
-                    "Ожидаю объект вида {'items': [...]} с client_item_id, calories, protein, fat и carbs."
+                    "Ожидаю объект вида {'items': [...]} с client_item_id и metrics[]."
                 )
             )
 

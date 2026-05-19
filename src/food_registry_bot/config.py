@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     )
     llm_model: str = Field(default="gpt-5-mini", alias="LLM_MODEL")
     nutrition_provider: NutritionProvider = Field(
-        default=NutritionProvider.STATIC,
+        default=NutritionProvider.LLM,
         alias="NUTRITION_PROVIDER",
     )
     nutrition_model: str = Field(default="gpt-5-mini", alias="NUTRITION_MODEL")

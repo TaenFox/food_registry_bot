@@ -22,15 +22,15 @@ def test_secrets_env_file_lives_inside_sibling_secrets_directory() -> None:
     assert get_secrets_env_file() == get_secrets_dir() / ".env"
 
 
-def test_settings_default_to_structured_payload_extraction() -> None:
+def test_settings_default_to_structured_payload_extraction_and_llm_nutrition() -> None:
     settings = Settings.model_construct(
         extraction_provider=ExtractionProvider.STRUCTURED_PAYLOAD,
         llm_model="gpt-5-mini",
-        nutrition_provider=NutritionProvider.STATIC,
+        nutrition_provider=NutritionProvider.LLM,
         nutrition_model="gpt-5-mini",
     )
 
     assert settings.extraction_provider == ExtractionProvider.STRUCTURED_PAYLOAD
     assert settings.llm_model == "gpt-5-mini"
-    assert settings.nutrition_provider == NutritionProvider.STATIC
+    assert settings.nutrition_provider == NutritionProvider.LLM
     assert settings.nutrition_model == "gpt-5-mini"
