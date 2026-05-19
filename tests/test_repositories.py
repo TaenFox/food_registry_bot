@@ -6,14 +6,17 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.db.base import Base
 from food_registry_bot.db.models import (
+    DailyGoalSnapshot,
     EntryItem,
     EntryItemMetric,
     EntryType,
     SupportedMetric,
     UserAccess,
+    UserGoalPreference,
     UserSummaryPreference,
 )
 from food_registry_bot.db.repositories import (
+    DailyGoalSnapshotRepository,
     EntryItemCreate,
     EntryItemMetricRepository,
     EntryItemMetricValue,
@@ -21,11 +24,13 @@ from food_registry_bot.db.repositories import (
     NutritionEstimatePersistenceService,
     SupportedMetricRepository,
     UserAccessRepository,
+    UserGoalPreferenceRepository,
     UserSummaryPreferenceRepository,
     UserRepository,
 )
 from food_registry_bot.extraction import ExtractedJournalEntry, ExtractedJournalItem, ExtractedJournalPayload
 from food_registry_bot.nutrition import (
+    DailyCalorieGoalSnapshotUseCase,
     StaticNutritionEstimationService,
     ValidNutritionPayload,
     prepare_nutrition_request_from_entries,
@@ -178,6 +183,76 @@ def test_user_summary_preference_repository_cycles_nutrition_day_start_hour() ->
 
     assert first_hour == 6
     assert second_hour == 0
+
+
+def test_user_goal_preference_repository_creates_and_updates_calorie_goal() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7007, username="goal_user")
+    repository = UserGoalPreferenceRepository(session)
+
+    created_preference = repository.set_calorie_goal(user_id=user.id, calorie_goal=1800)
+    updated_preference = repository.set_calorie_goal(user_id=user.id, calorie_goal=1950)
+
+    assert created_preference.id == updated_preference.id
+    assert updated_preference.calorie_goal == 1950
+    saved_preference = session.query(UserGoalPreference).filter_by(user_id=user.id).one()
+    assert saved_preference.calorie_goal == 1950
+
+
+def test_daily_calorie_goal_snapshot_use_case_returns_none_without_current_goal() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7008, username="goalless_user")
+
+    snapshot = DailyCalorieGoalSnapshotUseCase(session).get_or_create(
+        user_id=user.id,
+        summary_date=datetime(2026, 5, 19, tzinfo=timezone.utc).date(),
+        timezone_name=user.timezone,
+        nutrition_day_start_hour=4,
+    )
+
+    assert snapshot is None
+    assert session.query(DailyGoalSnapshot).count() == 0
+
+
+def test_daily_calorie_goal_snapshot_use_case_freezes_existing_day_snapshot() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7009, username="frozen_goal_user")
+    UserGoalPreferenceRepository(session).set_calorie_goal(user_id=user.id, calorie_goal=1800)
+    use_case = DailyCalorieGoalSnapshotUseCase(session)
+
+    first_snapshot = use_case.get_or_create(
+        user_id=user.id,
+        summary_date=datetime(2026, 5, 19, tzinfo=timezone.utc).date(),
+        timezone_name=user.timezone,
+        nutrition_day_start_hour=4,
+    )
+    UserGoalPreferenceRepository(session).set_calorie_goal(user_id=user.id, calorie_goal=2000)
+    same_day_snapshot = use_case.get_or_create(
+        user_id=user.id,
+        summary_date=datetime(2026, 5, 19, tzinfo=timezone.utc).date(),
+        timezone_name="UTC",
+        nutrition_day_start_hour=6,
+    )
+    next_day_snapshot = use_case.get_or_create(
+        user_id=user.id,
+        summary_date=datetime(2026, 5, 20, tzinfo=timezone.utc).date(),
+        timezone_name="UTC",
+        nutrition_day_start_hour=6,
+    )
+
+    assert first_snapshot is not None
+    assert first_snapshot.calorie_goal == 1800
+    assert first_snapshot.timezone == "Europe/Moscow"
+    assert first_snapshot.nutrition_day_start_hour == 4
+    assert same_day_snapshot is not None
+    assert same_day_snapshot.id == first_snapshot.id
+    assert same_day_snapshot.calorie_goal == 1800
+    assert same_day_snapshot.timezone == "Europe/Moscow"
+    assert same_day_snapshot.nutrition_day_start_hour == 4
+    assert next_day_snapshot is not None
+    assert next_day_snapshot.calorie_goal == 2000
+    assert next_day_snapshot.timezone == "UTC"
+    assert next_day_snapshot.nutrition_day_start_hour == 6
 
 
 def test_entry_repository_creates_entry_for_user() -> None:

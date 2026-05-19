@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
@@ -14,8 +14,10 @@ from food_registry_bot.db.models import (
     EntryType,
     MealType,
     SupportedMetric,
+    DailyGoalSnapshot,
     User,
     UserAccess,
+    UserGoalPreference,
     UserSummaryPreference,
 )
 if TYPE_CHECKING:
@@ -224,6 +226,66 @@ class UserSummaryPreferenceRepository:
             return metric_attributes[metric_code]
         except KeyError as exc:
             raise ValueError(f"Unsupported summary preference metric code: {metric_code}") from exc
+
+
+class UserGoalPreferenceRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_by_user_id(self, user_id: int) -> Optional[UserGoalPreference]:
+        statement = select(UserGoalPreference).where(UserGoalPreference.user_id == user_id)
+        return self._session.scalar(statement)
+
+    def set_calorie_goal(self, *, user_id: int, calorie_goal: int) -> UserGoalPreference:
+        if calorie_goal <= 0:
+            raise ValueError("calorie_goal must be positive")
+
+        preference = self.get_by_user_id(user_id)
+        if preference is None:
+            preference = UserGoalPreference(user_id=user_id, calorie_goal=calorie_goal)
+            self._session.add(preference)
+        else:
+            preference.calorie_goal = calorie_goal
+
+        self._session.flush()
+        return preference
+
+
+class DailyGoalSnapshotRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_by_user_id_and_date(
+        self,
+        *,
+        user_id: int,
+        summary_date: date,
+    ) -> Optional[DailyGoalSnapshot]:
+        statement = select(DailyGoalSnapshot).where(
+            DailyGoalSnapshot.user_id == user_id,
+            DailyGoalSnapshot.summary_date == summary_date,
+        )
+        return self._session.scalar(statement)
+
+    def create(
+        self,
+        *,
+        user_id: int,
+        summary_date: date,
+        timezone_name: str,
+        nutrition_day_start_hour: int,
+        calorie_goal: int,
+    ) -> DailyGoalSnapshot:
+        snapshot = DailyGoalSnapshot(
+            user_id=user_id,
+            summary_date=summary_date,
+            timezone=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
+            calorie_goal=calorie_goal,
+        )
+        self._session.add(snapshot)
+        self._session.flush()
+        return snapshot
 
 
 class EntryRepository:

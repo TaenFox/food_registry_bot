@@ -46,6 +46,7 @@ from food_registry_bot.nutrition.daily_summary import (
     resolve_day_bounds_utc,
     resolve_local_summary_date,
 )
+from food_registry_bot.nutrition.goals import DailyCalorieGoalSnapshotUseCase
 
 __all__ = [
     "InvalidNutritionPayload",
@@ -87,4 +88,5 @@ __all__ = [
     "NutritionBackfillCompleted",
     "NutritionBackfillEntryFailure",
     "NutritionBackfillProgress",
+    "DailyCalorieGoalSnapshotUseCase",
 ]

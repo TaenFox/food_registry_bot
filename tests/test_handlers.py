@@ -17,6 +17,7 @@ from food_registry_bot.bot.handlers import (
     handle_admin_backfill_nutrition,
     handle_admin_deny,
     handle_admin_users,
+    handle_goal,
     handle_health,
     handle_message,
     handle_recent,
@@ -30,6 +31,7 @@ from food_registry_bot.bot.payloads import SummarySettingsCallback
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT
 from food_registry_bot.db.base import Base
 from food_registry_bot.db.models import (
+    DailyGoalSnapshot,
     Entry,
     EntryItem,
     EntryItemMetric,
@@ -37,6 +39,7 @@ from food_registry_bot.db.models import (
     SupportedMetric,
     User,
     UserAccess,
+    UserGoalPreference,
     UserSummaryPreference,
 )
 from food_registry_bot.extraction import (
@@ -1001,6 +1004,61 @@ async def test_today_uses_preference_nutrition_day_start_hour() -> None:
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == ("<pre>К: 300.0 ккал</pre>",)
+
+
+async def test_goal_returns_hint_when_goal_is_not_configured() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "goal_user")
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="goal_user"),
+        answer=AsyncMock(),
+    )
+    command = SimpleNamespace(args=None)
+
+    await handle_goal(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("Цель по калориям пока не настроена. Использование: /goal 1800",)
+
+
+async def test_goal_sets_preference_and_creates_snapshot_for_current_nutrition_day() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "goal_user")
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="goal_user"),
+        answer=AsyncMock(),
+    )
+    command = SimpleNamespace(args="1800")
+
+    original_datetime = handle_goal.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 19, 9, 0, tzinfo=timezone.utc)
+
+    handle_goal.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_goal(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
+    finally:
+        handle_goal.__globals__["datetime"] = original_datetime
+
+    with session_factory() as session:
+        saved_goal = session.query(UserGoalPreference).one()
+        saved_snapshot = session.query(DailyGoalSnapshot).one()
+
+    assert saved_goal.calorie_goal == 1800
+    assert saved_snapshot.summary_date.isoformat() == "2026-05-19"
+    assert saved_snapshot.calorie_goal == 1800
+    assert saved_snapshot.timezone == "Europe/Moscow"
+    assert saved_snapshot.nutrition_day_start_hour == 4
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Текущая цель по калориям: 1800 ккал.\n"
+        "Пищевой день 2026-05-19: 1800.\n"
+        "Часовой пояс дня: Europe/Moscow.\n"
+        "Начало пищевого дня: 04:00.",
+    )
 
 
 async def test_water_button_creates_water_entry_for_allowed_user() -> None:

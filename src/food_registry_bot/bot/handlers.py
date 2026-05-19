@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 from io import BytesIO
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from aiogram import Router
 from aiogram import F
@@ -23,6 +23,7 @@ from food_registry_bot.db.session import session_scope
 from food_registry_bot.db.repositories import (
     EntryItemCreate,
     EntryRepository,
+    UserGoalPreferenceRepository,
     UserAccessRepository,
     UserRepository,
     UserSummaryPreferenceRepository,
@@ -37,6 +38,7 @@ from food_registry_bot.extraction import (
 )
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
+    DailyCalorieGoalSnapshotUseCase,
     DailyNutritionSummary,
     DailyNutritionSummaryUseCase,
     FailedNutritionEstimation,
@@ -472,6 +474,36 @@ def build_summary_settings_response(
     )
 
 
+def build_goal_response(
+    *,
+    calorie_goal: int | None,
+    summary_date: date,
+    snapshot_calorie_goal: int | None,
+    timezone_name: str,
+    nutrition_day_start_hour: int,
+) -> str:
+    if calorie_goal is None:
+        return "Цель по калориям пока не настроена. Использование: /goal 1800"
+
+    lines = [
+        f"Текущая цель по калориям: {calorie_goal} ккал.",
+        (
+            f"Пищевой день {summary_date.isoformat()}: "
+            f"{snapshot_calorie_goal if snapshot_calorie_goal is not None else 'не зафиксирована'}."
+        ),
+        f"Часовой пояс дня: {timezone_name}.",
+        f"Начало пищевого дня: {nutrition_day_start_hour:02d}:00.",
+    ]
+    if snapshot_calorie_goal != calorie_goal:
+        lines.extend(
+            [
+                "",
+                "Текущий пищевой день уже был зафиксирован раньше, поэтому snapshot не изменился.",
+            ]
+        )
+    return "\n".join(lines)
+
+
 async def build_extraction_request(message: Message) -> JournalExtractionRequest | None:
     message_text = getattr(message, "text", None) or getattr(message, "caption", None)
     photo_sizes = getattr(message, "photo", None) or []
@@ -818,6 +850,71 @@ async def handle_today(
         build_today_summary_response_with_preferences(
             summary,
             enabled_metric_codes=get_enabled_summary_metric_codes(preference),
+        ),
+        reply_markup=build_main_keyboard(),
+    )
+
+
+@router.message(Command("goal"))
+async def handle_goal(
+    message: Message,
+    command: CommandObject,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    telegram_user = message.from_user
+    if telegram_user is None:
+        raise ValueError("Incoming message does not contain Telegram user")
+
+    parsed_goal = None
+    if command.args is not None and command.args.strip():
+        parsed_goal = parse_positive_int_arg(command)
+        if parsed_goal is None:
+            await message.answer("Использование: /goal 1800")
+            return
+
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
+        if user is None:
+            raise RuntimeError("User profile was not found after registration")
+
+        summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+        goal_preference_repository = UserGoalPreferenceRepository(session)
+        if parsed_goal is not None:
+            goal_preference = goal_preference_repository.set_calorie_goal(
+                user_id=user_id,
+                calorie_goal=parsed_goal,
+            )
+        else:
+            goal_preference = goal_preference_repository.get_by_user_id(user_id)
+
+        summary_date = resolve_local_summary_date(
+            reference_at=datetime.now(timezone.utc),
+            timezone_name=user.timezone,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        )
+        snapshot = DailyCalorieGoalSnapshotUseCase(session).get_or_create(
+            user_id=user_id,
+            summary_date=summary_date,
+            timezone_name=user.timezone,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        )
+        calorie_goal_value = goal_preference.calorie_goal if goal_preference is not None else None
+        snapshot_calorie_goal = snapshot.calorie_goal if snapshot is not None else None
+        timezone_name = user.timezone
+        nutrition_day_start_hour = summary_preference.nutrition_day_start_hour
+
+    await message.answer(
+        build_goal_response(
+            calorie_goal=calorie_goal_value,
+            summary_date=summary_date,
+            snapshot_calorie_goal=snapshot_calorie_goal,
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
         ),
         reply_markup=build_main_keyboard(),
     )
