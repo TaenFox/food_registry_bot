@@ -64,6 +64,10 @@ SUMMARY_METRIC_LINES = (
     ("fat", "Ж", "г"),
     ("carbs", "У", "г"),
 )
+SUMMARY_DISPLAY_MODE_LABELS = {
+    "text": "текст",
+    "bars": "бары",
+}
 
 
 class FoodWriteFlowError(RuntimeError):
@@ -416,6 +420,7 @@ def build_today_summary_response_with_preferences(
     summary: DailyNutritionSummary,
     *,
     enabled_metric_codes: tuple[str, ...],
+    summary_display_mode: str = "text",
     calorie_progress: DailyCalorieProgress | None = None,
 ) -> str:
     if summary.included_entry_count == 0 and summary.excluded_entry_count == 0:
@@ -427,10 +432,13 @@ def build_today_summary_response_with_preferences(
         if metric_code not in enabled_metric_codes:
             continue
         if metric_code == "calories" and calorie_progress is not None:
-            lines.append(
-                f"{short_label}: {round(calorie_progress.consumed_calories, 1)} / "
-                f"{calorie_progress.goal_calories} {unit}"
-            )
+            if summary_display_mode == "bars":
+                lines.append(build_calorie_progress_bar_line(calorie_progress))
+            else:
+                lines.append(
+                    f"{short_label}: {round(calorie_progress.consumed_calories, 1)} / "
+                    f"{calorie_progress.goal_calories} {unit}"
+                )
             continue
 
         metric_value = getattr(summary.totals, metric_code)
@@ -466,6 +474,7 @@ def build_summary_settings_response(
     show_protein: bool,
     show_fat: bool,
     show_carbs: bool,
+    summary_display_mode: str,
     nutrition_day_start_hour: int,
 ) -> str:
     statuses = {
@@ -479,9 +488,23 @@ def build_summary_settings_response(
             f"- белки: {statuses[show_protein]}",
             f"- жиры: {statuses[show_fat]}",
             f"- углеводы: {statuses[show_carbs]}",
+            f"- отображение: {SUMMARY_DISPLAY_MODE_LABELS[summary_display_mode]}",
             f"- начало дня: {nutrition_day_start_hour:02d}:00",
         ]
     )
+
+
+def build_calorie_progress_bar_line(calorie_progress: DailyCalorieProgress) -> str:
+    consumed = calorie_progress.consumed_calories
+    goal = calorie_progress.goal_calories
+    progress_ratio = consumed / goal if goal else 0.0
+    filled_cells = min(int(progress_ratio * 10), 10)
+    empty_cells = 10 - filled_cells
+    base_bar = "[" + ("█" * filled_cells) + ("░" * empty_cells) + "]"
+    overflow_cells = max(int((consumed - goal) / goal * 10), 0) if consumed > goal else 0
+    overflow_bar = "█" * overflow_cells
+    percentage = round(progress_ratio * 100, 1)
+    return f"К {base_bar}{overflow_bar} {percentage}% {round(consumed, 1)}/{goal} ккал"
 
 
 def build_goal_response(
@@ -750,6 +773,7 @@ async def handle_settings(
             show_protein=preference.show_protein,
             show_fat=preference.show_fat,
             show_carbs=preference.show_carbs,
+            summary_display_mode=preference.summary_display_mode,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
         ),
         reply_markup=build_summary_settings_keyboard(
@@ -757,6 +781,7 @@ async def handle_settings(
             show_protein=preference.show_protein,
             show_fat=preference.show_fat,
             show_carbs=preference.show_carbs,
+            summary_display_mode=preference.summary_display_mode,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
         ),
     )
@@ -775,6 +800,7 @@ async def handle_toggle_summary_metric(
         return
     if not (
         callback_data.action.startswith("toggle_")
+        or callback_data.action == "cycle_summary_display_mode"
         or callback_data.action == "cycle_nutrition_day_start_hour"
     ):
         await callback.answer("Неизвестное действие.", show_alert=True)
@@ -797,6 +823,8 @@ async def handle_toggle_summary_metric(
         preference_repository = UserSummaryPreferenceRepository(session)
         if callback_data.action == "cycle_nutrition_day_start_hour":
             preference = preference_repository.cycle_nutrition_day_start_hour(user_id=user.id)
+        elif callback_data.action == "cycle_summary_display_mode":
+            preference = preference_repository.cycle_summary_display_mode(user_id=user.id)
         else:
             metric_code = callback_data.action.removeprefix("toggle_")
             preference = preference_repository.toggle_metric_visibility(
@@ -811,6 +839,7 @@ async def handle_toggle_summary_metric(
                 show_protein=preference.show_protein,
                 show_fat=preference.show_fat,
                 show_carbs=preference.show_carbs,
+                summary_display_mode=preference.summary_display_mode,
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
             ),
             reply_markup=build_summary_settings_keyboard(
@@ -818,6 +847,7 @@ async def handle_toggle_summary_metric(
                 show_protein=preference.show_protein,
                 show_fat=preference.show_fat,
                 show_carbs=preference.show_carbs,
+                summary_display_mode=preference.summary_display_mode,
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
             ),
         )
@@ -870,6 +900,7 @@ async def handle_today(
         build_today_summary_response_with_preferences(
             summary,
             enabled_metric_codes=get_enabled_summary_metric_codes(preference),
+            summary_display_mode=preference.summary_display_mode,
             calorie_progress=calorie_progress,
         ),
         reply_markup=build_main_keyboard(),

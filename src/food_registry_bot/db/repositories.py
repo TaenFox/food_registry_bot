@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from food_registry_bot.nutrition.journal_adapter import PreparedNutritionRequest, ResolvedNutritionEstimate
 
 SUPPORTED_NUTRITION_DAY_START_HOURS = (0, 2, 4, 6)
+SUPPORTED_SUMMARY_DISPLAY_MODES = ("text", "bars")
 
 
 @dataclass(frozen=True)
@@ -176,6 +177,7 @@ class UserSummaryPreferenceRepository:
             show_protein=True,
             show_fat=True,
             show_carbs=True,
+            summary_display_mode="text",
             nutrition_day_start_hour=4,
         )
         self._session.add(preference)
@@ -211,6 +213,14 @@ class UserSummaryPreferenceRepository:
         current_index = SUPPORTED_NUTRITION_DAY_START_HOURS.index(preference.nutrition_day_start_hour)
         next_index = (current_index + 1) % len(SUPPORTED_NUTRITION_DAY_START_HOURS)
         preference.nutrition_day_start_hour = SUPPORTED_NUTRITION_DAY_START_HOURS[next_index]
+        self._session.flush()
+        return preference
+
+    def cycle_summary_display_mode(self, *, user_id: int) -> UserSummaryPreference:
+        preference, _created = self.get_or_create(user_id=user_id)
+        current_index = SUPPORTED_SUMMARY_DISPLAY_MODES.index(preference.summary_display_mode)
+        next_index = (current_index + 1) % len(SUPPORTED_SUMMARY_DISPLAY_MODES)
+        preference.summary_display_mode = SUPPORTED_SUMMARY_DISPLAY_MODES[next_index]
         self._session.flush()
         return preference
 

@@ -157,6 +157,7 @@ def test_user_summary_preference_repository_creates_default_preferences_once() -
     assert preference.show_protein is True
     assert preference.show_fat is True
     assert preference.show_carbs is True
+    assert preference.summary_display_mode == "text"
     assert preference.nutrition_day_start_hour == 4
 
 
@@ -183,6 +184,18 @@ def test_user_summary_preference_repository_cycles_nutrition_day_start_hour() ->
 
     assert first_hour == 6
     assert second_hour == 0
+
+
+def test_user_summary_preference_repository_cycles_summary_display_mode() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7007, username="prefs_mode_user")
+    repository = UserSummaryPreferenceRepository(session)
+
+    first_mode = repository.cycle_summary_display_mode(user_id=user.id).summary_display_mode
+    second_mode = repository.cycle_summary_display_mode(user_id=user.id).summary_display_mode
+
+    assert first_mode == "bars"
+    assert second_mode == "text"
 
 
 def test_user_goal_preference_repository_creates_and_updates_calorie_goal() -> None:

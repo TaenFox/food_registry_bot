@@ -955,6 +955,7 @@ async def test_settings_returns_current_summary_preferences() -> None:
         "- белки: включено\n"
         "- жиры: включено\n"
         "- углеводы: включено\n"
+        "- отображение: текст\n"
         "- начало дня: 04:00",
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
@@ -962,7 +963,8 @@ async def test_settings_returns_current_summary_preferences() -> None:
     assert reply_markup.inline_keyboard[1][0].text == "Белки: on"
     assert reply_markup.inline_keyboard[2][0].text == "Жиры: on"
     assert reply_markup.inline_keyboard[3][0].text == "Углеводы: on"
-    assert reply_markup.inline_keyboard[4][0].text == "Начало дня: 04:00"
+    assert reply_markup.inline_keyboard[4][0].text == "Отображение: текст"
+    assert reply_markup.inline_keyboard[5][0].text == "Начало дня: 04:00"
 
 
 async def test_toggle_summary_metric_updates_preference_and_message() -> None:
@@ -1008,6 +1010,7 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
         "- белки: выключено\n"
         "- жиры: включено\n"
         "- углеводы: включено\n"
+        "- отображение: текст\n"
         "- начало дня: 04:00",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
@@ -1058,10 +1061,61 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
         "- белки: включено\n"
         "- жиры: включено\n"
         "- углеводы: включено\n"
+        "- отображение: текст\n"
         "- начало дня: 06:00",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[4][0].text == "Начало дня: 06:00"
+    assert reply_markup.inline_keyboard[5][0].text == "Начало дня: 06:00"
+
+
+async def test_cycle_summary_display_mode_updates_preference_and_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "settings_display_mode_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="settings_display_mode_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(
+            UserSummaryPreference(
+                user_id=user.id,
+                show_calories=True,
+                show_protein=True,
+                show_fat=True,
+                show_carbs=True,
+                summary_display_mode="text",
+                nutrition_day_start_hour=4,
+            )
+        )
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="settings_display_mode_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_toggle_summary_metric(
+        callback,
+        SummarySettingsCallback(action="cycle_summary_display_mode"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_preference = session.query(UserSummaryPreference).one()
+
+    assert saved_preference.summary_display_mode == "bars"
+    assert callback.message.edit_text.await_args.args == (
+        "Настройки summary:\n"
+        "- калории: включено\n"
+        "- белки: включено\n"
+        "- жиры: включено\n"
+        "- углеводы: включено\n"
+        "- отображение: бары\n"
+        "- начало дня: 04:00",
+    )
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[4][0].text == "Отображение: бары"
 
 
 async def test_today_uses_preference_nutrition_day_start_hour() -> None:
@@ -1129,6 +1183,70 @@ async def test_today_uses_preference_nutrition_day_start_hour() -> None:
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == ("<pre>К: 300.0 ккал</pre>",)
+
+
+async def test_today_shows_calorie_progress_bar_in_bars_mode() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "today_bar_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="today_bar_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        item = EntryItem(entry_id=entry.id, position=0, name="омлет")
+        session.add(item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=item.id, metric_id=1, value=320.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=2, value=24.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=3, value=19.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=4, value=11.0, confidence="medium"),
+                UserSummaryPreference(
+                    user_id=user.id,
+                    show_calories=True,
+                    show_protein=True,
+                    show_fat=True,
+                    show_carbs=True,
+                    summary_display_mode="bars",
+                ),
+                UserGoalPreference(
+                    user_id=user.id,
+                    calorie_goal=1800,
+                ),
+                DailyGoalSnapshot(
+                    user_id=user.id,
+                    summary_date=datetime(2026, 5, 19, tzinfo=timezone.utc).date(),
+                    timezone="Europe/Moscow",
+                    nutrition_day_start_hour=4,
+                    calorie_goal=1800,
+                ),
+            ]
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="today_bar_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_today(message, session_factory, admin_user_ids=(ADMIN_ID,))
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "<pre>"
+        "К [█░░░░░░░░░] 17.8% 320.0/1800 ккал\n"
+        "Б: 24.0 г\n"
+        "Ж: 19.0 г\n"
+        "У: 11.0 г"
+        "</pre>",
+    )
 
 
 async def test_goal_returns_hint_when_goal_is_not_configured() -> None:

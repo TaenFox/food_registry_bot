@@ -3,6 +3,10 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 from food_registry_bot.bot.payloads import SummarySettingsCallback
 
 WATER_250_ML_BUTTON_TEXT = "Вода 250 мл"
+SUMMARY_DISPLAY_MODE_BUTTON_LABELS = {
+    "text": "текст",
+    "bars": "бары",
+}
 
 
 def build_main_keyboard() -> ReplyKeyboardMarkup:
@@ -21,6 +25,7 @@ def build_summary_settings_keyboard(
     show_protein: bool,
     show_fat: bool,
     show_carbs: bool,
+    summary_display_mode: str,
     nutrition_day_start_hour: int,
 ) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -47,6 +52,12 @@ def build_summary_settings_keyboard(
                 InlineKeyboardButton(
                     text=f"Углеводы: {'on' if show_carbs else 'off'}",
                     callback_data=SummarySettingsCallback(action="toggle_carbs").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Отображение: {SUMMARY_DISPLAY_MODE_BUTTON_LABELS[summary_display_mode]}",
+                    callback_data=SummarySettingsCallback(action="cycle_summary_display_mode").pack(),
                 )
             ],
             [
