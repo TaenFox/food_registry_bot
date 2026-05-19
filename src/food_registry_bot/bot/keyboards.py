@@ -1,4 +1,6 @@
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+
+from food_registry_bot.bot.payloads import SummarySettingsCallback
 
 WATER_250_ML_BUTTON_TEXT = "Вода 250 мл"
 
@@ -10,4 +12,48 @@ def build_main_keyboard() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
         input_field_placeholder="Напиши сообщение или выбери действие",
+    )
+
+
+def build_summary_settings_keyboard(
+    *,
+    show_calories: bool,
+    show_protein: bool,
+    show_fat: bool,
+    show_carbs: bool,
+    nutrition_day_start_hour: int,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"Калории: {'on' if show_calories else 'off'}",
+                    callback_data=SummarySettingsCallback(action="toggle_calories").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Белки: {'on' if show_protein else 'off'}",
+                    callback_data=SummarySettingsCallback(action="toggle_protein").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Жиры: {'on' if show_fat else 'off'}",
+                    callback_data=SummarySettingsCallback(action="toggle_fat").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Углеводы: {'on' if show_carbs else 'off'}",
+                    callback_data=SummarySettingsCallback(action="toggle_carbs").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Начало дня: {nutrition_day_start_hour:02d}:00",
+                    callback_data=SummarySettingsCallback(action="cycle_nutrition_day_start_hour").pack(),
+                )
+            ]
+        ]
     )

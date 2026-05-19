@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import html
 from io import BytesIO
 from datetime import datetime, timezone
 
 from aiogram import Router
 from aiogram import F
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
-from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT, build_main_keyboard
+from food_registry_bot.bot.keyboards import (
+    WATER_250_ML_BUTTON_TEXT,
+    build_main_keyboard,
+    build_summary_settings_keyboard,
+)
+from food_registry_bot.bot.payloads import SummarySettingsCallback
 from food_registry_bot.db.models import EntryType
 from food_registry_bot.db.session import session_scope
 from food_registry_bot.db.repositories import (
@@ -19,6 +25,7 @@ from food_registry_bot.db.repositories import (
     EntryRepository,
     UserAccessRepository,
     UserRepository,
+    UserSummaryPreferenceRepository,
 )
 from food_registry_bot.extraction import (
     ExtractionImageInput,
@@ -30,10 +37,13 @@ from food_registry_bot.extraction import (
 )
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
+    DailyNutritionSummary,
+    DailyNutritionSummaryUseCase,
     FailedNutritionEstimation,
     NutritionBackfillCompleted,
     NutritionBackfillProgress,
     NutritionEstimationService,
+    resolve_local_summary_date,
     SUPPORTED_NUTRITION_METRIC_CODES,
     SkippedNutritionEstimation,
     StaticNutritionEstimationService,
@@ -44,6 +54,12 @@ from food_registry_bot.nutrition import (
 router = Router()
 default_extraction_service = StructuredPayloadExtractionService()
 default_nutrition_service = StaticNutritionEstimationService(raw_payload="")
+SUMMARY_METRIC_LINES = (
+    ("calories", "К", "ккал"),
+    ("protein", "Б", "г"),
+    ("fat", "Ж", "г"),
+    ("carbs", "У", "г"),
+)
 
 
 class FoodWriteFlowError(RuntimeError):
@@ -371,6 +387,91 @@ def build_recent_entries_response(entries: list) -> str:
     return "\n".join(lines)
 
 
+def build_today_summary_response(summary: DailyNutritionSummary) -> str:
+    if summary.included_entry_count == 0 and summary.excluded_entry_count == 0:
+        return "Сегодня пока нет сохранённых записей еды."
+
+    lines = ["Итог за сегодня:"]
+    lines.append(f"- калории: {round(summary.totals.calories, 1)} ккал")
+
+    if not summary.is_complete:
+        lines.extend(
+            [
+                "",
+                (
+                    f"Есть записей еды без полного набора метрик: {summary.excluded_entry_count}."
+                    " Итог дня пока неполный."
+                ),
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+def build_today_summary_response_with_preferences(
+    summary: DailyNutritionSummary,
+    *,
+    enabled_metric_codes: tuple[str, ...],
+) -> str:
+    if summary.included_entry_count == 0 and summary.excluded_entry_count == 0:
+        return "Сегодня пока нет сохранённых записей еды."
+    if not enabled_metric_codes:
+        return "В summary сейчас нет включённых показателей."
+    lines: list[str] = []
+    for metric_code, short_label, unit in SUMMARY_METRIC_LINES:
+        if metric_code not in enabled_metric_codes:
+            continue
+        metric_value = getattr(summary.totals, metric_code)
+        lines.append(f"{short_label}: {round(metric_value, 1)} {unit}")
+
+    rendered_summary = "<pre>" + html.escape("\n".join(lines)) + "</pre>"
+
+    if not summary.is_complete:
+        return "\n\n".join(
+            [
+                rendered_summary,
+                (
+                    f"Есть записей еды без полного набора метрик: {summary.excluded_entry_count}."
+                    " Итог дня пока неполный."
+                ),
+            ]
+        )
+
+    return rendered_summary
+
+
+def get_enabled_summary_metric_codes(preference) -> tuple[str, ...]:
+    enabled_metric_codes: list[str] = []
+    for metric_code, _short_label, _unit in SUMMARY_METRIC_LINES:
+        if getattr(preference, f"show_{metric_code}"):
+            enabled_metric_codes.append(metric_code)
+    return tuple(enabled_metric_codes)
+
+
+def build_summary_settings_response(
+    *,
+    show_calories: bool,
+    show_protein: bool,
+    show_fat: bool,
+    show_carbs: bool,
+    nutrition_day_start_hour: int,
+) -> str:
+    statuses = {
+        True: "включено",
+        False: "выключено",
+    }
+    return "\n".join(
+        [
+            "Настройки summary:",
+            f"- калории: {statuses[show_calories]}",
+            f"- белки: {statuses[show_protein]}",
+            f"- жиры: {statuses[show_fat]}",
+            f"- углеводы: {statuses[show_carbs]}",
+            f"- начало дня: {nutrition_day_start_hour:02d}:00",
+        ]
+    )
+
+
 async def build_extraction_request(message: Message) -> JournalExtractionRequest | None:
     message_text = getattr(message, "text", None) or getattr(message, "caption", None)
     photo_sizes = getattr(message, "photo", None) or []
@@ -586,6 +687,140 @@ async def handle_recent(
         entries = EntryRepository(session).list_recent_for_user(user_id=user_id, limit=5)
 
     await message.answer(build_recent_entries_response(entries), reply_markup=build_main_keyboard())
+
+
+@router.message(Command("settings"))
+async def handle_settings(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+
+    await message.answer(
+        build_summary_settings_response(
+            show_calories=preference.show_calories,
+            show_protein=preference.show_protein,
+            show_fat=preference.show_fat,
+            show_carbs=preference.show_carbs,
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
+        ),
+        reply_markup=build_summary_settings_keyboard(
+            show_calories=preference.show_calories,
+            show_protein=preference.show_protein,
+            show_fat=preference.show_fat,
+            show_carbs=preference.show_carbs,
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
+        ),
+    )
+
+
+@router.callback_query(SummarySettingsCallback.filter())
+async def handle_toggle_summary_metric(
+    callback: CallbackQuery,
+    callback_data: SummarySettingsCallback,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = callback.from_user
+    if telegram_user is None:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+    if not (
+        callback_data.action.startswith("toggle_")
+        or callback_data.action == "cycle_nutrition_day_start_hour"
+    ):
+        await callback.answer("Неизвестное действие.", show_alert=True)
+        return
+    with session_scope(session_factory) as session:
+        if not (
+            is_admin_user(telegram_user.id, admin_user_ids)
+            or UserAccessRepository(session).is_allowed(telegram_user.id)
+        ):
+            await callback.answer("Доступ к боту не разрешён.", show_alert=True)
+            return
+
+        user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
+        if user is None:
+            user, _created = UserRepository(session).get_or_create(
+                telegram_user_id=telegram_user.id,
+                username=telegram_user.username,
+            )
+
+        preference_repository = UserSummaryPreferenceRepository(session)
+        if callback_data.action == "cycle_nutrition_day_start_hour":
+            preference = preference_repository.cycle_nutrition_day_start_hour(user_id=user.id)
+        else:
+            metric_code = callback_data.action.removeprefix("toggle_")
+            preference = preference_repository.toggle_metric_visibility(
+                user_id=user.id,
+                metric_code=metric_code,
+            )
+
+    if callback.message is not None:
+        await callback.message.edit_text(
+            build_summary_settings_response(
+                show_calories=preference.show_calories,
+                show_protein=preference.show_protein,
+                show_fat=preference.show_fat,
+                show_carbs=preference.show_carbs,
+                nutrition_day_start_hour=preference.nutrition_day_start_hour,
+            ),
+            reply_markup=build_summary_settings_keyboard(
+                show_calories=preference.show_calories,
+                show_protein=preference.show_protein,
+                show_fat=preference.show_fat,
+                show_carbs=preference.show_carbs,
+                nutrition_day_start_hour=preference.nutrition_day_start_hour,
+            ),
+        )
+    await callback.answer("Настройка обновлена.")
+
+
+@router.message(Command("today"))
+async def handle_today(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    telegram_user = message.from_user
+    if telegram_user is None:
+        raise ValueError("Incoming message does not contain Telegram user")
+
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
+        if user is None:
+            raise RuntimeError("User profile was not found after registration")
+        preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+
+        summary_date = resolve_local_summary_date(
+            reference_at=datetime.now(timezone.utc),
+            timezone_name=user.timezone,
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
+        )
+        summary = DailyNutritionSummaryUseCase(session).run(
+            user_id=user_id,
+            timezone_name=user.timezone,
+            summary_date=summary_date,
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
+        )
+
+    await message.answer(
+        build_today_summary_response_with_preferences(
+            summary,
+            enabled_metric_codes=get_enabled_summary_metric_codes(preference),
+        ),
+        reply_markup=build_main_keyboard(),
+    )
 
 
 @router.message(F.text == WATER_250_ML_BUTTON_TEXT)

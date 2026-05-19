@@ -16,9 +16,12 @@ from food_registry_bot.db.models import (
     SupportedMetric,
     User,
     UserAccess,
+    UserSummaryPreference,
 )
 if TYPE_CHECKING:
     from food_registry_bot.nutrition.journal_adapter import PreparedNutritionRequest, ResolvedNutritionEstimate
+
+SUPPORTED_NUTRITION_DAY_START_HOURS = (0, 2, 4, 6)
 
 
 @dataclass(frozen=True)
@@ -152,6 +155,77 @@ class UserAccessRepository:
         return result
 
 
+class UserSummaryPreferenceRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_by_user_id(self, user_id: int) -> Optional[UserSummaryPreference]:
+        statement = select(UserSummaryPreference).where(UserSummaryPreference.user_id == user_id)
+        return self._session.scalar(statement)
+
+    def get_or_create(self, *, user_id: int) -> tuple[UserSummaryPreference, bool]:
+        preference = self.get_by_user_id(user_id)
+        if preference is not None:
+            return preference, False
+
+        preference = UserSummaryPreference(
+            user_id=user_id,
+            show_calories=True,
+            show_protein=True,
+            show_fat=True,
+            show_carbs=True,
+            nutrition_day_start_hour=4,
+        )
+        self._session.add(preference)
+        self._session.flush()
+        return preference, True
+
+    def set_metric_visibility(
+        self,
+        *,
+        user_id: int,
+        metric_code: str,
+        is_visible: bool,
+    ) -> UserSummaryPreference:
+        preference, _created = self.get_or_create(user_id=user_id)
+        setattr(preference, self._resolve_metric_attribute(metric_code), is_visible)
+        self._session.flush()
+        return preference
+
+    def toggle_metric_visibility(
+        self,
+        *,
+        user_id: int,
+        metric_code: str,
+    ) -> UserSummaryPreference:
+        preference, _created = self.get_or_create(user_id=user_id)
+        attribute_name = self._resolve_metric_attribute(metric_code)
+        setattr(preference, attribute_name, not getattr(preference, attribute_name))
+        self._session.flush()
+        return preference
+
+    def cycle_nutrition_day_start_hour(self, *, user_id: int) -> UserSummaryPreference:
+        preference, _created = self.get_or_create(user_id=user_id)
+        current_index = SUPPORTED_NUTRITION_DAY_START_HOURS.index(preference.nutrition_day_start_hour)
+        next_index = (current_index + 1) % len(SUPPORTED_NUTRITION_DAY_START_HOURS)
+        preference.nutrition_day_start_hour = SUPPORTED_NUTRITION_DAY_START_HOURS[next_index]
+        self._session.flush()
+        return preference
+
+    @staticmethod
+    def _resolve_metric_attribute(metric_code: str) -> str:
+        metric_attributes = {
+            "calories": "show_calories",
+            "protein": "show_protein",
+            "fat": "show_fat",
+            "carbs": "show_carbs",
+        }
+        try:
+            return metric_attributes[metric_code]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported summary preference metric code: {metric_code}") from exc
+
+
 class EntryRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -219,6 +293,30 @@ class EntryRepository:
             .where(Entry.id.in_(entry_ids))
             .options(selectinload(Entry.items))
             .order_by(Entry.id.asc())
+        )
+        return list(self._session.scalars(statement))
+
+    def list_food_for_user_between(
+        self,
+        *,
+        user_id: int,
+        occurred_at_from: datetime,
+        occurred_at_to: datetime,
+    ) -> list[Entry]:
+        statement = (
+            select(Entry)
+            .where(
+                Entry.user_id == user_id,
+                Entry.entry_type == EntryType.FOOD,
+                Entry.occurred_at >= occurred_at_from,
+                Entry.occurred_at < occurred_at_to,
+            )
+            .options(
+                selectinload(Entry.items)
+                .selectinload(EntryItem.metrics)
+                .selectinload(EntryItemMetric.metric)
+            )
+            .order_by(Entry.occurred_at.asc(), Entry.id.asc())
         )
         return list(self._session.scalars(statement))
 

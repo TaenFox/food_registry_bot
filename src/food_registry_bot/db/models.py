@@ -46,6 +46,11 @@ class User(Base):
     )
 
     entries: Mapped[list["Entry"]] = relationship(back_populates="user")
+    summary_preferences: Mapped[Optional["UserSummaryPreference"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
 
 class UserAccess(Base):
@@ -64,6 +69,29 @@ class UserAccess(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class UserSummaryPreference(Base):
+    __tablename__ = "user_summary_preferences"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+    show_calories: Mapped[bool] = mapped_column(default=True)
+    show_protein: Mapped[bool] = mapped_column(default=True)
+    show_fat: Mapped[bool] = mapped_column(default=True)
+    show_carbs: Mapped[bool] = mapped_column(default=True)
+    nutrition_day_start_hour: Mapped[int] = mapped_column(default=4)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    user: Mapped["User"] = relationship(back_populates="summary_preferences")
 
 
 class Entry(Base):

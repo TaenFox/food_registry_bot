@@ -6,6 +6,7 @@ def test_core_tables_registered() -> None:
     assert set(Base.metadata.tables) == {
         "users",
         "user_access",
+        "user_summary_preferences",
         "entries",
         "entry_items",
         "supported_metrics",
