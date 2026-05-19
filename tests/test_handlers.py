@@ -216,7 +216,7 @@ async def test_admin_allow_returns_safe_usage_text_for_missing_argument() -> Non
     await handle_admin_allow(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
 
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Использование: /admin_allow TELEGRAM_USER_ID",)
+    assert message.answer.await_args.args == ("Использование: <code>/admin_allow TELEGRAM_USER_ID</code>",)
 
 
 async def test_admin_returns_system_overview_and_commands() -> None:
@@ -261,9 +261,9 @@ async def test_admin_returns_system_overview_and_commands() -> None:
             "Доступные команды:\n"
             "- /admin\n"
             "- /admin_users\n"
-            "- /admin_allow TELEGRAM_USER_ID\n"
-            "- /admin_deny TELEGRAM_USER_ID\n"
-            "- /admin_backfill_nutrition [LIMIT]"
+            "- <code>/admin_allow TELEGRAM_USER_ID</code>\n"
+            "- <code>/admin_deny TELEGRAM_USER_ID</code>\n"
+            "- <code>/admin_backfill_nutrition [LIMIT]</code>"
         ),
     )
 
@@ -298,9 +298,9 @@ async def test_admin_overview_excludes_admin_from_user_counters() -> None:
             "Доступные команды:\n"
             "- /admin\n"
             "- /admin_users\n"
-            "- /admin_allow TELEGRAM_USER_ID\n"
-            "- /admin_deny TELEGRAM_USER_ID\n"
-            "- /admin_backfill_nutrition [LIMIT]"
+            "- <code>/admin_allow TELEGRAM_USER_ID</code>\n"
+            "- <code>/admin_deny TELEGRAM_USER_ID</code>\n"
+            "- <code>/admin_backfill_nutrition [LIMIT]</code>"
         ),
     )
 
@@ -361,9 +361,9 @@ async def test_admin_users_returns_known_users_with_status_and_commands() -> Non
     assert message.answer.await_args.args == (
         "Пользователи:\n"
         f"- {ALLOWED_USER_ID} @allowed_user [allowed]\n"
-        f"/admin_deny {ALLOWED_USER_ID}\n"
+        f"<code>/admin_deny {ALLOWED_USER_ID}</code>\n"
         f"- {DENIED_USER_ID} @denied_user [denied]\n"
-        f"/admin_allow {DENIED_USER_ID}\n"
+        f"<code>/admin_allow {DENIED_USER_ID}</code>\n"
         f"- {ADMIN_ID} [admin]",
     )
 
@@ -388,7 +388,7 @@ async def test_admin_users_shows_new_denied_user_after_first_contact() -> None:
     assert admin_message.answer.await_args.args == (
         "Пользователи:\n"
         f"- {LARGE_DENIED_USER_ID} @new_user [denied]\n"
-        f"/admin_allow {LARGE_DENIED_USER_ID}\n"
+        f"<code>/admin_allow {LARGE_DENIED_USER_ID}</code>\n"
         f"- {ADMIN_ID} [admin]",
     )
 
@@ -479,7 +479,7 @@ async def test_admin_backfill_nutrition_returns_safe_usage_text_for_invalid_limi
     )
 
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Использование: /admin_backfill_nutrition [LIMIT]",)
+    assert message.answer.await_args.args == ("Использование: <code>/admin_backfill_nutrition [LIMIT]</code>",)
 
 
 async def test_admin_backfill_nutrition_reports_unhandled_error() -> None:
@@ -1298,10 +1298,10 @@ async def test_goal_returns_default_goals_when_preference_is_not_created() -> No
         "- углеводы: 210 г\n"
         "\n"
         "Настройка:\n"
-        "- /goal 1800\n"
-        "- /goal protein 90\n"
-        "- /goal fat 60\n"
-        "- /goal carbs 210\n"
+        "- <code>/goal 1800</code>\n"
+        "- <code>/goal protein 90</code>\n"
+        "- <code>/goal fat 60</code>\n"
+        "- <code>/goal carbs 210</code>\n"
         "\n"
         "Пищевой день 2026-05-19:\n"
         "- калории: 1800 ккал\n"
@@ -1355,10 +1355,10 @@ async def test_goal_sets_preference_and_creates_snapshot_for_current_nutrition_d
         "- углеводы: 210 г\n"
         "\n"
         "Настройка:\n"
-        "- /goal 1800\n"
-        "- /goal protein 90\n"
-        "- /goal fat 60\n"
-        "- /goal carbs 210\n"
+        "- <code>/goal 1800</code>\n"
+        "- <code>/goal protein 90</code>\n"
+        "- <code>/goal fat 60</code>\n"
+        "- <code>/goal carbs 210</code>\n"
         "\n"
         "Пищевой день 2026-05-19:\n"
         "- калории: 1800 ккал\n"
@@ -1440,9 +1440,9 @@ async def test_goal_hint_respects_enabled_summary_metrics() -> None:
         handle_goal.__globals__["datetime"] = original_datetime
 
     rendered = message.answer.await_args.args[0]
-    assert "Настройка:\n- /goal protein 90\n- /goal carbs 210\n" in rendered
-    assert "/goal 1800" not in rendered
-    assert "/goal fat 60" not in rendered
+    assert "Настройка:\n- <code>/goal protein 90</code>\n- <code>/goal carbs 210</code>\n" in rendered
+    assert "<code>/goal 1800</code>" not in rendered
+    assert "<code>/goal fat 60</code>" not in rendered
 
 
 async def test_water_button_creates_water_entry_for_allowed_user() -> None:

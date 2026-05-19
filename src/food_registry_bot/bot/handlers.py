@@ -220,7 +220,7 @@ def build_admin_users_response(
             if known_user.is_allowed
             else f"/admin_allow {known_user.telegram_user_id}"
         )
-        lines.append(next_command)
+        lines.append(f"<code>{next_command}</code>")
 
     for admin_user_id in sorted(admin_user_ids):
         if admin_user_id in rendered_ids:
@@ -324,9 +324,9 @@ def build_admin_overview_response(
             "Доступные команды:",
             "- /admin",
             "- /admin_users",
-            "- /admin_allow TELEGRAM_USER_ID",
-            "- /admin_deny TELEGRAM_USER_ID",
-            "- /admin_backfill_nutrition [LIMIT]",
+            "- <code>/admin_allow TELEGRAM_USER_ID</code>",
+            "- <code>/admin_deny TELEGRAM_USER_ID</code>",
+            "- <code>/admin_backfill_nutrition [LIMIT]</code>",
         ]
     )
 
@@ -578,10 +578,10 @@ def build_goal_response(
     goal_command_lines = []
     for metric_code in enabled_metric_codes:
         if metric_code == "calories":
-            goal_command_lines.append(f"- /goal {goal_preference.calorie_goal}")
+            goal_command_lines.append(f"- <code>/goal {goal_preference.calorie_goal}</code>")
             continue
         goal_value = getattr(goal_preference, f"{metric_code}_goal")
-        goal_command_lines.append(f"- /goal {metric_code} {goal_value}")
+        goal_command_lines.append(f"- <code>/goal {metric_code} {goal_value}</code>")
 
     if goal_command_lines:
         lines[5:5] = ["", "Настройка:", *goal_command_lines, ""]
@@ -632,7 +632,7 @@ async def handle_admin_allow(
 
     target_user_id = parse_target_telegram_user_id(command)
     if target_user_id is None:
-        await message.answer("Использование: /admin_allow TELEGRAM_USER_ID")
+        await message.answer("Использование: <code>/admin_allow TELEGRAM_USER_ID</code>")
         return
 
     with session_scope(session_factory) as session:
@@ -659,7 +659,7 @@ async def handle_admin_deny(
 
     target_user_id = parse_target_telegram_user_id(command)
     if target_user_id is None:
-        await message.answer("Использование: /admin_deny TELEGRAM_USER_ID")
+        await message.answer("Использование: <code>/admin_deny TELEGRAM_USER_ID</code>")
         return
 
     with session_scope(session_factory) as session:
@@ -738,7 +738,7 @@ async def handle_admin_backfill_nutrition(
     if command.args is not None and command.args.strip():
         parsed_limit = parse_positive_int_arg(command)
         if parsed_limit is None:
-            await message.answer("Использование: /admin_backfill_nutrition [LIMIT]")
+            await message.answer("Использование: <code>/admin_backfill_nutrition [LIMIT]</code>")
             return
         limit = parsed_limit
 
@@ -987,7 +987,7 @@ async def handle_goal(
 
     parsed_goal = parse_goal_command_args(command)
     if command.args is not None and command.args.strip() and parsed_goal is None:
-        await message.answer("Использование: /goal 1800 или /goal protein 90")
+        await message.answer("Использование: <code>/goal 1800</code> или <code>/goal protein 90</code>")
         return
 
     with session_scope(session_factory) as session:
