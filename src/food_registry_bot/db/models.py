@@ -89,6 +89,7 @@ class UserSummaryPreference(Base):
     show_protein: Mapped[bool] = mapped_column(default=True)
     show_fat: Mapped[bool] = mapped_column(default=True)
     show_carbs: Mapped[bool] = mapped_column(default=True)
+    show_water: Mapped[bool] = mapped_column(default=True)
     summary_display_mode: Mapped[str] = mapped_column(String(16), default="text")
     nutrition_day_start_hour: Mapped[int] = mapped_column(default=4)
     created_at: Mapped[datetime] = mapped_column(
@@ -113,6 +114,7 @@ class UserGoalPreference(Base):
     protein_goal: Mapped[int] = mapped_column(Integer)
     fat_goal: Mapped[int] = mapped_column(Integer)
     carbs_goal: Mapped[int] = mapped_column(Integer)
+    water_goal: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -141,6 +143,7 @@ class DailyGoalSnapshot(Base):
     protein_goal: Mapped[int] = mapped_column(Integer)
     fat_goal: Mapped[int] = mapped_column(Integer)
     carbs_goal: Mapped[int] = mapped_column(Integer)
+    water_goal: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

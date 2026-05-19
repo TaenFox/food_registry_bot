@@ -41,6 +41,8 @@ from food_registry_bot.nutrition import (
     DailyNutritionGoalProgress,
     DailyNutritionGoalProgressUseCase,
     DailyNutritionGoalSnapshotUseCase,
+    DailyWaterSummary,
+    DailyWaterSummaryUseCase,
     MetricGoalProgress,
     DailyNutritionSummary,
     DailyNutritionSummaryUseCase,
@@ -64,12 +66,14 @@ SUMMARY_METRIC_LINES = (
     ("protein", "Б", "г"),
     ("fat", "Ж", "г"),
     ("carbs", "У", "г"),
+    ("water", "В", "мл"),
 )
 GOAL_METRIC_LABELS = {
     "calories": "калории",
     "protein": "белки",
     "fat": "жиры",
     "carbs": "углеводы",
+    "water": "вода",
 }
 SUMMARY_DISPLAY_MODE_LABELS = {
     "text": "текст",
@@ -462,9 +466,16 @@ def build_today_summary_response_with_preferences(
     enabled_metric_codes: tuple[str, ...],
     summary_display_mode: str = "text",
     goal_progress: DailyNutritionGoalProgress | None = None,
+    water_summary: DailyWaterSummary | None = None,
 ) -> str:
-    if summary.included_entry_count == 0 and summary.excluded_entry_count == 0:
-        return "Сегодня пока нет сохранённых записей еды."
+    if (
+        summary.included_entry_count == 0
+        and summary.excluded_entry_count == 0
+        and (water_summary is None or (
+            water_summary.included_entry_count == 0 and water_summary.excluded_entry_count == 0
+        ))
+    ):
+        return "Сегодня пока нет сохранённых записей."
     if not enabled_metric_codes:
         return "В summary сейчас нет включённых показателей."
     lines: list[str] = []
@@ -482,21 +493,25 @@ def build_today_summary_response_with_preferences(
                 )
             continue
 
-        metric_value = getattr(summary.totals, metric_code)
+        if metric_code == "water":
+            metric_value = 0 if water_summary is None else water_summary.total_ml
+        else:
+            metric_value = getattr(summary.totals, metric_code)
         lines.append(f"{short_label}: {round(metric_value, 1)} {unit}")
 
     rendered_summary = "<pre>" + html.escape("\n".join(lines)) + "</pre>"
 
+    incompleteness_notes: list[str] = []
     if not summary.is_complete:
-        return "\n\n".join(
-            [
-                rendered_summary,
-                (
-                    f"Есть записей еды без полного набора метрик: {summary.excluded_entry_count}."
-                    " Итог дня пока неполный."
-                ),
-            ]
+        incompleteness_notes.append(
+            f"Есть записей еды без полного набора метрик: {summary.excluded_entry_count}. Итог дня пока неполный."
         )
+    if water_summary is not None and not water_summary.is_complete:
+        incompleteness_notes.append(
+            f"Есть записей воды с неподдерживаемым форматом: {water_summary.excluded_entry_count}. Итог воды пока неполный."
+        )
+    if incompleteness_notes:
+        return "\n\n".join([rendered_summary, *incompleteness_notes])
 
     return rendered_summary
 
@@ -515,6 +530,7 @@ def build_summary_settings_response(
     show_protein: bool,
     show_fat: bool,
     show_carbs: bool,
+    show_water: bool,
     summary_display_mode: str,
     nutrition_day_start_hour: int,
 ) -> str:
@@ -529,6 +545,7 @@ def build_summary_settings_response(
             f"- белки: {statuses[show_protein]}",
             f"- жиры: {statuses[show_fat]}",
             f"- углеводы: {statuses[show_carbs]}",
+            f"- вода: {statuses[show_water]}",
             f"- отображение: {SUMMARY_DISPLAY_MODE_LABELS[summary_display_mode]}",
             f"- начало дня: {nutrition_day_start_hour:02d}:00",
         ]
@@ -567,11 +584,13 @@ def build_goal_response(
         f"- белки: {goal_preference.protein_goal} г",
         f"- жиры: {goal_preference.fat_goal} г",
         f"- углеводы: {goal_preference.carbs_goal} г",
+        f"- вода: {goal_preference.water_goal} мл",
         f"Пищевой день {summary_date.isoformat()}:",
         f"- калории: {goal_snapshot.calorie_goal} ккал",
         f"- белки: {goal_snapshot.protein_goal} г",
         f"- жиры: {goal_snapshot.fat_goal} г",
         f"- углеводы: {goal_snapshot.carbs_goal} г",
+        f"- вода: {goal_snapshot.water_goal} мл",
         f"Часовой пояс дня: {timezone_name}.",
         f"Начало пищевого дня: {nutrition_day_start_hour:02d}:00.",
     ]
@@ -580,17 +599,21 @@ def build_goal_response(
         if metric_code == "calories":
             goal_command_lines.append(f"- <code>/goal {goal_preference.calorie_goal}</code>")
             continue
+        if metric_code == "water":
+            goal_command_lines.append(f"- <code>/goal water {goal_preference.water_goal}</code>")
+            continue
         goal_value = getattr(goal_preference, f"{metric_code}_goal")
         goal_command_lines.append(f"- <code>/goal {metric_code} {goal_value}</code>")
 
     if goal_command_lines:
-        lines[5:5] = ["", "Настройка:", *goal_command_lines, ""]
+        lines[6:6] = ["", "Настройка:", *goal_command_lines, ""]
 
     if (
         goal_snapshot.calorie_goal != goal_preference.calorie_goal
         or goal_snapshot.protein_goal != goal_preference.protein_goal
         or goal_snapshot.fat_goal != goal_preference.fat_goal
         or goal_snapshot.carbs_goal != goal_preference.carbs_goal
+        or goal_snapshot.water_goal != goal_preference.water_goal
     ):
         lines.extend(
             [
@@ -837,6 +860,7 @@ async def handle_settings(
             show_protein=preference.show_protein,
             show_fat=preference.show_fat,
             show_carbs=preference.show_carbs,
+            show_water=preference.show_water,
             summary_display_mode=preference.summary_display_mode,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
         ),
@@ -845,6 +869,7 @@ async def handle_settings(
             show_protein=preference.show_protein,
             show_fat=preference.show_fat,
             show_carbs=preference.show_carbs,
+            show_water=preference.show_water,
             summary_display_mode=preference.summary_display_mode,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
         ),
@@ -903,6 +928,7 @@ async def handle_toggle_summary_metric(
                 show_protein=preference.show_protein,
                 show_fat=preference.show_fat,
                 show_carbs=preference.show_carbs,
+                show_water=preference.show_water,
                 summary_display_mode=preference.summary_display_mode,
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
             ),
@@ -911,6 +937,7 @@ async def handle_toggle_summary_metric(
                 show_protein=preference.show_protein,
                 show_fat=preference.show_fat,
                 show_carbs=preference.show_carbs,
+                show_water=preference.show_water,
                 summary_display_mode=preference.summary_display_mode,
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
             ),
@@ -949,6 +976,12 @@ async def handle_today(
             summary_date=summary_date,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
         )
+        water_summary = DailyWaterSummaryUseCase(session).run(
+            user_id=user_id,
+            timezone_name=user.timezone,
+            summary_date=summary_date,
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
+        )
         goal_snapshot = DailyNutritionGoalSnapshotUseCase(session).get_or_create(
             user_id=user_id,
             summary_date=summary_date,
@@ -957,6 +990,7 @@ async def handle_today(
         )
         goal_progress = DailyNutritionGoalProgressUseCase().build(
             summary=summary,
+            water_summary=water_summary,
             snapshot=goal_snapshot,
         )
 
@@ -966,6 +1000,7 @@ async def handle_today(
             enabled_metric_codes=get_enabled_summary_metric_codes(preference),
             summary_display_mode=preference.summary_display_mode,
             goal_progress=goal_progress,
+            water_summary=water_summary,
         ),
         reply_markup=build_main_keyboard(),
     )
@@ -987,7 +1022,9 @@ async def handle_goal(
 
     parsed_goal = parse_goal_command_args(command)
     if command.args is not None and command.args.strip() and parsed_goal is None:
-        await message.answer("Использование: <code>/goal 1800</code> или <code>/goal protein 90</code>")
+        await message.answer(
+            "Использование: <code>/goal 1800</code>, <code>/goal protein 90</code> или <code>/goal water 2000</code>"
+        )
         return
 
     with session_scope(session_factory) as session:

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from food_registry_bot.db.models import DailyGoalSnapshot
 from food_registry_bot.nutrition.daily_summary import DailyNutritionSummary
+from food_registry_bot.nutrition.water_summary import DailyWaterSummary
 
 
 class MetricGoalProgress(BaseModel):
@@ -26,6 +27,7 @@ class DailyNutritionGoalProgress(BaseModel):
     protein: MetricGoalProgress
     fat: MetricGoalProgress
     carbs: MetricGoalProgress
+    water: MetricGoalProgress
 
 
 class DailyNutritionGoalProgressUseCase:
@@ -33,6 +35,7 @@ class DailyNutritionGoalProgressUseCase:
         self,
         *,
         summary: DailyNutritionSummary,
+        water_summary: DailyWaterSummary,
         snapshot: DailyGoalSnapshot,
     ) -> DailyNutritionGoalProgress:
         return DailyNutritionGoalProgress(
@@ -56,6 +59,11 @@ class DailyNutritionGoalProgressUseCase:
                 metric_code="carbs",
                 consumed_value=summary.totals.carbs,
                 goal_value=snapshot.carbs_goal,
+            ),
+            water=self._build_metric_progress(
+                metric_code="water",
+                consumed_value=water_summary.total_ml,
+                goal_value=snapshot.water_goal,
             ),
         )
 

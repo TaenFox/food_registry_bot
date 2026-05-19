@@ -710,7 +710,8 @@ async def test_today_returns_daily_nutrition_totals_for_allowed_user() -> None:
         "К: 320.0 / 1800 ккал\n"
         "Б: 24.0 / 90 г\n"
         "Ж: 19.0 / 60 г\n"
-        "У: 11.0 / 210 г"
+        "У: 11.0 / 210 г\n"
+        "В: 0.0 / 2000 мл"
         "</pre>\n"
         "\n"
         "Есть записей еды без полного набора метрик: 1. Итог дня пока неполный.",
@@ -746,6 +747,7 @@ async def test_today_returns_empty_enabled_metrics_message_when_calories_hidden(
                     show_protein=False,
                     show_fat=False,
                     show_carbs=False,
+                    show_water=False,
                 ),
             ]
         )
@@ -791,6 +793,7 @@ async def test_today_returns_bju_lines_when_calories_disabled_but_bju_enabled() 
                     show_protein=True,
                     show_fat=True,
                     show_carbs=True,
+                    show_water=False,
                 ),
             ]
         )
@@ -842,6 +845,7 @@ async def test_today_shows_calorie_goal_progress_when_snapshot_exists() -> None:
                     show_protein=True,
                     show_fat=True,
                     show_carbs=True,
+                    show_water=False,
                 ),
                 UserGoalPreference(
                     user_id=user.id,
@@ -849,6 +853,7 @@ async def test_today_shows_calorie_goal_progress_when_snapshot_exists() -> None:
                     protein_goal=90,
                     fat_goal=60,
                     carbs_goal=210,
+                    water_goal=2000,
                 ),
                 DailyGoalSnapshot(
                     user_id=user.id,
@@ -859,6 +864,7 @@ async def test_today_shows_calorie_goal_progress_when_snapshot_exists() -> None:
                     protein_goal=90,
                     fat_goal=60,
                     carbs_goal=210,
+                    water_goal=2000,
                 ),
             ]
         )
@@ -880,6 +886,44 @@ async def test_today_shows_calorie_goal_progress_when_snapshot_exists() -> None:
         "У: 11.0 / 210 г"
         "</pre>",
     )
+
+
+async def test_today_shows_water_progress_for_water_entries() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "today_water_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="today_water_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        water_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.WATER,
+            occurred_at=datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add(water_entry)
+        session.flush()
+        session.add(EntryItem(entry_id=water_entry.id, position=0, name="water", quantity=500, unit="ml"))
+        session.add(
+            UserSummaryPreference(
+                user_id=user.id,
+                show_calories=False,
+                show_protein=False,
+                show_fat=False,
+                show_carbs=False,
+                show_water=True,
+            )
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="today_water_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_today(message, session_factory, admin_user_ids=(ADMIN_ID,))
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("<pre>В: 500.0 / 2000 мл</pre>",)
 
 
 async def test_today_does_not_show_calorie_goal_progress_when_calories_hidden() -> None:
@@ -911,6 +955,7 @@ async def test_today_does_not_show_calorie_goal_progress_when_calories_hidden() 
                     show_protein=True,
                     show_fat=True,
                     show_carbs=True,
+                    show_water=False,
                 ),
                 UserGoalPreference(
                     user_id=user.id,
@@ -918,6 +963,7 @@ async def test_today_does_not_show_calorie_goal_progress_when_calories_hidden() 
                     protein_goal=90,
                     fat_goal=60,
                     carbs_goal=210,
+                    water_goal=2000,
                 ),
                 DailyGoalSnapshot(
                     user_id=user.id,
@@ -928,6 +974,7 @@ async def test_today_does_not_show_calorie_goal_progress_when_calories_hidden() 
                     protein_goal=90,
                     fat_goal=60,
                     carbs_goal=210,
+                    water_goal=2000,
                 ),
             ]
         )
@@ -967,6 +1014,7 @@ async def test_settings_returns_current_summary_preferences() -> None:
         "- белки: включено\n"
         "- жиры: включено\n"
         "- углеводы: включено\n"
+        "- вода: включено\n"
         "- отображение: текст\n"
         "- начало дня: 04:00",
     )
@@ -975,8 +1023,9 @@ async def test_settings_returns_current_summary_preferences() -> None:
     assert reply_markup.inline_keyboard[1][0].text == "Белки: on"
     assert reply_markup.inline_keyboard[2][0].text == "Жиры: on"
     assert reply_markup.inline_keyboard[3][0].text == "Углеводы: on"
-    assert reply_markup.inline_keyboard[4][0].text == "Отображение: текст"
-    assert reply_markup.inline_keyboard[5][0].text == "Начало дня: 04:00"
+    assert reply_markup.inline_keyboard[4][0].text == "Вода: on"
+    assert reply_markup.inline_keyboard[5][0].text == "Отображение: текст"
+    assert reply_markup.inline_keyboard[6][0].text == "Начало дня: 04:00"
 
 
 async def test_toggle_summary_metric_updates_preference_and_message() -> None:
@@ -993,6 +1042,7 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
                 show_protein=True,
                 show_fat=True,
                 show_carbs=True,
+                show_water=True,
             )
         )
         session.commit()
@@ -1022,6 +1072,7 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
         "- белки: выключено\n"
         "- жиры: включено\n"
         "- углеводы: включено\n"
+        "- вода: включено\n"
         "- отображение: текст\n"
         "- начало дня: 04:00",
     )
@@ -1045,6 +1096,7 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
                 show_protein=True,
                 show_fat=True,
                 show_carbs=True,
+                show_water=True,
                 nutrition_day_start_hour=4,
             )
         )
@@ -1073,11 +1125,12 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
         "- белки: включено\n"
         "- жиры: включено\n"
         "- углеводы: включено\n"
+        "- вода: включено\n"
         "- отображение: текст\n"
         "- начало дня: 06:00",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[5][0].text == "Начало дня: 06:00"
+    assert reply_markup.inline_keyboard[6][0].text == "Начало дня: 06:00"
 
 
 async def test_cycle_summary_display_mode_updates_preference_and_message() -> None:
@@ -1094,6 +1147,7 @@ async def test_cycle_summary_display_mode_updates_preference_and_message() -> No
                 show_protein=True,
                 show_fat=True,
                 show_carbs=True,
+                show_water=True,
                 summary_display_mode="text",
                 nutrition_day_start_hour=4,
             )
@@ -1123,11 +1177,12 @@ async def test_cycle_summary_display_mode_updates_preference_and_message() -> No
         "- белки: включено\n"
         "- жиры: включено\n"
         "- углеводы: включено\n"
+        "- вода: включено\n"
         "- отображение: бары\n"
         "- начало дня: 04:00",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[4][0].text == "Отображение: бары"
+    assert reply_markup.inline_keyboard[5][0].text == "Отображение: бары"
 
 
 async def test_today_uses_preference_nutrition_day_start_hour() -> None:
@@ -1169,6 +1224,7 @@ async def test_today_uses_preference_nutrition_day_start_hour() -> None:
                     show_protein=False,
                     show_fat=False,
                     show_carbs=False,
+                    show_water=False,
                     nutrition_day_start_hour=6,
                 ),
             ]
@@ -1226,6 +1282,7 @@ async def test_today_shows_calorie_progress_bar_in_bars_mode() -> None:
                     show_protein=True,
                     show_fat=True,
                     show_carbs=True,
+                    show_water=False,
                     summary_display_mode="bars",
                 ),
                 UserGoalPreference(
@@ -1234,6 +1291,7 @@ async def test_today_shows_calorie_progress_bar_in_bars_mode() -> None:
                     protein_goal=90,
                     fat_goal=60,
                     carbs_goal=210,
+                    water_goal=2000,
                 ),
                 DailyGoalSnapshot(
                     user_id=user.id,
@@ -1244,6 +1302,7 @@ async def test_today_shows_calorie_progress_bar_in_bars_mode() -> None:
                     protein_goal=90,
                     fat_goal=60,
                     carbs_goal=210,
+                    water_goal=2000,
                 ),
             ]
         )
@@ -1265,6 +1324,45 @@ async def test_today_shows_calorie_progress_bar_in_bars_mode() -> None:
         "У [░░░░░░░░░░] 5.2% 11.0/210 г"
         "</pre>",
     )
+
+
+async def test_today_shows_water_bar_in_bars_mode() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "today_water_bar_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="today_water_bar_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        water_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.WATER,
+            occurred_at=datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add(water_entry)
+        session.flush()
+        session.add(EntryItem(entry_id=water_entry.id, position=0, name="water", quantity=500, unit="ml"))
+        session.add(
+            UserSummaryPreference(
+                user_id=user.id,
+                show_calories=False,
+                show_protein=False,
+                show_fat=False,
+                show_carbs=False,
+                show_water=True,
+                summary_display_mode="bars",
+            )
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="today_water_bar_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_today(message, session_factory, admin_user_ids=(ADMIN_ID,))
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("<pre>В [██░░░░░░░░] 25.0% 500.0/2000 мл</pre>",)
 
 
 async def test_goal_returns_default_goals_when_preference_is_not_created() -> None:
@@ -1296,18 +1394,21 @@ async def test_goal_returns_default_goals_when_preference_is_not_created() -> No
         "- белки: 90 г\n"
         "- жиры: 60 г\n"
         "- углеводы: 210 г\n"
+        "- вода: 2000 мл\n"
         "\n"
         "Настройка:\n"
         "- <code>/goal 1800</code>\n"
         "- <code>/goal protein 90</code>\n"
         "- <code>/goal fat 60</code>\n"
         "- <code>/goal carbs 210</code>\n"
+        "- <code>/goal water 2000</code>\n"
         "\n"
         "Пищевой день 2026-05-19:\n"
         "- калории: 1800 ккал\n"
         "- белки: 90 г\n"
         "- жиры: 60 г\n"
         "- углеводы: 210 г\n"
+        "- вода: 2000 мл\n"
         "Часовой пояс дня: Europe/Moscow.\n"
         "Начало пищевого дня: 04:00.",
     )
@@ -1341,9 +1442,11 @@ async def test_goal_sets_preference_and_creates_snapshot_for_current_nutrition_d
 
     assert saved_goal.calorie_goal == 1800
     assert saved_goal.protein_goal == 90
+    assert saved_goal.water_goal == 2000
     assert saved_snapshot.summary_date.isoformat() == "2026-05-19"
     assert saved_snapshot.calorie_goal == 1800
     assert saved_snapshot.protein_goal == 90
+    assert saved_snapshot.water_goal == 2000
     assert saved_snapshot.timezone == "Europe/Moscow"
     assert saved_snapshot.nutrition_day_start_hour == 4
     message.answer.assert_awaited_once()
@@ -1353,18 +1456,21 @@ async def test_goal_sets_preference_and_creates_snapshot_for_current_nutrition_d
         "- белки: 90 г\n"
         "- жиры: 60 г\n"
         "- углеводы: 210 г\n"
+        "- вода: 2000 мл\n"
         "\n"
         "Настройка:\n"
         "- <code>/goal 1800</code>\n"
         "- <code>/goal protein 90</code>\n"
         "- <code>/goal fat 60</code>\n"
         "- <code>/goal carbs 210</code>\n"
+        "- <code>/goal water 2000</code>\n"
         "\n"
         "Пищевой день 2026-05-19:\n"
         "- калории: 1800 ккал\n"
         "- белки: 90 г\n"
         "- жиры: 60 г\n"
         "- углеводы: 210 г\n"
+        "- вода: 2000 мл\n"
         "Часовой пояс дня: Europe/Moscow.\n"
         "Начало пищевого дня: 04:00.",
     )
@@ -1416,6 +1522,7 @@ async def test_goal_hint_respects_enabled_summary_metrics() -> None:
                 show_protein=True,
                 show_fat=False,
                 show_carbs=True,
+                show_water=False,
             )
         )
         session.commit()
@@ -1443,6 +1550,7 @@ async def test_goal_hint_respects_enabled_summary_metrics() -> None:
     assert "Настройка:\n- <code>/goal protein 90</code>\n- <code>/goal carbs 210</code>\n" in rendered
     assert "<code>/goal 1800</code>" not in rendered
     assert "<code>/goal fat 60</code>" not in rendered
+    assert "<code>/goal water 2000</code>" not in rendered
 
 
 async def test_water_button_creates_water_entry_for_allowed_user() -> None:

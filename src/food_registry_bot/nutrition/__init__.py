@@ -46,6 +46,7 @@ from food_registry_bot.nutrition.daily_summary import (
     resolve_day_bounds_utc,
     resolve_local_summary_date,
 )
+from food_registry_bot.nutrition.water_summary import DailyWaterSummary, DailyWaterSummaryUseCase
 from food_registry_bot.nutrition.goals import DailyNutritionGoalSnapshotUseCase
 from food_registry_bot.nutrition.progress import (
     DailyNutritionGoalProgress,
@@ -85,6 +86,8 @@ __all__ = [
     "DailyNutritionSummary",
     "DailyNutritionSummaryUseCase",
     "DailyNutritionTotals",
+    "DailyWaterSummary",
+    "DailyWaterSummaryUseCase",
     "prepare_nutrition_request_from_entries",
     "prepare_nutrition_request_from_extracted_payload",
     "resolve_nutrition_estimates",

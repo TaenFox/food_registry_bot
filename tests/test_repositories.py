@@ -157,6 +157,7 @@ def test_user_summary_preference_repository_creates_default_preferences_once() -
     assert preference.show_protein is True
     assert preference.show_fat is True
     assert preference.show_carbs is True
+    assert preference.show_water is True
     assert preference.summary_display_mode == "text"
     assert preference.nutrition_day_start_hour == 4
 
@@ -204,12 +205,16 @@ def test_user_goal_preference_repository_creates_defaults_and_updates_metric_goa
     repository = UserGoalPreferenceRepository(session)
 
     created_preference, created = repository.get_or_create(user_id=user.id)
-    updated_preference = repository.set_goal(user_id=user.id, metric_code="protein", goal_value=110)
 
     assert created is True
     assert created_preference.calorie_goal == 1800
+    assert created_preference.protein_goal == 90
     assert created_preference.fat_goal == 60
     assert created_preference.carbs_goal == 210
+    assert created_preference.water_goal == 2000
+
+    updated_preference = repository.set_goal(user_id=user.id, metric_code="protein", goal_value=110)
+
     assert updated_preference.id == created_preference.id
     assert updated_preference.protein_goal == 110
     saved_preference = session.query(UserGoalPreference).filter_by(user_id=user.id).one()
@@ -231,6 +236,7 @@ def test_daily_nutrition_goal_snapshot_use_case_creates_default_snapshot() -> No
     assert snapshot.protein_goal == 90
     assert snapshot.fat_goal == 60
     assert snapshot.carbs_goal == 210
+    assert snapshot.water_goal == 2000
     assert session.query(DailyGoalSnapshot).count() == 1
 
 
@@ -265,17 +271,20 @@ def test_daily_nutrition_goal_snapshot_use_case_freezes_existing_day_snapshot() 
     assert first_snapshot is not None
     assert first_snapshot.calorie_goal == 1800
     assert first_snapshot.protein_goal == 90
+    assert first_snapshot.water_goal == 2000
     assert first_snapshot.timezone == "Europe/Moscow"
     assert first_snapshot.nutrition_day_start_hour == 4
     assert same_day_snapshot is not None
     assert same_day_snapshot.id == first_snapshot.id
     assert same_day_snapshot.calorie_goal == 1800
     assert same_day_snapshot.protein_goal == 90
+    assert same_day_snapshot.water_goal == 2000
     assert same_day_snapshot.timezone == "Europe/Moscow"
     assert same_day_snapshot.nutrition_day_start_hour == 4
     assert next_day_snapshot is not None
     assert next_day_snapshot.calorie_goal == 2000
     assert next_day_snapshot.protein_goal == 120
+    assert next_day_snapshot.water_goal == 2000
     assert next_day_snapshot.timezone == "UTC"
     assert next_day_snapshot.nutrition_day_start_hour == 6
 

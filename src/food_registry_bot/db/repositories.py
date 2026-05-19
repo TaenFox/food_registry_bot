@@ -25,12 +25,13 @@ if TYPE_CHECKING:
 
 SUPPORTED_NUTRITION_DAY_START_HOURS = (0, 2, 4, 6)
 SUPPORTED_SUMMARY_DISPLAY_MODES = ("text", "bars")
-SUPPORTED_GOAL_METRIC_CODES = ("calories", "protein", "fat", "carbs")
+SUPPORTED_GOAL_METRIC_CODES = ("calories", "protein", "fat", "carbs", "water")
 DEFAULT_DAILY_GOALS = {
     "calories": 1800,
     "protein": 90,
     "fat": 60,
     "carbs": 210,
+    "water": 2000,
 }
 
 
@@ -184,6 +185,7 @@ class UserSummaryPreferenceRepository:
             show_protein=True,
             show_fat=True,
             show_carbs=True,
+            show_water=True,
             summary_display_mode="text",
             nutrition_day_start_hour=4,
         )
@@ -238,6 +240,7 @@ class UserSummaryPreferenceRepository:
             "protein": "show_protein",
             "fat": "show_fat",
             "carbs": "show_carbs",
+            "water": "show_water",
         }
         try:
             return metric_attributes[metric_code]
@@ -264,6 +267,7 @@ class UserGoalPreferenceRepository:
             protein_goal=DEFAULT_DAILY_GOALS["protein"],
             fat_goal=DEFAULT_DAILY_GOALS["fat"],
             carbs_goal=DEFAULT_DAILY_GOALS["carbs"],
+            water_goal=DEFAULT_DAILY_GOALS["water"],
         )
         self._session.add(preference)
         self._session.flush()
@@ -291,6 +295,7 @@ class UserGoalPreferenceRepository:
             "protein": "protein_goal",
             "fat": "fat_goal",
             "carbs": "carbs_goal",
+            "water": "water_goal",
         }
         try:
             return attribute_names[metric_code]
@@ -325,6 +330,7 @@ class DailyGoalSnapshotRepository:
         protein_goal: int,
         fat_goal: int,
         carbs_goal: int,
+        water_goal: int,
     ) -> DailyGoalSnapshot:
         snapshot = DailyGoalSnapshot(
             user_id=user_id,
@@ -335,6 +341,7 @@ class DailyGoalSnapshotRepository:
             protein_goal=protein_goal,
             fat_goal=fat_goal,
             carbs_goal=carbs_goal,
+            water_goal=water_goal,
         )
         self._session.add(snapshot)
         self._session.flush()
@@ -431,6 +438,26 @@ class EntryRepository:
                 .selectinload(EntryItem.metrics)
                 .selectinload(EntryItemMetric.metric)
             )
+            .order_by(Entry.occurred_at.asc(), Entry.id.asc())
+        )
+        return list(self._session.scalars(statement))
+
+    def list_water_for_user_between(
+        self,
+        *,
+        user_id: int,
+        occurred_at_from: datetime,
+        occurred_at_to: datetime,
+    ) -> list[Entry]:
+        statement = (
+            select(Entry)
+            .where(
+                Entry.user_id == user_id,
+                Entry.entry_type == EntryType.WATER,
+                Entry.occurred_at >= occurred_at_from,
+                Entry.occurred_at < occurred_at_to,
+            )
+            .options(selectinload(Entry.items))
             .order_by(Entry.occurred_at.asc(), Entry.id.asc())
         )
         return list(self._session.scalars(statement))
