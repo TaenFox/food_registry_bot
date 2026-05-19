@@ -4,7 +4,7 @@ import enum
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from food_registry_bot.db.base import Base
@@ -32,7 +32,7 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_user_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     username: Mapped[Optional[str]] = mapped_column(String(255))
     timezone: Mapped[str] = mapped_column(String(64), default="Europe/Moscow")
     created_at: Mapped[datetime] = mapped_column(
@@ -46,6 +46,24 @@ class User(Base):
     )
 
     entries: Mapped[list["Entry"]] = relationship(back_populates="user")
+
+
+class UserAccess(Base):
+    __tablename__ = "user_access"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    username: Mapped[Optional[str]] = mapped_column(String(255))
+    is_allowed: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
 
 
 class Entry(Base):
@@ -102,3 +120,51 @@ class EntryItem(Base):
     )
 
     entry: Mapped["Entry"] = relationship(back_populates="items")
+    metrics: Mapped[list["EntryItemMetric"]] = relationship(
+        back_populates="entry_item",
+        cascade="all, delete-orphan",
+    )
+
+
+class SupportedMetric(Base):
+    __tablename__ = "supported_metrics"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    unit: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    entry_item_metrics: Mapped[list["EntryItemMetric"]] = relationship(back_populates="metric")
+
+
+class EntryItemMetric(Base):
+    __tablename__ = "entry_item_metrics"
+    __table_args__ = (
+        UniqueConstraint(
+            "entry_item_id",
+            "metric_id",
+            name="uq_entry_item_metrics_entry_item_id_metric_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    entry_item_id: Mapped[int] = mapped_column(ForeignKey("entry_items.id"), index=True)
+    metric_id: Mapped[int] = mapped_column(ForeignKey("supported_metrics.id"), index=True)
+    value: Mapped[float]
+    confidence: Mapped[str] = mapped_column(String(32), default="medium")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    entry_item: Mapped["EntryItem"] = relationship(back_populates="metrics")
+    metric: Mapped["SupportedMetric"] = relationship(back_populates="entry_item_metrics")

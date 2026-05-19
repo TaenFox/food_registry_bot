@@ -30,6 +30,11 @@ class ExtractionProvider(str, enum.Enum):
     LLM = "llm"
 
 
+class NutritionProvider(str, enum.Enum):
+    STATIC = "static"
+    LLM = "llm"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=SECRETS_ENV_FILE,
@@ -39,11 +44,17 @@ class Settings(BaseSettings):
 
     app_env: str = "local"
     bot_token: Optional[str] = Field(default=None, alias="BOT_TOKEN")
+    admin_user_ids_raw: str = Field(default="", alias="ADMIN_USER_IDS")
     extraction_provider: ExtractionProvider = Field(
         default=ExtractionProvider.STRUCTURED_PAYLOAD,
         alias="EXTRACTION_PROVIDER",
     )
     llm_model: str = Field(default="gpt-5-mini", alias="LLM_MODEL")
+    nutrition_provider: NutritionProvider = Field(
+        default=NutritionProvider.LLM,
+        alias="NUTRITION_PROVIDER",
+    )
+    nutrition_model: str = Field(default="gpt-5-mini", alias="NUTRITION_MODEL")
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
 
     postgres_host: str = Field(default="localhost", alias="POSTGRES_HOST")
@@ -63,6 +74,19 @@ class Settings(BaseSettings):
             f"{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
+
+    @property
+    def admin_user_ids(self) -> tuple[int, ...]:
+        if not self.admin_user_ids_raw.strip():
+            return ()
+
+        values = []
+        for raw_value in self.admin_user_ids_raw.split(","):
+            stripped_value = raw_value.strip()
+            if not stripped_value:
+                continue
+            values.append(int(stripped_value))
+        return tuple(values)
 
 
 @lru_cache(maxsize=1)
