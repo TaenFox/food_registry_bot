@@ -289,6 +289,30 @@ async def test_admin_overview_excludes_admin_from_user_counters() -> None:
     )
 
 
+async def test_admin_overview_shows_detailed_backfill_progress() -> None:
+    session_factory = create_session_factory()
+    tracker = AdminBackfillTracker()
+    running_task = asyncio.create_task(asyncio.sleep(1))
+    tracker.start(requested_by=ADMIN_ID, limit=20, task=running_task)
+    tracker.update_progress(
+        selected_entry_count=14,
+        processed_entry_count=4,
+        skipped_entry_count=1,
+        failed_entry_count=2,
+    )
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        answer=AsyncMock(),
+    )
+
+    await handle_admin(message, session_factory, backfill_tracker=tracker, admin_user_ids=(ADMIN_ID,))
+
+    message.answer.assert_awaited_once()
+    assert "running (selected 14, processed 4, remaining 7, skipped 1, failed 2, limit 20)" in message.answer.await_args.args[0]
+    running_task.cancel()
+
+
 async def test_admin_is_forbidden_for_non_admin() -> None:
     session_factory = create_session_factory()
     message = SimpleNamespace(

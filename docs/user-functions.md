@@ -135,6 +135,12 @@ Admin dashboard:
 - повторно запускает nutrition estimation только для этих записей;
 - сохраняет или обновляет метрики на уровне `entry_item`.
 
+Пока backfill выполняется, `/admin` показывает статус вида:
+
+```text
+- backfill nutrition: running (selected 14, processed 4, remaining 10, skipped 0, failed 0, limit 20)
+```
+
 Что получает админ:
 
 - сначала сообщение о старте:

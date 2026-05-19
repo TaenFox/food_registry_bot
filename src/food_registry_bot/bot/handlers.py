@@ -189,17 +189,42 @@ def build_admin_backfill_response(result: NutritionBackfillCompleted, limit: int
 
 def build_admin_backfill_status_line(tracker: AdminBackfillTracker) -> str:
     snapshot = tracker.snapshot()
+    remaining_count = max(
+        snapshot.selected_entry_count
+        - snapshot.processed_entry_count
+        - snapshot.skipped_entry_count
+        - snapshot.failed_entry_count,
+        0,
+    )
     if snapshot.state == "running":
         return (
             "running"
-            f" ({snapshot.processed_entry_count}/{snapshot.selected_entry_count},"
-            f" skipped {snapshot.skipped_entry_count}, failed {snapshot.failed_entry_count},"
+            f" (selected {snapshot.selected_entry_count},"
+            f" processed {snapshot.processed_entry_count},"
+            f" remaining {remaining_count},"
+            f" skipped {snapshot.skipped_entry_count},"
+            f" failed {snapshot.failed_entry_count},"
             f" limit {snapshot.limit})"
         )
     if snapshot.state == "completed":
-        return "completed"
+        return (
+            "completed"
+            f" (selected {snapshot.selected_entry_count},"
+            f" processed {snapshot.processed_entry_count},"
+            f" skipped {snapshot.skipped_entry_count},"
+            f" failed {snapshot.failed_entry_count},"
+            f" limit {snapshot.limit})"
+        )
     if snapshot.state == "failed":
-        return "failed"
+        return (
+            "failed"
+            f" (selected {snapshot.selected_entry_count},"
+            f" processed {snapshot.processed_entry_count},"
+            f" remaining {remaining_count},"
+            f" skipped {snapshot.skipped_entry_count},"
+            f" failed {snapshot.failed_entry_count},"
+            f" limit {snapshot.limit})"
+        )
     return "idle"
 
 
