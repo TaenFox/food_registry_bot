@@ -693,9 +693,6 @@ async def test_today_returns_daily_nutrition_totals_for_allowed_user() -> None:
     assert message.answer.await_args.args == (
         "Итог за сегодня:\n"
         "- калории: 320.0 ккал\n"
-        "- белки: 24.0 г\n"
-        "- жиры: 19.0 г\n"
-        "- углеводы: 11.0 г\n"
         "\n"
         "Есть записей еды без полного набора метрик: 1. Итог дня пока неполный.",
     )

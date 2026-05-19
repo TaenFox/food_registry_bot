@@ -381,9 +381,6 @@ def build_today_summary_response(summary: DailyNutritionSummary) -> str:
     lines = [
         "Итог за сегодня:",
         f"- калории: {round(summary.totals.calories, 1)} ккал",
-        f"- белки: {round(summary.totals.protein, 1)} г",
-        f"- жиры: {round(summary.totals.fat, 1)} г",
-        f"- углеводы: {round(summary.totals.carbs, 1)} г",
     ]
 
     if not summary.is_complete:
