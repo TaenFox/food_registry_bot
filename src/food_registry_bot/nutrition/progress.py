@@ -8,31 +8,69 @@ from food_registry_bot.db.models import DailyGoalSnapshot
 from food_registry_bot.nutrition.daily_summary import DailyNutritionSummary
 
 
-class DailyCalorieProgress(BaseModel):
+class MetricGoalProgress(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    summary_date: date
-    consumed_calories: float = Field(ge=0)
-    goal_calories: int = Field(gt=0)
-    remaining_calories: float
+    metric_code: str = Field(min_length=1)
+    consumed_value: float = Field(ge=0)
+    goal_value: int = Field(gt=0)
+    remaining_value: float
     is_over_goal: bool
 
 
-class DailyCalorieProgressUseCase:
+class DailyNutritionGoalProgress(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary_date: date
+    calories: MetricGoalProgress
+    protein: MetricGoalProgress
+    fat: MetricGoalProgress
+    carbs: MetricGoalProgress
+
+
+class DailyNutritionGoalProgressUseCase:
     def build(
         self,
         *,
         summary: DailyNutritionSummary,
-        snapshot: DailyGoalSnapshot | None,
-    ) -> DailyCalorieProgress | None:
-        if snapshot is None:
-            return None
-
-        remaining_calories = snapshot.calorie_goal - summary.totals.calories
-        return DailyCalorieProgress(
+        snapshot: DailyGoalSnapshot,
+    ) -> DailyNutritionGoalProgress:
+        return DailyNutritionGoalProgress(
             summary_date=summary.summary_date,
-            consumed_calories=summary.totals.calories,
-            goal_calories=snapshot.calorie_goal,
-            remaining_calories=remaining_calories,
-            is_over_goal=remaining_calories < 0,
+            calories=self._build_metric_progress(
+                metric_code="calories",
+                consumed_value=summary.totals.calories,
+                goal_value=snapshot.calorie_goal,
+            ),
+            protein=self._build_metric_progress(
+                metric_code="protein",
+                consumed_value=summary.totals.protein,
+                goal_value=snapshot.protein_goal,
+            ),
+            fat=self._build_metric_progress(
+                metric_code="fat",
+                consumed_value=summary.totals.fat,
+                goal_value=snapshot.fat_goal,
+            ),
+            carbs=self._build_metric_progress(
+                metric_code="carbs",
+                consumed_value=summary.totals.carbs,
+                goal_value=snapshot.carbs_goal,
+            ),
+        )
+
+    @staticmethod
+    def _build_metric_progress(
+        *,
+        metric_code: str,
+        consumed_value: float,
+        goal_value: int,
+    ) -> MetricGoalProgress:
+        remaining_value = goal_value - consumed_value
+        return MetricGoalProgress(
+            metric_code=metric_code,
+            consumed_value=consumed_value,
+            goal_value=goal_value,
+            remaining_value=remaining_value,
+            is_over_goal=remaining_value < 0,
         )

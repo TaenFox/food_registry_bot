@@ -707,10 +707,10 @@ async def test_today_returns_daily_nutrition_totals_for_allowed_user() -> None:
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         "<pre>"
-        "К: 320.0 ккал\n"
-        "Б: 24.0 г\n"
-        "Ж: 19.0 г\n"
-        "У: 11.0 г"
+        "К: 320.0 / 1800 ккал\n"
+        "Б: 24.0 / 90 г\n"
+        "Ж: 19.0 / 60 г\n"
+        "У: 11.0 / 210 г"
         "</pre>\n"
         "\n"
         "Есть записей еды без полного набора метрик: 1. Итог дня пока неполный.",
@@ -806,9 +806,9 @@ async def test_today_returns_bju_lines_when_calories_disabled_but_bju_enabled() 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         "<pre>"
-        "Б: 24.0 г\n"
-        "Ж: 19.0 г\n"
-        "У: 11.0 г"
+        "Б: 24.0 / 90 г\n"
+        "Ж: 19.0 / 60 г\n"
+        "У: 11.0 / 210 г"
         "</pre>",
     )
 
@@ -846,6 +846,9 @@ async def test_today_shows_calorie_goal_progress_when_snapshot_exists() -> None:
                 UserGoalPreference(
                     user_id=user.id,
                     calorie_goal=1800,
+                    protein_goal=90,
+                    fat_goal=60,
+                    carbs_goal=210,
                 ),
                 DailyGoalSnapshot(
                     user_id=user.id,
@@ -853,6 +856,9 @@ async def test_today_shows_calorie_goal_progress_when_snapshot_exists() -> None:
                     timezone="Europe/Moscow",
                     nutrition_day_start_hour=4,
                     calorie_goal=1800,
+                    protein_goal=90,
+                    fat_goal=60,
+                    carbs_goal=210,
                 ),
             ]
         )
@@ -869,9 +875,9 @@ async def test_today_shows_calorie_goal_progress_when_snapshot_exists() -> None:
     assert message.answer.await_args.args == (
         "<pre>"
         "К: 320.0 / 1800 ккал\n"
-        "Б: 24.0 г\n"
-        "Ж: 19.0 г\n"
-        "У: 11.0 г"
+        "Б: 24.0 / 90 г\n"
+        "Ж: 19.0 / 60 г\n"
+        "У: 11.0 / 210 г"
         "</pre>",
     )
 
@@ -909,6 +915,9 @@ async def test_today_does_not_show_calorie_goal_progress_when_calories_hidden() 
                 UserGoalPreference(
                     user_id=user.id,
                     calorie_goal=1800,
+                    protein_goal=90,
+                    fat_goal=60,
+                    carbs_goal=210,
                 ),
                 DailyGoalSnapshot(
                     user_id=user.id,
@@ -916,6 +925,9 @@ async def test_today_does_not_show_calorie_goal_progress_when_calories_hidden() 
                     timezone="Europe/Moscow",
                     nutrition_day_start_hour=4,
                     calorie_goal=1800,
+                    protein_goal=90,
+                    fat_goal=60,
+                    carbs_goal=210,
                 ),
             ]
         )
@@ -931,9 +943,9 @@ async def test_today_does_not_show_calorie_goal_progress_when_calories_hidden() 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         "<pre>"
-        "Б: 24.0 г\n"
-        "Ж: 19.0 г\n"
-        "У: 11.0 г"
+        "Б: 24.0 / 90 г\n"
+        "Ж: 19.0 / 60 г\n"
+        "У: 11.0 / 210 г"
         "</pre>",
     )
 
@@ -1182,7 +1194,7 @@ async def test_today_uses_preference_nutrition_day_start_hour() -> None:
         handle_today.__globals__["datetime"] = original_datetime
 
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("<pre>К: 300.0 ккал</pre>",)
+    assert message.answer.await_args.args == ("<pre>К: 300.0 / 1800 ккал</pre>",)
 
 
 async def test_today_shows_calorie_progress_bar_in_bars_mode() -> None:
@@ -1219,6 +1231,9 @@ async def test_today_shows_calorie_progress_bar_in_bars_mode() -> None:
                 UserGoalPreference(
                     user_id=user.id,
                     calorie_goal=1800,
+                    protein_goal=90,
+                    fat_goal=60,
+                    carbs_goal=210,
                 ),
                 DailyGoalSnapshot(
                     user_id=user.id,
@@ -1226,6 +1241,9 @@ async def test_today_shows_calorie_progress_bar_in_bars_mode() -> None:
                     timezone="Europe/Moscow",
                     nutrition_day_start_hour=4,
                     calorie_goal=1800,
+                    protein_goal=90,
+                    fat_goal=60,
+                    carbs_goal=210,
                 ),
             ]
         )
@@ -1242,14 +1260,14 @@ async def test_today_shows_calorie_progress_bar_in_bars_mode() -> None:
     assert message.answer.await_args.args == (
         "<pre>"
         "К [█░░░░░░░░░] 17.8% 320.0/1800 ккал\n"
-        "Б: 24.0 г\n"
-        "Ж: 19.0 г\n"
-        "У: 11.0 г"
+        "Б [██░░░░░░░░] 26.7% 24.0/90 г\n"
+        "Ж [███░░░░░░░] 31.7% 19.0/60 г\n"
+        "У [░░░░░░░░░░] 5.2% 11.0/210 г"
         "</pre>",
     )
 
 
-async def test_goal_returns_hint_when_goal_is_not_configured() -> None:
+async def test_goal_returns_default_goals_when_preference_is_not_created() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "goal_user")
     message = SimpleNamespace(
@@ -1258,10 +1276,41 @@ async def test_goal_returns_hint_when_goal_is_not_configured() -> None:
     )
     command = SimpleNamespace(args=None)
 
-    await handle_goal(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
+    original_datetime = handle_goal.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 19, 9, 0, tzinfo=timezone.utc)
+
+    handle_goal.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_goal(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
+    finally:
+        handle_goal.__globals__["datetime"] = original_datetime
 
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Цель по калориям пока не настроена. Использование: /goal 1800",)
+    assert message.answer.await_args.args == (
+        "Текущие цели:\n"
+        "- калории: 1800 ккал\n"
+        "- белки: 90 г\n"
+        "- жиры: 60 г\n"
+        "- углеводы: 210 г\n"
+        "\n"
+        "Настройка:\n"
+        "- /goal 1800\n"
+        "- /goal protein 90\n"
+        "- /goal fat 60\n"
+        "- /goal carbs 210\n"
+        "\n"
+        "Пищевой день 2026-05-19:\n"
+        "- калории: 1800 ккал\n"
+        "- белки: 90 г\n"
+        "- жиры: 60 г\n"
+        "- углеводы: 210 г\n"
+        "Часовой пояс дня: Europe/Moscow.\n"
+        "Начало пищевого дня: 04:00.",
+    )
 
 
 async def test_goal_sets_preference_and_creates_snapshot_for_current_nutrition_day() -> None:
@@ -1291,17 +1340,109 @@ async def test_goal_sets_preference_and_creates_snapshot_for_current_nutrition_d
         saved_snapshot = session.query(DailyGoalSnapshot).one()
 
     assert saved_goal.calorie_goal == 1800
+    assert saved_goal.protein_goal == 90
     assert saved_snapshot.summary_date.isoformat() == "2026-05-19"
     assert saved_snapshot.calorie_goal == 1800
+    assert saved_snapshot.protein_goal == 90
     assert saved_snapshot.timezone == "Europe/Moscow"
     assert saved_snapshot.nutrition_day_start_hour == 4
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Текущая цель по калориям: 1800 ккал.\n"
-        "Пищевой день 2026-05-19: 1800.\n"
+        "Текущие цели:\n"
+        "- калории: 1800 ккал\n"
+        "- белки: 90 г\n"
+        "- жиры: 60 г\n"
+        "- углеводы: 210 г\n"
+        "\n"
+        "Настройка:\n"
+        "- /goal 1800\n"
+        "- /goal protein 90\n"
+        "- /goal fat 60\n"
+        "- /goal carbs 210\n"
+        "\n"
+        "Пищевой день 2026-05-19:\n"
+        "- калории: 1800 ккал\n"
+        "- белки: 90 г\n"
+        "- жиры: 60 г\n"
+        "- углеводы: 210 г\n"
         "Часовой пояс дня: Europe/Moscow.\n"
         "Начало пищевого дня: 04:00.",
     )
+
+
+async def test_goal_sets_macro_goal_by_metric_code() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "goal_macro_user")
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="goal_macro_user"),
+        answer=AsyncMock(),
+    )
+    command = SimpleNamespace(args="protein 110")
+
+    original_datetime = handle_goal.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 19, 9, 0, tzinfo=timezone.utc)
+
+    handle_goal.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_goal(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
+    finally:
+        handle_goal.__globals__["datetime"] = original_datetime
+
+    with session_factory() as session:
+        saved_goal = session.query(UserGoalPreference).one()
+        saved_snapshot = session.query(DailyGoalSnapshot).one()
+
+    assert saved_goal.protein_goal == 110
+    assert saved_snapshot.protein_goal == 110
+    message.answer.assert_awaited_once()
+    assert "белки: 110 г" in message.answer.await_args.args[0]
+
+
+async def test_goal_hint_respects_enabled_summary_metrics() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "goal_hint_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="goal_hint_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(
+            UserSummaryPreference(
+                user_id=user.id,
+                show_calories=False,
+                show_protein=True,
+                show_fat=False,
+                show_carbs=True,
+            )
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="goal_hint_user"),
+        answer=AsyncMock(),
+    )
+    command = SimpleNamespace(args=None)
+
+    original_datetime = handle_goal.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 19, 9, 0, tzinfo=timezone.utc)
+
+    handle_goal.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_goal(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
+    finally:
+        handle_goal.__globals__["datetime"] = original_datetime
+
+    rendered = message.answer.await_args.args[0]
+    assert "Настройка:\n- /goal protein 90\n- /goal carbs 210\n" in rendered
+    assert "/goal 1800" not in rendered
+    assert "/goal fat 60" not in rendered
 
 
 async def test_water_button_creates_water_entry_for_allowed_user() -> None:

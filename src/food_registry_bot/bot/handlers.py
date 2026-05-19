@@ -38,9 +38,10 @@ from food_registry_bot.extraction import (
 )
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
-    DailyCalorieGoalSnapshotUseCase,
-    DailyCalorieProgress,
-    DailyCalorieProgressUseCase,
+    DailyNutritionGoalProgress,
+    DailyNutritionGoalProgressUseCase,
+    DailyNutritionGoalSnapshotUseCase,
+    MetricGoalProgress,
     DailyNutritionSummary,
     DailyNutritionSummaryUseCase,
     FailedNutritionEstimation,
@@ -64,6 +65,12 @@ SUMMARY_METRIC_LINES = (
     ("fat", "Ж", "г"),
     ("carbs", "У", "г"),
 )
+GOAL_METRIC_LABELS = {
+    "calories": "калории",
+    "protein": "белки",
+    "fat": "жиры",
+    "carbs": "углеводы",
+}
 SUMMARY_DISPLAY_MODE_LABELS = {
     "text": "текст",
     "bars": "бары",
@@ -154,6 +161,39 @@ def parse_positive_int_arg(command: CommandObject | None) -> int | None:
         return None
 
     return value
+
+
+def parse_goal_command_args(command: CommandObject | None) -> tuple[str, int] | None:
+    if command is None or command.args is None:
+        return None
+
+    raw_args = command.args.strip()
+    if not raw_args:
+        return None
+
+    parts = raw_args.split()
+    if len(parts) == 1:
+        try:
+            value = int(parts[0])
+        except ValueError:
+            return None
+        if value <= 0:
+            return None
+        return "calories", value
+
+    if len(parts) != 2:
+        return None
+
+    metric_code, raw_value = parts
+    if metric_code not in GOAL_METRIC_LABELS:
+        return None
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return metric_code, value
 
 
 def build_admin_users_response(
@@ -421,7 +461,7 @@ def build_today_summary_response_with_preferences(
     *,
     enabled_metric_codes: tuple[str, ...],
     summary_display_mode: str = "text",
-    calorie_progress: DailyCalorieProgress | None = None,
+    goal_progress: DailyNutritionGoalProgress | None = None,
 ) -> str:
     if summary.included_entry_count == 0 and summary.excluded_entry_count == 0:
         return "Сегодня пока нет сохранённых записей еды."
@@ -431,13 +471,14 @@ def build_today_summary_response_with_preferences(
     for metric_code, short_label, unit in SUMMARY_METRIC_LINES:
         if metric_code not in enabled_metric_codes:
             continue
-        if metric_code == "calories" and calorie_progress is not None:
+        metric_progress = getattr(goal_progress, metric_code) if goal_progress is not None else None
+        if metric_progress is not None:
             if summary_display_mode == "bars":
-                lines.append(build_calorie_progress_bar_line(calorie_progress))
+                lines.append(build_metric_progress_bar_line(short_label, unit, metric_progress))
             else:
                 lines.append(
-                    f"{short_label}: {round(calorie_progress.consumed_calories, 1)} / "
-                    f"{calorie_progress.goal_calories} {unit}"
+                    f"{short_label}: {round(metric_progress.consumed_value, 1)} / "
+                    f"{metric_progress.goal_value} {unit}"
                 )
             continue
 
@@ -494,9 +535,13 @@ def build_summary_settings_response(
     )
 
 
-def build_calorie_progress_bar_line(calorie_progress: DailyCalorieProgress) -> str:
-    consumed = calorie_progress.consumed_calories
-    goal = calorie_progress.goal_calories
+def build_metric_progress_bar_line(
+    short_label: str,
+    unit: str,
+    metric_progress: MetricGoalProgress,
+) -> str:
+    consumed = metric_progress.consumed_value
+    goal = metric_progress.goal_value
     progress_ratio = consumed / goal if goal else 0.0
     filled_cells = min(int(progress_ratio * 10), 10)
     empty_cells = 10 - filled_cells
@@ -504,30 +549,49 @@ def build_calorie_progress_bar_line(calorie_progress: DailyCalorieProgress) -> s
     overflow_cells = max(int((consumed - goal) / goal * 10), 0) if consumed > goal else 0
     overflow_bar = "█" * overflow_cells
     percentage = round(progress_ratio * 100, 1)
-    return f"К {base_bar}{overflow_bar} {percentage}% {round(consumed, 1)}/{goal} ккал"
+    return f"{short_label} {base_bar}{overflow_bar} {percentage}% {round(consumed, 1)}/{goal} {unit}"
 
 
 def build_goal_response(
     *,
-    calorie_goal: int | None,
+    goal_preference,
+    enabled_metric_codes: tuple[str, ...],
     summary_date: date,
-    snapshot_calorie_goal: int | None,
+    goal_snapshot,
     timezone_name: str,
     nutrition_day_start_hour: int,
 ) -> str:
-    if calorie_goal is None:
-        return "Цель по калориям пока не настроена. Использование: /goal 1800"
-
     lines = [
-        f"Текущая цель по калориям: {calorie_goal} ккал.",
-        (
-            f"Пищевой день {summary_date.isoformat()}: "
-            f"{snapshot_calorie_goal if snapshot_calorie_goal is not None else 'не зафиксирована'}."
-        ),
+        "Текущие цели:",
+        f"- калории: {goal_preference.calorie_goal} ккал",
+        f"- белки: {goal_preference.protein_goal} г",
+        f"- жиры: {goal_preference.fat_goal} г",
+        f"- углеводы: {goal_preference.carbs_goal} г",
+        f"Пищевой день {summary_date.isoformat()}:",
+        f"- калории: {goal_snapshot.calorie_goal} ккал",
+        f"- белки: {goal_snapshot.protein_goal} г",
+        f"- жиры: {goal_snapshot.fat_goal} г",
+        f"- углеводы: {goal_snapshot.carbs_goal} г",
         f"Часовой пояс дня: {timezone_name}.",
         f"Начало пищевого дня: {nutrition_day_start_hour:02d}:00.",
     ]
-    if snapshot_calorie_goal != calorie_goal:
+    goal_command_lines = []
+    for metric_code in enabled_metric_codes:
+        if metric_code == "calories":
+            goal_command_lines.append(f"- /goal {goal_preference.calorie_goal}")
+            continue
+        goal_value = getattr(goal_preference, f"{metric_code}_goal")
+        goal_command_lines.append(f"- /goal {metric_code} {goal_value}")
+
+    if goal_command_lines:
+        lines[5:5] = ["", "Настройка:", *goal_command_lines, ""]
+
+    if (
+        goal_snapshot.calorie_goal != goal_preference.calorie_goal
+        or goal_snapshot.protein_goal != goal_preference.protein_goal
+        or goal_snapshot.fat_goal != goal_preference.fat_goal
+        or goal_snapshot.carbs_goal != goal_preference.carbs_goal
+    ):
         lines.extend(
             [
                 "",
@@ -885,13 +949,13 @@ async def handle_today(
             summary_date=summary_date,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
         )
-        goal_snapshot = DailyCalorieGoalSnapshotUseCase(session).get_or_create(
+        goal_snapshot = DailyNutritionGoalSnapshotUseCase(session).get_or_create(
             user_id=user_id,
             summary_date=summary_date,
             timezone_name=user.timezone,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
         )
-        calorie_progress = DailyCalorieProgressUseCase().build(
+        goal_progress = DailyNutritionGoalProgressUseCase().build(
             summary=summary,
             snapshot=goal_snapshot,
         )
@@ -901,7 +965,7 @@ async def handle_today(
             summary,
             enabled_metric_codes=get_enabled_summary_metric_codes(preference),
             summary_display_mode=preference.summary_display_mode,
-            calorie_progress=calorie_progress,
+            goal_progress=goal_progress,
         ),
         reply_markup=build_main_keyboard(),
     )
@@ -921,12 +985,10 @@ async def handle_goal(
     if telegram_user is None:
         raise ValueError("Incoming message does not contain Telegram user")
 
-    parsed_goal = None
-    if command.args is not None and command.args.strip():
-        parsed_goal = parse_positive_int_arg(command)
-        if parsed_goal is None:
-            await message.answer("Использование: /goal 1800")
-            return
+    parsed_goal = parse_goal_command_args(command)
+    if command.args is not None and command.args.strip() and parsed_goal is None:
+        await message.answer("Использование: /goal 1800 или /goal protein 90")
+        return
 
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
@@ -937,41 +999,42 @@ async def handle_goal(
         summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
         goal_preference_repository = UserGoalPreferenceRepository(session)
         if parsed_goal is not None:
-            goal_preference = goal_preference_repository.set_calorie_goal(
+            metric_code, goal_value = parsed_goal
+            goal_preference = goal_preference_repository.set_goal(
                 user_id=user_id,
-                calorie_goal=parsed_goal,
+                metric_code=metric_code,
+                goal_value=goal_value,
             )
         else:
-            goal_preference = goal_preference_repository.get_by_user_id(user_id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user_id)
 
         summary_date = resolve_local_summary_date(
             reference_at=datetime.now(timezone.utc),
             timezone_name=user.timezone,
             nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
         )
-        snapshot = DailyCalorieGoalSnapshotUseCase(session).get_or_create(
+        snapshot = DailyNutritionGoalSnapshotUseCase(session).get_or_create(
             user_id=user_id,
             summary_date=summary_date,
             timezone_name=user.timezone,
             nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
         )
-        calorie_goal_value = goal_preference.calorie_goal if goal_preference is not None else None
-        snapshot_calorie_goal = snapshot.calorie_goal if snapshot is not None else None
         timezone_name = user.timezone
         nutrition_day_start_hour = summary_preference.nutrition_day_start_hour
 
     await message.answer(
         build_goal_response(
-            calorie_goal=calorie_goal_value,
+            goal_preference=goal_preference,
+            enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
             summary_date=summary_date,
-            snapshot_calorie_goal=snapshot_calorie_goal,
+            goal_snapshot=snapshot,
             timezone_name=timezone_name,
             nutrition_day_start_hour=nutrition_day_start_hour,
         ),
         reply_markup=build_main_keyboard(),
     )
-
-
+ 
+ 
 @router.message(F.text == WATER_250_ML_BUTTON_TEXT)
 async def handle_water_250_ml(
     message: Message,

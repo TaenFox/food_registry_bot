@@ -110,6 +110,9 @@ class UserGoalPreference(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
     calorie_goal: Mapped[int] = mapped_column(Integer)
+    protein_goal: Mapped[int] = mapped_column(Integer)
+    fat_goal: Mapped[int] = mapped_column(Integer)
+    carbs_goal: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -135,6 +138,9 @@ class DailyGoalSnapshot(Base):
     timezone: Mapped[str] = mapped_column(String(64))
     nutrition_day_start_hour: Mapped[int] = mapped_column(Integer)
     calorie_goal: Mapped[int] = mapped_column(Integer)
+    protein_goal: Mapped[int] = mapped_column(Integer)
+    fat_goal: Mapped[int] = mapped_column(Integer)
+    carbs_goal: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

@@ -25,6 +25,13 @@ if TYPE_CHECKING:
 
 SUPPORTED_NUTRITION_DAY_START_HOURS = (0, 2, 4, 6)
 SUPPORTED_SUMMARY_DISPLAY_MODES = ("text", "bars")
+SUPPORTED_GOAL_METRIC_CODES = ("calories", "protein", "fat", "carbs")
+DEFAULT_DAILY_GOALS = {
+    "calories": 1800,
+    "protein": 90,
+    "fat": 60,
+    "carbs": 210,
+}
 
 
 @dataclass(frozen=True)
@@ -246,19 +253,49 @@ class UserGoalPreferenceRepository:
         statement = select(UserGoalPreference).where(UserGoalPreference.user_id == user_id)
         return self._session.scalar(statement)
 
-    def set_calorie_goal(self, *, user_id: int, calorie_goal: int) -> UserGoalPreference:
-        if calorie_goal <= 0:
-            raise ValueError("calorie_goal must be positive")
-
+    def get_or_create(self, *, user_id: int) -> tuple[UserGoalPreference, bool]:
         preference = self.get_by_user_id(user_id)
-        if preference is None:
-            preference = UserGoalPreference(user_id=user_id, calorie_goal=calorie_goal)
-            self._session.add(preference)
-        else:
-            preference.calorie_goal = calorie_goal
+        if preference is not None:
+            return preference, False
 
+        preference = UserGoalPreference(
+            user_id=user_id,
+            calorie_goal=DEFAULT_DAILY_GOALS["calories"],
+            protein_goal=DEFAULT_DAILY_GOALS["protein"],
+            fat_goal=DEFAULT_DAILY_GOALS["fat"],
+            carbs_goal=DEFAULT_DAILY_GOALS["carbs"],
+        )
+        self._session.add(preference)
+        self._session.flush()
+        return preference, True
+
+    def set_goal(
+        self,
+        *,
+        user_id: int,
+        metric_code: str,
+        goal_value: int,
+    ) -> UserGoalPreference:
+        if goal_value <= 0:
+            raise ValueError("goal_value must be positive")
+
+        preference, _created = self.get_or_create(user_id=user_id)
+        setattr(preference, self._resolve_goal_attribute(metric_code), goal_value)
         self._session.flush()
         return preference
+
+    @staticmethod
+    def _resolve_goal_attribute(metric_code: str) -> str:
+        attribute_names = {
+            "calories": "calorie_goal",
+            "protein": "protein_goal",
+            "fat": "fat_goal",
+            "carbs": "carbs_goal",
+        }
+        try:
+            return attribute_names[metric_code]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported goal metric code: {metric_code}") from exc
 
 
 class DailyGoalSnapshotRepository:
@@ -285,6 +322,9 @@ class DailyGoalSnapshotRepository:
         timezone_name: str,
         nutrition_day_start_hour: int,
         calorie_goal: int,
+        protein_goal: int,
+        fat_goal: int,
+        carbs_goal: int,
     ) -> DailyGoalSnapshot:
         snapshot = DailyGoalSnapshot(
             user_id=user_id,
@@ -292,6 +332,9 @@ class DailyGoalSnapshotRepository:
             timezone=timezone_name,
             nutrition_day_start_hour=nutrition_day_start_hour,
             calorie_goal=calorie_goal,
+            protein_goal=protein_goal,
+            fat_goal=fat_goal,
+            carbs_goal=carbs_goal,
         )
         self._session.add(snapshot)
         self._session.flush()

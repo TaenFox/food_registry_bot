@@ -30,7 +30,7 @@ from food_registry_bot.db.repositories import (
 )
 from food_registry_bot.extraction import ExtractedJournalEntry, ExtractedJournalItem, ExtractedJournalPayload
 from food_registry_bot.nutrition import (
-    DailyCalorieGoalSnapshotUseCase,
+    DailyNutritionGoalSnapshotUseCase,
     StaticNutritionEstimationService,
     ValidNutritionPayload,
     prepare_nutrition_request_from_entries,
@@ -198,40 +198,48 @@ def test_user_summary_preference_repository_cycles_summary_display_mode() -> Non
     assert second_mode == "text"
 
 
-def test_user_goal_preference_repository_creates_and_updates_calorie_goal() -> None:
+def test_user_goal_preference_repository_creates_defaults_and_updates_metric_goal() -> None:
     session = create_test_session()
     user = UserRepository(session).create(telegram_user_id=7007, username="goal_user")
     repository = UserGoalPreferenceRepository(session)
 
-    created_preference = repository.set_calorie_goal(user_id=user.id, calorie_goal=1800)
-    updated_preference = repository.set_calorie_goal(user_id=user.id, calorie_goal=1950)
+    created_preference, created = repository.get_or_create(user_id=user.id)
+    updated_preference = repository.set_goal(user_id=user.id, metric_code="protein", goal_value=110)
 
-    assert created_preference.id == updated_preference.id
-    assert updated_preference.calorie_goal == 1950
+    assert created is True
+    assert created_preference.calorie_goal == 1800
+    assert created_preference.fat_goal == 60
+    assert created_preference.carbs_goal == 210
+    assert updated_preference.id == created_preference.id
+    assert updated_preference.protein_goal == 110
     saved_preference = session.query(UserGoalPreference).filter_by(user_id=user.id).one()
-    assert saved_preference.calorie_goal == 1950
+    assert saved_preference.protein_goal == 110
 
 
-def test_daily_calorie_goal_snapshot_use_case_returns_none_without_current_goal() -> None:
+def test_daily_nutrition_goal_snapshot_use_case_creates_default_snapshot() -> None:
     session = create_test_session()
     user = UserRepository(session).create(telegram_user_id=7008, username="goalless_user")
 
-    snapshot = DailyCalorieGoalSnapshotUseCase(session).get_or_create(
+    snapshot = DailyNutritionGoalSnapshotUseCase(session).get_or_create(
         user_id=user.id,
         summary_date=datetime(2026, 5, 19, tzinfo=timezone.utc).date(),
         timezone_name=user.timezone,
         nutrition_day_start_hour=4,
     )
 
-    assert snapshot is None
-    assert session.query(DailyGoalSnapshot).count() == 0
+    assert snapshot.calorie_goal == 1800
+    assert snapshot.protein_goal == 90
+    assert snapshot.fat_goal == 60
+    assert snapshot.carbs_goal == 210
+    assert session.query(DailyGoalSnapshot).count() == 1
 
 
-def test_daily_calorie_goal_snapshot_use_case_freezes_existing_day_snapshot() -> None:
+def test_daily_nutrition_goal_snapshot_use_case_freezes_existing_day_snapshot() -> None:
     session = create_test_session()
     user = UserRepository(session).create(telegram_user_id=7009, username="frozen_goal_user")
-    UserGoalPreferenceRepository(session).set_calorie_goal(user_id=user.id, calorie_goal=1800)
-    use_case = DailyCalorieGoalSnapshotUseCase(session)
+    UserGoalPreferenceRepository(session).set_goal(user_id=user.id, metric_code="calories", goal_value=1800)
+    UserGoalPreferenceRepository(session).set_goal(user_id=user.id, metric_code="protein", goal_value=90)
+    use_case = DailyNutritionGoalSnapshotUseCase(session)
 
     first_snapshot = use_case.get_or_create(
         user_id=user.id,
@@ -239,7 +247,8 @@ def test_daily_calorie_goal_snapshot_use_case_freezes_existing_day_snapshot() ->
         timezone_name=user.timezone,
         nutrition_day_start_hour=4,
     )
-    UserGoalPreferenceRepository(session).set_calorie_goal(user_id=user.id, calorie_goal=2000)
+    UserGoalPreferenceRepository(session).set_goal(user_id=user.id, metric_code="calories", goal_value=2000)
+    UserGoalPreferenceRepository(session).set_goal(user_id=user.id, metric_code="protein", goal_value=120)
     same_day_snapshot = use_case.get_or_create(
         user_id=user.id,
         summary_date=datetime(2026, 5, 19, tzinfo=timezone.utc).date(),
@@ -255,15 +264,18 @@ def test_daily_calorie_goal_snapshot_use_case_freezes_existing_day_snapshot() ->
 
     assert first_snapshot is not None
     assert first_snapshot.calorie_goal == 1800
+    assert first_snapshot.protein_goal == 90
     assert first_snapshot.timezone == "Europe/Moscow"
     assert first_snapshot.nutrition_day_start_hour == 4
     assert same_day_snapshot is not None
     assert same_day_snapshot.id == first_snapshot.id
     assert same_day_snapshot.calorie_goal == 1800
+    assert same_day_snapshot.protein_goal == 90
     assert same_day_snapshot.timezone == "Europe/Moscow"
     assert same_day_snapshot.nutrition_day_start_hour == 4
     assert next_day_snapshot is not None
     assert next_day_snapshot.calorie_goal == 2000
+    assert next_day_snapshot.protein_goal == 120
     assert next_day_snapshot.timezone == "UTC"
     assert next_day_snapshot.nutrition_day_start_hour == 6
 
