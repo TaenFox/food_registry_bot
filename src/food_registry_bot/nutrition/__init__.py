@@ -37,6 +37,15 @@ from food_registry_bot.nutrition.use_cases import (
     StoredEntryNutritionEstimationUseCase,
     SuccessfulNutritionEstimation,
 )
+from food_registry_bot.nutrition.daily_summary import (
+    DailyNutritionEntrySummary,
+    DailyNutritionItemSummary,
+    DailyNutritionSummary,
+    DailyNutritionSummaryUseCase,
+    DailyNutritionTotals,
+    resolve_day_bounds_utc,
+    resolve_local_summary_date,
+)
 
 __all__ = [
     "InvalidNutritionPayload",
@@ -65,9 +74,16 @@ __all__ = [
     "ValidNutritionPayload",
     "create_nutrition_service",
     "BackfillNutritionEstimationUseCase",
+    "DailyNutritionEntrySummary",
+    "DailyNutritionItemSummary",
+    "DailyNutritionSummary",
+    "DailyNutritionSummaryUseCase",
+    "DailyNutritionTotals",
     "prepare_nutrition_request_from_entries",
     "prepare_nutrition_request_from_extracted_payload",
     "resolve_nutrition_estimates",
+    "resolve_day_bounds_utc",
+    "resolve_local_summary_date",
     "NutritionBackfillCompleted",
     "NutritionBackfillEntryFailure",
     "NutritionBackfillProgress",

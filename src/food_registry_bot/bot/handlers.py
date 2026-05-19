@@ -30,10 +30,13 @@ from food_registry_bot.extraction import (
 )
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
+    DailyNutritionSummary,
+    DailyNutritionSummaryUseCase,
     FailedNutritionEstimation,
     NutritionBackfillCompleted,
     NutritionBackfillProgress,
     NutritionEstimationService,
+    resolve_local_summary_date,
     SUPPORTED_NUTRITION_METRIC_CODES,
     SkippedNutritionEstimation,
     StaticNutritionEstimationService,
@@ -371,6 +374,32 @@ def build_recent_entries_response(entries: list) -> str:
     return "\n".join(lines)
 
 
+def build_today_summary_response(summary: DailyNutritionSummary) -> str:
+    if summary.included_entry_count == 0 and summary.excluded_entry_count == 0:
+        return "Сегодня пока нет сохранённых записей еды."
+
+    lines = [
+        "Итог за сегодня:",
+        f"- калории: {round(summary.totals.calories, 1)} ккал",
+        f"- белки: {round(summary.totals.protein, 1)} г",
+        f"- жиры: {round(summary.totals.fat, 1)} г",
+        f"- углеводы: {round(summary.totals.carbs, 1)} г",
+    ]
+
+    if not summary.is_complete:
+        lines.extend(
+            [
+                "",
+                (
+                    f"Есть записей еды без полного набора метрик: {summary.excluded_entry_count}."
+                    " Итог дня пока неполный."
+                ),
+            ]
+        )
+
+    return "\n".join(lines)
+
+
 async def build_extraction_request(message: Message) -> JournalExtractionRequest | None:
     message_text = getattr(message, "text", None) or getattr(message, "caption", None)
     photo_sizes = getattr(message, "photo", None) or []
@@ -586,6 +615,38 @@ async def handle_recent(
         entries = EntryRepository(session).list_recent_for_user(user_id=user_id, limit=5)
 
     await message.answer(build_recent_entries_response(entries), reply_markup=build_main_keyboard())
+
+
+@router.message(Command("today"))
+async def handle_today(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    telegram_user = message.from_user
+    if telegram_user is None:
+        raise ValueError("Incoming message does not contain Telegram user")
+
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
+        if user is None:
+            raise RuntimeError("User profile was not found after registration")
+
+        summary_date = resolve_local_summary_date(
+            reference_at=datetime.now(timezone.utc),
+            timezone_name=user.timezone,
+        )
+        summary = DailyNutritionSummaryUseCase(session).run(
+            user_id=user_id,
+            timezone_name=user.timezone,
+            summary_date=summary_date,
+        )
+
+    await message.answer(build_today_summary_response(summary), reply_markup=build_main_keyboard())
 
 
 @router.message(F.text == WATER_250_ML_BUTTON_TEXT)

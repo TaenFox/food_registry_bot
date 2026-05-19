@@ -222,6 +222,30 @@ class EntryRepository:
         )
         return list(self._session.scalars(statement))
 
+    def list_food_for_user_between(
+        self,
+        *,
+        user_id: int,
+        occurred_at_from: datetime,
+        occurred_at_to: datetime,
+    ) -> list[Entry]:
+        statement = (
+            select(Entry)
+            .where(
+                Entry.user_id == user_id,
+                Entry.entry_type == EntryType.FOOD,
+                Entry.occurred_at >= occurred_at_from,
+                Entry.occurred_at < occurred_at_to,
+            )
+            .options(
+                selectinload(Entry.items)
+                .selectinload(EntryItem.metrics)
+                .selectinload(EntryItemMetric.metric)
+            )
+            .order_by(Entry.occurred_at.asc(), Entry.id.asc())
+        )
+        return list(self._session.scalars(statement))
+
     def list_incomplete_food_entry_ids(
         self,
         *,

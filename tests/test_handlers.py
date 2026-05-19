@@ -21,6 +21,7 @@ from food_registry_bot.bot.handlers import (
     handle_message,
     handle_recent,
     handle_start,
+    handle_today,
     handle_water_250_ml,
 )
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT
@@ -641,6 +642,62 @@ async def test_recent_returns_latest_entries_for_allowed_user() -> None:
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         "Последние записи:\n- вода: 250 мл\n- яблоко",
+    )
+
+
+async def test_today_returns_daily_nutrition_totals_for_allowed_user() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "today_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="today_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        included_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+        )
+        excluded_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 19, 9, 0, tzinfo=timezone.utc),
+        )
+        session.add_all([included_entry, excluded_entry])
+        session.flush()
+
+        included_item = EntryItem(entry_id=included_entry.id, position=0, name="омлет")
+        excluded_item = EntryItem(entry_id=excluded_entry.id, position=0, name="тост")
+        session.add_all([included_item, excluded_item])
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=included_item.id, metric_id=1, value=320.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=included_item.id, metric_id=2, value=24.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=included_item.id, metric_id=3, value=19.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=included_item.id, metric_id=4, value=11.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=excluded_item.id, metric_id=1, value=120.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=excluded_item.id, metric_id=2, value=4.0, confidence="medium"),
+            ]
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="today_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_today(message, session_factory, admin_user_ids=(ADMIN_ID,))
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Итог за сегодня:\n"
+        "- калории: 320.0 ккал\n"
+        "- белки: 24.0 г\n"
+        "- жиры: 19.0 г\n"
+        "- углеводы: 11.0 г\n"
+        "\n"
+        "Есть записей еды без полного набора метрик: 1. Итог дня пока неполный.",
     )
 
 
