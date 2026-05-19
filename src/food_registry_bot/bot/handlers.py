@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from io import BytesIO
 from datetime import datetime, timezone
 
@@ -9,15 +10,16 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from sqlalchemy.orm import Session, sessionmaker
 
+from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT, build_main_keyboard
 from food_registry_bot.db.models import EntryType
+from food_registry_bot.db.session import session_scope
 from food_registry_bot.db.repositories import (
     EntryItemCreate,
     EntryRepository,
     UserAccessRepository,
     UserRepository,
 )
-from food_registry_bot.db.session import session_scope
 from food_registry_bot.extraction import (
     ExtractionImageInput,
     InvalidExtractionPayload,
@@ -27,8 +29,12 @@ from food_registry_bot.extraction import (
     ValidExtractionPayload,
 )
 from food_registry_bot.nutrition import (
+    BackfillNutritionEstimationUseCase,
     FailedNutritionEstimation,
+    NutritionBackfillCompleted,
+    NutritionBackfillProgress,
     NutritionEstimationService,
+    SUPPORTED_NUTRITION_METRIC_CODES,
     SkippedNutritionEstimation,
     StaticNutritionEstimationService,
     StoredEntryNutritionEstimationUseCase,
@@ -107,6 +113,25 @@ def parse_target_telegram_user_id(command: CommandObject | None) -> int | None:
         return None
 
 
+def parse_positive_int_arg(command: CommandObject | None) -> int | None:
+    if command is None or command.args is None:
+        return None
+
+    raw_value = command.args.strip()
+    if not raw_value:
+        return None
+
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return None
+
+    if value <= 0:
+        return None
+
+    return value
+
+
 def build_admin_users_response(
     known_users: list,
     admin_user_ids: tuple[int, ...],
@@ -139,6 +164,117 @@ def build_admin_users_response(
         lines.append(f"- {admin_user_id} [admin]")
 
     return "\n".join(lines)
+
+
+def build_admin_backfill_response(result: NutritionBackfillCompleted, limit: int) -> str:
+    if not result.selected_entry_ids:
+        return f"Backfill nutrition: неполных food entries не найдено. Лимит {limit}."
+
+    lines = [
+        "Backfill nutrition завершён.",
+        f"Выбрано entries: {len(result.selected_entry_ids)}",
+        f"Обработано entries: {len(result.processed_entry_ids)}",
+        f"Сохранено метрик: {result.saved_metric_count}",
+    ]
+
+    if result.skipped_entry_ids:
+        lines.append(f"Пропущено entries: {', '.join(str(entry_id) for entry_id in result.skipped_entry_ids)}")
+
+    if result.failed_entries:
+        failed_ids = ", ".join(str(failure.entry_id) for failure in result.failed_entries)
+        lines.append(f"Ошибки entries: {failed_ids}")
+
+    return "\n".join(lines)
+
+
+def build_admin_backfill_status_line(tracker: AdminBackfillTracker) -> str:
+    snapshot = tracker.snapshot()
+    if snapshot.state == "running":
+        return (
+            "running"
+            f" ({snapshot.processed_entry_count}/{snapshot.selected_entry_count},"
+            f" skipped {snapshot.skipped_entry_count}, failed {snapshot.failed_entry_count},"
+            f" limit {snapshot.limit})"
+        )
+    if snapshot.state == "completed":
+        return "completed"
+    if snapshot.state == "failed":
+        return "failed"
+    return "idle"
+
+
+def build_admin_overview_response(
+    *,
+    admin_user_id: int,
+    admin_user_ids: tuple[int, ...],
+    known_users: list,
+    incomplete_food_entry_count: int,
+    backfill_status_line: str,
+) -> str:
+    regular_known_users = [
+        known_user
+        for known_user in known_users
+        if known_user.telegram_user_id not in admin_user_ids
+    ]
+    allowed_count = sum(1 for known_user in regular_known_users if known_user.is_allowed)
+    denied_count = sum(1 for known_user in regular_known_users if not known_user.is_allowed)
+    profile_count = sum(1 for known_user in regular_known_users if known_user.has_profile)
+
+    return "\n".join(
+        [
+            "Admin dashboard:",
+            f"- текущий админ: {admin_user_id}",
+            f"- админов в конфиге: {len(admin_user_ids)}",
+            f"- известных пользователей: {len(regular_known_users)}",
+            f"- разрешённых пользователей: {allowed_count}",
+            f"- запрещённых пользователей: {denied_count}",
+            f"- пользователей с профилем: {profile_count}",
+            f"- food entries без полного набора метрик: {incomplete_food_entry_count}",
+            f"- backfill nutrition: {backfill_status_line}",
+            "",
+            "Доступные команды:",
+            "- /admin",
+            "- /admin_users",
+            "- /admin_allow TELEGRAM_USER_ID",
+            "- /admin_deny TELEGRAM_USER_ID",
+            "- /admin_backfill_nutrition [LIMIT]",
+        ]
+    )
+
+
+async def run_admin_backfill_task(
+    *,
+    chat_id: int,
+    message_bot,
+    session_factory: sessionmaker[Session],
+    nutrition_service: NutritionEstimationService,
+    tracker: AdminBackfillTracker,
+    limit: int,
+) -> None:
+    try:
+        def run_sync_backfill() -> NutritionBackfillCompleted:
+            with session_scope(session_factory) as session:
+                return BackfillNutritionEstimationUseCase(
+                    session,
+                    nutrition_service,
+                ).run(
+                    limit=limit,
+                    progress_callback=lambda progress: tracker.update_progress(
+                        selected_entry_count=progress.selected_entry_count,
+                        processed_entry_count=progress.processed_entry_count,
+                        skipped_entry_count=progress.skipped_entry_count,
+                        failed_entry_count=progress.failed_entry_count,
+                    ),
+                )
+
+        result = await asyncio.to_thread(run_sync_backfill)
+        summary = build_admin_backfill_response(result, limit)
+        tracker.mark_completed(message=summary)
+        await message_bot.send_message(chat_id, summary)
+    except Exception as exc:
+        error_message = f"Backfill nutrition завершился с ошибкой: {exc}"
+        tracker.mark_failed(message=error_message)
+        await message_bot.send_message(chat_id, error_message)
 
 
 def present_item_name(name: str) -> str:
@@ -296,6 +432,82 @@ async def handle_admin_users(
         known_users = UserAccessRepository(session).list_known_users()
 
     await message.answer(build_admin_users_response(known_users, admin_user_ids))
+
+
+@router.message(Command("admin"))
+async def handle_admin(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    backfill_tracker: AdminBackfillTracker,
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = message.from_user
+    if telegram_user is None or not is_admin_user(telegram_user.id, admin_user_ids):
+        await message.answer("Команда доступна только администратору.")
+        return
+
+    with session_scope(session_factory) as session:
+        known_users = UserAccessRepository(session).list_known_users()
+        incomplete_food_entry_count = EntryRepository(session).count_incomplete_food_entries(
+            required_metric_codes=list(SUPPORTED_NUTRITION_METRIC_CODES)
+        )
+
+    await message.answer(
+        build_admin_overview_response(
+            admin_user_id=telegram_user.id,
+            admin_user_ids=admin_user_ids,
+            known_users=known_users,
+            incomplete_food_entry_count=incomplete_food_entry_count,
+            backfill_status_line=build_admin_backfill_status_line(backfill_tracker),
+        )
+    )
+
+
+@router.message(Command("admin_backfill_nutrition"))
+async def handle_admin_backfill_nutrition(
+    message: Message,
+    command: CommandObject,
+    session_factory: sessionmaker[Session],
+    nutrition_service: NutritionEstimationService = default_nutrition_service,
+    backfill_tracker: AdminBackfillTracker | None = None,
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = message.from_user
+    if telegram_user is None or not is_admin_user(telegram_user.id, admin_user_ids):
+        await message.answer("Команда доступна только администратору.")
+        return
+    if backfill_tracker is None:
+        raise RuntimeError("Backfill tracker is not configured")
+
+    limit = 20
+    if command.args is not None and command.args.strip():
+        parsed_limit = parse_positive_int_arg(command)
+        if parsed_limit is None:
+            await message.answer("Использование: /admin_backfill_nutrition [LIMIT]")
+            return
+        limit = parsed_limit
+
+    if backfill_tracker.is_running():
+        await message.answer("Backfill nutrition уже выполняется.")
+        return
+
+    await message.answer(f"Запускаю backfill nutrition. Лимит: {limit}.")
+
+    task = asyncio.create_task(
+        run_admin_backfill_task(
+            chat_id=message.chat.id,
+            message_bot=message.bot,
+            session_factory=session_factory,
+            nutrition_service=nutrition_service,
+            tracker=backfill_tracker,
+            limit=limit,
+        )
+    )
+    backfill_tracker.start(
+        requested_by=telegram_user.id,
+        limit=limit,
+        task=task,
+    )
 
 
 @router.message(Command("start"))

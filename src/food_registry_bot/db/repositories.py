@@ -222,6 +222,77 @@ class EntryRepository:
         )
         return list(self._session.scalars(statement))
 
+    def list_incomplete_food_entry_ids(
+        self,
+        *,
+        required_metric_codes: list[str],
+        limit: int,
+    ) -> list[int]:
+        if limit <= 0:
+            return []
+
+        statement = (
+            select(Entry)
+            .where(Entry.entry_type == EntryType.FOOD)
+            .options(
+                selectinload(Entry.items)
+                .selectinload(EntryItem.metrics)
+                .selectinload(EntryItemMetric.metric)
+            )
+            .order_by(Entry.occurred_at.asc(), Entry.id.asc())
+        )
+
+        incomplete_entry_ids: list[int] = []
+        required_metric_code_set = set(required_metric_codes)
+        for entry in self._session.scalars(statement):
+            is_incomplete = False
+            for item in entry.items:
+                item_metric_codes = {
+                    metric.metric.code
+                    for metric in item.metrics
+                    if metric.metric is not None
+                }
+                if item_metric_codes != required_metric_code_set:
+                    is_incomplete = True
+                    break
+
+            if is_incomplete:
+                incomplete_entry_ids.append(entry.id)
+                if len(incomplete_entry_ids) >= limit:
+                    break
+
+        return incomplete_entry_ids
+
+    def count_incomplete_food_entries(
+        self,
+        *,
+        required_metric_codes: list[str],
+    ) -> int:
+        statement = (
+            select(Entry)
+            .where(Entry.entry_type == EntryType.FOOD)
+            .options(
+                selectinload(Entry.items)
+                .selectinload(EntryItem.metrics)
+                .selectinload(EntryItemMetric.metric)
+            )
+        )
+
+        required_metric_code_set = set(required_metric_codes)
+        count = 0
+        for entry in self._session.scalars(statement):
+            for item in entry.items:
+                item_metric_codes = {
+                    metric.metric.code
+                    for metric in item.metrics
+                    if metric.metric is not None
+                }
+                if item_metric_codes != required_metric_code_set:
+                    count += 1
+                    break
+
+        return count
+
 
 class SupportedMetricRepository:
     def __init__(self, session: Session) -> None:

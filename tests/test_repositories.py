@@ -213,6 +213,43 @@ def test_entry_repository_lists_recent_entries_in_descending_order() -> None:
     assert [entry.id for entry in recent_entries] == [newer_entry.id, older_entry.id]
 
 
+def test_entry_repository_lists_incomplete_food_entry_ids() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=405, username="incomplete")
+    repository = EntryRepository(session)
+
+    complete_entry = repository.create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        items=[EntryItemCreate(name="яблоко")],
+    )
+    incomplete_entry = repository.create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 18, 11, 0, tzinfo=timezone.utc),
+        items=[EntryItemCreate(name="гречка")],
+    )
+
+    complete_item = session.query(EntryItem).filter_by(entry_id=complete_entry.id).one()
+    EntryItemMetricRepository(session).upsert_metrics(
+        entry_item_id=complete_item.id,
+        metric_values=[
+            EntryItemMetricValue(code="calories", value=100.0, confidence="medium"),
+            EntryItemMetricValue(code="protein", value=2.0, confidence="medium"),
+            EntryItemMetricValue(code="fat", value=1.0, confidence="medium"),
+            EntryItemMetricValue(code="carbs", value=20.0, confidence="medium"),
+        ],
+    )
+
+    incomplete_ids = repository.list_incomplete_food_entry_ids(
+        required_metric_codes=["calories", "protein", "fat", "carbs"],
+        limit=10,
+    )
+
+    assert incomplete_ids == [incomplete_entry.id]
+
+
 def test_supported_metric_repository_lists_seeded_metrics() -> None:
     session = create_test_session()
 

@@ -3,6 +3,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from sqlalchemy.orm import Session, sessionmaker
 
+from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.handlers import router
 from food_registry_bot.extraction import JournalExtractionService
 from food_registry_bot.nutrition import NutritionEstimationService
@@ -27,4 +28,5 @@ def create_dispatcher(
     dispatcher.workflow_data["extraction_service"] = extraction_service
     dispatcher.workflow_data["nutrition_service"] = nutrition_service
     dispatcher.workflow_data["admin_user_ids"] = admin_user_ids
+    dispatcher.workflow_data["backfill_tracker"] = AdminBackfillTracker()
     return dispatcher

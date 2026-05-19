@@ -54,6 +54,7 @@
 - `/admin_allow <telegram_user_id>`;
 - `/admin_deny <telegram_user_id>`.
 - `/admin_users`.
+- `/admin_backfill_nutrition [LIMIT]`.
 
 Команды доступны только админам.
 

@@ -7,7 +7,9 @@ from food_registry_bot.db.base import Base
 from food_registry_bot.db.models import EntryItemMetric, EntryType, SupportedMetric
 from food_registry_bot.db.repositories import EntryItemCreate, EntryRepository, UserRepository
 from food_registry_bot.nutrition import (
+    BackfillNutritionEstimationUseCase,
     FailedNutritionEstimation,
+    NutritionBackfillCompleted,
     SkippedNutritionEstimation,
     StaticNutritionEstimationService,
     StoredEntryNutritionEstimationUseCase,
@@ -139,3 +141,47 @@ def test_use_case_returns_failed_when_nutrition_payload_is_invalid() -> None:
     assert isinstance(result, FailedNutritionEstimation)
     assert "невалидный structured payload" in result.message
     assert session.query(EntryItemMetric).count() == 0
+
+
+def test_backfill_use_case_recomputes_only_incomplete_entries() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=704, username="backfill_user")
+    complete_entry = EntryRepository(session).create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        items=[EntryItemCreate(name="омлет")],
+    )
+    incomplete_entry = EntryRepository(session).create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 18, 11, 0, tzinfo=timezone.utc),
+        items=[EntryItemCreate(name="тост")],
+    )
+
+    complete_item = complete_entry.items[0]
+    session.add_all(
+        [
+            EntryItemMetric(entry_item_id=complete_item.id, metric_id=1, value=100.0, confidence="medium"),
+            EntryItemMetric(entry_item_id=complete_item.id, metric_id=2, value=5.0, confidence="medium"),
+            EntryItemMetric(entry_item_id=complete_item.id, metric_id=3, value=4.0, confidence="medium"),
+            EntryItemMetric(entry_item_id=complete_item.id, metric_id=4, value=10.0, confidence="medium"),
+        ]
+    )
+    session.commit()
+
+    use_case = BackfillNutritionEstimationUseCase(
+        session,
+        StaticNutritionEstimationService(
+            raw_payload=build_metric_payload([f"entry-{incomplete_entry.id}:item-0"], confidence="low")
+        ),
+    )
+
+    result = use_case.run(limit=10)
+
+    assert isinstance(result, NutritionBackfillCompleted)
+    assert result.selected_entry_ids == [incomplete_entry.id]
+    assert result.processed_entry_ids == [incomplete_entry.id]
+    assert result.skipped_entry_ids == []
+    assert result.failed_entries == []
+    assert result.saved_metric_count == 4

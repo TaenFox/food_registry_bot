@@ -10,6 +10,7 @@ from food_registry_bot.nutrition.contract import (
     NutritionEstimationItemInput,
     NutritionEstimationPayload,
     NutritionEstimationRequest,
+    NutritionUnit,
 )
 
 
@@ -46,6 +47,29 @@ def _is_supported_food_item(*, entry_type: EntryType) -> bool:
     return entry_type is EntryType.FOOD
 
 
+def _sanitize_quantity_unit(
+    *,
+    quantity: int | None,
+    unit: str | None,
+) -> tuple[int | None, str | None]:
+    if quantity is None or unit is None:
+        return None, None
+
+    normalized_unit = unit.strip().lower()
+    unit_aliases = {
+        "g": NutritionUnit.GRAM.value,
+        "гр": NutritionUnit.GRAM.value,
+        "г": NutritionUnit.GRAM.value,
+        "ml": NutritionUnit.MILLILITER.value,
+        "мл": NutritionUnit.MILLILITER.value,
+    }
+    canonical_unit = unit_aliases.get(normalized_unit)
+    if canonical_unit is None:
+        return None, None
+
+    return quantity, canonical_unit
+
+
 def _build_prepared_request(item_refs: Iterable[NutritionJournalItemRef]) -> PreparedNutritionRequest | None:
     collected_refs = list(item_refs)
     if not collected_refs:
@@ -77,14 +101,15 @@ def prepare_nutrition_request_from_extracted_payload(
             continue
 
         for item_index, item in enumerate(entry.items):
+            quantity, unit = _sanitize_quantity_unit(quantity=item.quantity, unit=item.unit)
             item_refs.append(
                 NutritionJournalItemRef(
                     client_item_id=f"entry-{entry_index}:item-{item_index}",
                     entry_key=f"entry-{entry_index}",
                     item_key=f"item-{item_index}",
                     name=item.name,
-                    quantity=item.quantity,
-                    unit=item.unit,
+                    quantity=quantity,
+                    unit=unit,
                 )
             )
 
@@ -99,14 +124,15 @@ def prepare_nutrition_request_from_entries(entries: Iterable[Entry]) -> Prepared
             continue
 
         for item in sorted(entry.items, key=lambda current: current.position):
+            quantity, unit = _sanitize_quantity_unit(quantity=item.quantity, unit=item.unit)
             item_refs.append(
                 NutritionJournalItemRef(
                     client_item_id=f"entry-{entry.id}:item-{item.position}",
                     entry_key=f"entry-{entry.id}",
                     item_key=f"item-{item.position}",
                     name=item.name,
-                    quantity=item.quantity,
-                    unit=item.unit,
+                    quantity=quantity,
+                    unit=unit,
                 )
             )
 

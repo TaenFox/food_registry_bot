@@ -330,6 +330,17 @@ def test_prepare_nutrition_request_from_entries_includes_food_items_without_quan
     ]
 
 
+def test_prepare_nutrition_request_from_entries_drops_unsupported_unit() -> None:
+    entry = Entry(id=52, user_id=1, entry_type=EntryType.FOOD, occurred_at="2026-05-18T10:00:00Z")
+    entry.items = [EntryItem(position=0, name="яйцо", quantity=2, unit="шт")]
+
+    prepared_request = prepare_nutrition_request_from_entries([entry])
+
+    assert prepared_request is not None
+    assert prepared_request.request.items[0].quantity is None
+    assert prepared_request.request.items[0].unit is None
+
+
 def test_resolve_nutrition_estimates_returns_results_in_request_order() -> None:
     prepared_request = prepare_nutrition_request_from_extracted_payload(
         ExtractedJournalPayload(

@@ -28,7 +28,11 @@ from food_registry_bot.nutrition.service import (
     ValidNutritionPayload,
 )
 from food_registry_bot.nutrition.use_cases import (
+    BackfillNutritionEstimationUseCase,
     FailedNutritionEstimation,
+    NutritionBackfillCompleted,
+    NutritionBackfillEntryFailure,
+    NutritionBackfillProgress,
     SkippedNutritionEstimation,
     StoredEntryNutritionEstimationUseCase,
     SuccessfulNutritionEstimation,
@@ -60,7 +64,11 @@ __all__ = [
     "SuccessfulNutritionEstimation",
     "ValidNutritionPayload",
     "create_nutrition_service",
+    "BackfillNutritionEstimationUseCase",
     "prepare_nutrition_request_from_entries",
     "prepare_nutrition_request_from_extracted_payload",
     "resolve_nutrition_estimates",
+    "NutritionBackfillCompleted",
+    "NutritionBackfillEntryFailure",
+    "NutritionBackfillProgress",
 ]

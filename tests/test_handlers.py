@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from io import BytesIO
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -7,9 +8,13 @@ from unittest.mock import AsyncMock
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
+from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.handlers import (
+    handle_admin,
     handle_admin_allow,
+    handle_admin_backfill_nutrition,
     handle_admin_deny,
     handle_admin_users,
     handle_health,
@@ -37,7 +42,12 @@ LARGE_DENIED_USER_ID = 5517166158
 
 
 def create_session_factory() -> sessionmaker[Session]:
-    engine = create_engine("sqlite:///:memory:", future=True)
+    engine = create_engine(
+        "sqlite://",
+        future=True,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False, class_=Session)
     with factory() as session:
@@ -193,6 +203,105 @@ async def test_admin_allow_returns_safe_usage_text_for_missing_argument() -> Non
     assert message.answer.await_args.args == ("Использование: /admin_allow TELEGRAM_USER_ID",)
 
 
+async def test_admin_returns_system_overview_and_commands() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
+    with session_factory() as session:
+        session.add(UserAccess(telegram_user_id=DENIED_USER_ID, username="denied_user", is_allowed=False))
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            source_text="омлет",
+            occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        session.add(EntryItem(entry_id=entry.id, position=0, name="омлет"))
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        answer=AsyncMock(),
+    )
+
+    await handle_admin(message, session_factory, backfill_tracker=AdminBackfillTracker(), admin_user_ids=(ADMIN_ID,))
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        (
+            "Admin dashboard:\n"
+            f"- текущий админ: {ADMIN_ID}\n"
+            "- админов в конфиге: 1\n"
+            "- известных пользователей: 2\n"
+            "- разрешённых пользователей: 1\n"
+            "- запрещённых пользователей: 1\n"
+            "- пользователей с профилем: 1\n"
+            "- food entries без полного набора метрик: 1\n"
+            "- backfill nutrition: idle\n"
+            "\n"
+            "Доступные команды:\n"
+            "- /admin\n"
+            "- /admin_users\n"
+            "- /admin_allow TELEGRAM_USER_ID\n"
+            "- /admin_deny TELEGRAM_USER_ID\n"
+            "- /admin_backfill_nutrition [LIMIT]"
+        ),
+    )
+
+
+async def test_admin_overview_excludes_admin_from_user_counters() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        session.add(UserAccess(telegram_user_id=ADMIN_ID, username="admin", is_allowed=False))
+        session.add(UserAccess(telegram_user_id=DENIED_USER_ID, username="denied_user", is_allowed=False))
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        answer=AsyncMock(),
+    )
+
+    await handle_admin(message, session_factory, backfill_tracker=AdminBackfillTracker(), admin_user_ids=(ADMIN_ID,))
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        (
+            "Admin dashboard:\n"
+            f"- текущий админ: {ADMIN_ID}\n"
+            "- админов в конфиге: 1\n"
+            "- известных пользователей: 1\n"
+            "- разрешённых пользователей: 0\n"
+            "- запрещённых пользователей: 1\n"
+            "- пользователей с профилем: 0\n"
+            "- food entries без полного набора метрик: 0\n"
+            "- backfill nutrition: idle\n"
+            "\n"
+            "Доступные команды:\n"
+            "- /admin\n"
+            "- /admin_users\n"
+            "- /admin_allow TELEGRAM_USER_ID\n"
+            "- /admin_deny TELEGRAM_USER_ID\n"
+            "- /admin_backfill_nutrition [LIMIT]"
+        ),
+    )
+
+
+async def test_admin_is_forbidden_for_non_admin() -> None:
+    session_factory = create_session_factory()
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_admin(message, session_factory, backfill_tracker=AdminBackfillTracker(), admin_user_ids=(ADMIN_ID,))
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("Команда доступна только администратору.",)
+
+
 async def test_admin_users_returns_known_users_with_status_and_commands() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
@@ -255,6 +364,158 @@ async def test_admin_users_is_forbidden_for_non_admin() -> None:
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == ("Команда доступна только администратору.",)
+
+
+async def test_admin_backfill_nutrition_recomputes_incomplete_entries() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            source_text="омлет",
+            occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        session.add(EntryItem(entry_id=entry.id, position=0, name="омлет"))
+        session.commit()
+
+    nutrition_service = StaticNutritionEstimationService(
+        raw_payload=build_metric_payload(["entry-1:item-0"], confidence="low")
+    )
+    backfill_tracker = AdminBackfillTracker()
+    bot = SimpleNamespace(send_message=AsyncMock())
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        chat=SimpleNamespace(id=7001),
+        bot=bot,
+        answer=AsyncMock(),
+    )
+    command = SimpleNamespace(args=None)
+
+    await handle_admin_backfill_nutrition(
+        message,
+        command,
+        session_factory,
+        nutrition_service=nutrition_service,
+        backfill_tracker=backfill_tracker,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    await backfill_tracker.task
+
+    with session_factory() as session:
+        assert session.query(EntryItemMetric).count() == 4
+
+    assert message.answer.await_count == 1
+    assert message.answer.await_args.args == ("Запускаю backfill nutrition. Лимит: 20.",)
+    assert bot.send_message.await_args.args == (
+        7001,
+        "Backfill nutrition завершён.\n"
+        "Выбрано entries: 1\n"
+        "Обработано entries: 1\n"
+        "Сохранено метрик: 4",
+    )
+
+
+async def test_admin_backfill_nutrition_returns_safe_usage_text_for_invalid_limit() -> None:
+    session_factory = create_session_factory()
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        answer=AsyncMock(),
+    )
+    command = SimpleNamespace(args="abc")
+
+    await handle_admin_backfill_nutrition(
+        message,
+        command,
+        session_factory,
+        nutrition_service=StaticNutritionEstimationService(raw_payload='{"items": []}'),
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("Использование: /admin_backfill_nutrition [LIMIT]",)
+
+
+async def test_admin_backfill_nutrition_reports_unhandled_error() -> None:
+    session_factory = create_session_factory()
+
+    class FailingNutritionService:
+        def estimate(self, request):
+            raise RuntimeError("boom")
+
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            source_text="омлет",
+            occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        session.add(EntryItem(entry_id=entry.id, position=0, name="омлет"))
+        session.commit()
+
+    backfill_tracker = AdminBackfillTracker()
+    bot = SimpleNamespace(send_message=AsyncMock())
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        chat=SimpleNamespace(id=7002),
+        bot=bot,
+        answer=AsyncMock(),
+    )
+    command = SimpleNamespace(args="1")
+
+    await handle_admin_backfill_nutrition(
+        message,
+        command,
+        session_factory,
+        nutrition_service=FailingNutritionService(),
+        backfill_tracker=backfill_tracker,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    await backfill_tracker.task
+
+    assert message.answer.await_count == 1
+    assert message.answer.await_args.args == ("Запускаю backfill nutrition. Лимит: 1.",)
+    assert bot.send_message.await_args.args == (7002, "Backfill nutrition завершился с ошибкой: boom")
+
+
+async def test_admin_backfill_nutrition_rejects_parallel_run() -> None:
+    session_factory = create_session_factory()
+    backfill_tracker = AdminBackfillTracker()
+    running_task = asyncio.create_task(asyncio.sleep(1))
+    backfill_tracker.start(requested_by=ADMIN_ID, limit=1, task=running_task)
+
+    bot = SimpleNamespace(send_message=AsyncMock())
+    second_message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        chat=SimpleNamespace(id=7003),
+        bot=bot,
+        answer=AsyncMock(),
+    )
+
+    await handle_admin_backfill_nutrition(
+        second_message,
+        SimpleNamespace(args="1"),
+        session_factory,
+        nutrition_service=StaticNutritionEstimationService(raw_payload='{"items": []}'),
+        backfill_tracker=backfill_tracker,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    second_message.answer.assert_awaited_once()
+    assert second_message.answer.await_args.args == ("Backfill nutrition уже выполняется.",)
+    running_task.cancel()
 
 
 async def test_regular_message_saves_metrics_for_allowed_user() -> None:
