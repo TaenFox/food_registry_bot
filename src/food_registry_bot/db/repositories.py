@@ -16,6 +16,7 @@ from food_registry_bot.db.models import (
     SupportedMetric,
     User,
     UserAccess,
+    UserSummaryPreference,
 )
 if TYPE_CHECKING:
     from food_registry_bot.nutrition.journal_adapter import PreparedNutritionRequest, ResolvedNutritionEstimate
@@ -150,6 +151,42 @@ class UserAccessRepository:
             )
 
         return result
+
+
+class UserSummaryPreferenceRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_by_user_id(self, user_id: int) -> Optional[UserSummaryPreference]:
+        statement = select(UserSummaryPreference).where(UserSummaryPreference.user_id == user_id)
+        return self._session.scalar(statement)
+
+    def get_or_create(self, *, user_id: int) -> tuple[UserSummaryPreference, bool]:
+        preference = self.get_by_user_id(user_id)
+        if preference is not None:
+            return preference, False
+
+        preference = UserSummaryPreference(user_id=user_id, show_calories=True)
+        self._session.add(preference)
+        self._session.flush()
+        return preference, True
+
+    def set_show_calories(
+        self,
+        *,
+        user_id: int,
+        show_calories: bool,
+    ) -> UserSummaryPreference:
+        preference, _created = self.get_or_create(user_id=user_id)
+        preference.show_calories = show_calories
+        self._session.flush()
+        return preference
+
+    def toggle_show_calories(self, *, user_id: int) -> UserSummaryPreference:
+        preference, _created = self.get_or_create(user_id=user_id)
+        preference.show_calories = not preference.show_calories
+        self._session.flush()
+        return preference
 
 
 class EntryRepository:

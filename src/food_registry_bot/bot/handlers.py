@@ -7,11 +7,16 @@ from datetime import datetime, timezone
 from aiogram import Router
 from aiogram import F
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
-from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT, build_main_keyboard
+from food_registry_bot.bot.keyboards import (
+    WATER_250_ML_BUTTON_TEXT,
+    build_main_keyboard,
+    build_summary_settings_keyboard,
+)
+from food_registry_bot.bot.payloads import SummarySettingsCallback
 from food_registry_bot.db.models import EntryType
 from food_registry_bot.db.session import session_scope
 from food_registry_bot.db.repositories import (
@@ -19,6 +24,7 @@ from food_registry_bot.db.repositories import (
     EntryRepository,
     UserAccessRepository,
     UserRepository,
+    UserSummaryPreferenceRepository,
 )
 from food_registry_bot.extraction import (
     ExtractionImageInput,
@@ -378,10 +384,8 @@ def build_today_summary_response(summary: DailyNutritionSummary) -> str:
     if summary.included_entry_count == 0 and summary.excluded_entry_count == 0:
         return "Сегодня пока нет сохранённых записей еды."
 
-    lines = [
-        "Итог за сегодня:",
-        f"- калории: {round(summary.totals.calories, 1)} ккал",
-    ]
+    lines = ["Итог за сегодня:"]
+    lines.append(f"- калории: {round(summary.totals.calories, 1)} ккал")
 
     if not summary.is_complete:
         lines.extend(
@@ -395,6 +399,28 @@ def build_today_summary_response(summary: DailyNutritionSummary) -> str:
         )
 
     return "\n".join(lines)
+
+
+def build_today_summary_response_with_preferences(
+    summary: DailyNutritionSummary,
+    *,
+    show_calories: bool,
+) -> str:
+    if summary.included_entry_count == 0 and summary.excluded_entry_count == 0:
+        return "Сегодня пока нет сохранённых записей еды."
+    if not show_calories:
+        return "В summary сейчас нет включённых показателей."
+    return build_today_summary_response(summary)
+
+
+def build_summary_settings_response(*, show_calories: bool) -> str:
+    status = "включено" if show_calories else "выключено"
+    return "\n".join(
+        [
+            "Настройки summary:",
+            f"- калории: {status}",
+        ]
+    )
 
 
 async def build_extraction_request(message: Message) -> JournalExtractionRequest | None:
@@ -614,6 +640,63 @@ async def handle_recent(
     await message.answer(build_recent_entries_response(entries), reply_markup=build_main_keyboard())
 
 
+@router.message(Command("settings"))
+async def handle_settings(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+
+    await message.answer(
+        build_summary_settings_response(show_calories=preference.show_calories),
+        reply_markup=build_summary_settings_keyboard(show_calories=preference.show_calories),
+    )
+
+
+@router.callback_query(SummarySettingsCallback.filter(F.action == "toggle_show_calories"))
+async def handle_toggle_show_calories(
+    callback: CallbackQuery,
+    callback_data: SummarySettingsCallback,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    _ = callback_data
+    telegram_user = callback.from_user
+    if telegram_user is None:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+
+    with session_scope(session_factory) as session:
+        if not (
+            is_admin_user(telegram_user.id, admin_user_ids)
+            or UserAccessRepository(session).is_allowed(telegram_user.id)
+        ):
+            await callback.answer("Доступ к боту не разрешён.", show_alert=True)
+            return
+
+        user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
+        if user is None:
+            user, _created = UserRepository(session).get_or_create(
+                telegram_user_id=telegram_user.id,
+                username=telegram_user.username,
+            )
+
+        preference = UserSummaryPreferenceRepository(session).toggle_show_calories(user_id=user.id)
+
+    if callback.message is not None:
+        await callback.message.edit_text(
+            build_summary_settings_response(show_calories=preference.show_calories),
+            reply_markup=build_summary_settings_keyboard(show_calories=preference.show_calories),
+        )
+    await callback.answer("Настройка обновлена.")
+
+
 @router.message(Command("today"))
 async def handle_today(
     message: Message,
@@ -642,8 +725,15 @@ async def handle_today(
             timezone_name=user.timezone,
             summary_date=summary_date,
         )
+        preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
 
-    await message.answer(build_today_summary_response(summary), reply_markup=build_main_keyboard())
+    await message.answer(
+        build_today_summary_response_with_preferences(
+            summary,
+            show_calories=preference.show_calories,
+        ),
+        reply_markup=build_main_keyboard(),
+    )
 
 
 @router.message(F.text == WATER_250_ML_BUTTON_TEXT)

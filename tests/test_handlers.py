@@ -20,13 +20,25 @@ from food_registry_bot.bot.handlers import (
     handle_health,
     handle_message,
     handle_recent,
+    handle_settings,
     handle_start,
     handle_today,
+    handle_toggle_show_calories,
     handle_water_250_ml,
 )
+from food_registry_bot.bot.payloads import SummarySettingsCallback
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT
 from food_registry_bot.db.base import Base
-from food_registry_bot.db.models import Entry, EntryItem, EntryItemMetric, EntryType, SupportedMetric, User, UserAccess
+from food_registry_bot.db.models import (
+    Entry,
+    EntryItem,
+    EntryItemMetric,
+    EntryType,
+    SupportedMetric,
+    User,
+    UserAccess,
+    UserSummaryPreference,
+)
 from food_registry_bot.extraction import (
     ExtractedJournalEntry,
     ExtractedJournalItem,
@@ -696,6 +708,95 @@ async def test_today_returns_daily_nutrition_totals_for_allowed_user() -> None:
         "\n"
         "Есть записей еды без полного набора метрик: 1. Итог дня пока неполный.",
     )
+
+
+async def test_today_returns_empty_enabled_metrics_message_when_calories_hidden() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "today_hidden_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="today_hidden_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        item = EntryItem(entry_id=entry.id, position=0, name="омлет")
+        session.add(item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=item.id, metric_id=1, value=320.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=2, value=24.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=3, value=19.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=4, value=11.0, confidence="medium"),
+                UserSummaryPreference(user_id=user.id, show_calories=False),
+            ]
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="today_hidden_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_today(message, session_factory, admin_user_ids=(ADMIN_ID,))
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("В summary сейчас нет включённых показателей.",)
+
+
+async def test_settings_returns_current_summary_preferences() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "settings_user")
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="settings_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_settings(message, session_factory, admin_user_ids=(ADMIN_ID,))
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("Настройки summary:\n- калории: включено",)
+    reply_markup = message.answer.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Калории: on"
+
+
+async def test_toggle_show_calories_updates_preference_and_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "settings_toggle_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="settings_toggle_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(UserSummaryPreference(user_id=user.id, show_calories=True))
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="settings_toggle_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_toggle_show_calories(
+        callback,
+        SummarySettingsCallback(action="toggle_show_calories"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_preference = session.query(UserSummaryPreference).one()
+
+    assert saved_preference.show_calories is False
+    callback.message.edit_text.assert_awaited_once()
+    assert callback.message.edit_text.await_args.args == ("Настройки summary:\n- калории: выключено",)
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Калории: off"
+    callback.answer.assert_awaited_once_with("Настройка обновлена.")
 
 
 async def test_water_button_creates_water_entry_for_allowed_user() -> None:

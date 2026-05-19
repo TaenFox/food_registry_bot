@@ -5,7 +5,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.db.base import Base
-from food_registry_bot.db.models import EntryItem, EntryItemMetric, EntryType, SupportedMetric, UserAccess
+from food_registry_bot.db.models import (
+    EntryItem,
+    EntryItemMetric,
+    EntryType,
+    SupportedMetric,
+    UserAccess,
+    UserSummaryPreference,
+)
 from food_registry_bot.db.repositories import (
     EntryItemCreate,
     EntryItemMetricRepository,
@@ -14,6 +21,7 @@ from food_registry_bot.db.repositories import (
     NutritionEstimatePersistenceService,
     SupportedMetricRepository,
     UserAccessRepository,
+    UserSummaryPreferenceRepository,
     UserRepository,
 )
 from food_registry_bot.extraction import ExtractedJournalEntry, ExtractedJournalItem, ExtractedJournalPayload
@@ -127,6 +135,32 @@ def test_user_access_repository_lists_known_users_from_profiles_and_access() -> 
         (7002, "allowed_user", True, True),
         (7003, "denied_user", False, False),
     ]
+
+
+def test_user_summary_preference_repository_creates_default_preferences_once() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7004, username="prefs_user")
+    repository = UserSummaryPreferenceRepository(session)
+
+    preference, created = repository.get_or_create(user_id=user.id)
+    same_preference, created_again = repository.get_or_create(user_id=user.id)
+
+    assert created is True
+    assert created_again is False
+    assert preference.id == same_preference.id
+    assert preference.show_calories is True
+
+
+def test_user_summary_preference_repository_toggles_show_calories() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7005, username="prefs_toggle_user")
+    repository = UserSummaryPreferenceRepository(session)
+
+    toggled_preference = repository.toggle_show_calories(user_id=user.id)
+
+    assert toggled_preference.show_calories is False
+    saved_preference = session.query(UserSummaryPreference).filter_by(user_id=user.id).one()
+    assert saved_preference.show_calories is False
 
 
 def test_entry_repository_creates_entry_for_user() -> None:
