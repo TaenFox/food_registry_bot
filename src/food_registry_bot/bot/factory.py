@@ -19,10 +19,12 @@ def create_dispatcher(
     session_factory: sessionmaker[Session],
     extraction_service: JournalExtractionService,
     nutrition_service: NutritionEstimationService,
+    admin_user_ids: tuple[int, ...],
 ) -> Dispatcher:
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
     dispatcher.workflow_data["session_factory"] = session_factory
     dispatcher.workflow_data["extraction_service"] = extraction_service
     dispatcher.workflow_data["nutrition_service"] = nutrition_service
+    dispatcher.workflow_data["admin_user_ids"] = admin_user_ids
     return dispatcher

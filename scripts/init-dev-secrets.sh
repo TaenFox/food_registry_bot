@@ -15,6 +15,7 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   cat > "${ENV_FILE}" <<'EOF'
 APP_ENV=local
 BOT_TOKEN=
+ADMIN_USER_IDS=
 EXTRACTION_PROVIDER=structured_payload
 LLM_MODEL=gpt-5-mini
 OPENAI_API_KEY=
@@ -35,6 +36,7 @@ cat > "${README_FILE}" <<EOF
 - Основной файл: \`.env\`
 - Каталог расположен рядом с репозиторием и не должен коммититься в git этого проекта
 - Скрипты и код проекта ожидают секреты по пути \`../${PROJECT_NAME}_local/.env\` относительно корня репозитория
+- Для admin-команд укажи список Telegram user id в \`ADMIN_USER_IDS\` через запятую
 - Для direct LLM extraction укажи \`EXTRACTION_PROVIDER=llm\` и заполни \`OPENAI_API_KEY\`
 EOF
 

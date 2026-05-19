@@ -17,6 +17,7 @@ async def run() -> None:
         create_session_factory(),
         extraction_service=create_extraction_service(settings),
         nutrition_service=create_nutrition_service(settings),
+        admin_user_ids=settings.admin_user_ids,
     )
     await dispatcher.start_polling(bot)
 

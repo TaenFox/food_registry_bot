@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.db.base import Base
-from food_registry_bot.db.models import EntryItem, EntryItemMetric, EntryType, SupportedMetric
+from food_registry_bot.db.models import EntryItem, EntryItemMetric, EntryType, SupportedMetric, UserAccess
 from food_registry_bot.db.repositories import (
     EntryItemCreate,
     EntryItemMetricRepository,
@@ -13,6 +13,7 @@ from food_registry_bot.db.repositories import (
     EntryRepository,
     NutritionEstimatePersistenceService,
     SupportedMetricRepository,
+    UserAccessRepository,
     UserRepository,
 )
 from food_registry_bot.extraction import ExtractedJournalEntry, ExtractedJournalItem, ExtractedJournalPayload
@@ -71,6 +72,61 @@ def test_user_repository_creates_user_once() -> None:
     assert created_again is False
     assert user.id == same_user.id
     assert user.username == "alice"
+
+
+def test_user_access_repository_sets_and_updates_access() -> None:
+    session = create_test_session()
+    repository = UserAccessRepository(session)
+
+    allowed_access = repository.set_access(
+        telegram_user_id=9001,
+        username="first_user",
+        is_allowed=True,
+    )
+    denied_access = repository.set_access(
+        telegram_user_id=9001,
+        username="first_user_renamed",
+        is_allowed=False,
+    )
+
+    assert allowed_access.id == denied_access.id
+    assert repository.is_allowed(9001) is False
+    saved_access = session.query(UserAccess).filter_by(telegram_user_id=9001).one()
+    assert saved_access.username == "first_user_renamed"
+    assert saved_access.is_allowed is False
+
+
+def test_user_access_repository_lists_known_users_from_profiles_and_access() -> None:
+    session = create_test_session()
+    UserRepository(session).create(telegram_user_id=7001, username="profile_only")
+    UserRepository(session).create(telegram_user_id=7002, username="allowed_user")
+    repository = UserAccessRepository(session)
+    repository.set_access(
+        telegram_user_id=7002,
+        username="allowed_user",
+        is_allowed=True,
+    )
+    repository.set_access(
+        telegram_user_id=7003,
+        username="denied_user",
+        is_allowed=False,
+    )
+
+    known_users = repository.list_known_users()
+
+    assert [
+        (
+            known_user.telegram_user_id,
+            known_user.username,
+            known_user.has_profile,
+            known_user.is_allowed,
+        )
+        for known_user in known_users
+    ] == [
+        (7001, "profile_only", True, False),
+        (7002, "allowed_user", True, True),
+        (7003, "denied_user", False, False),
+    ]
 
 
 def test_entry_repository_creates_entry_for_user() -> None:

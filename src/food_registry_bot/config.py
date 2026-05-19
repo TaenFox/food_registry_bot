@@ -44,6 +44,7 @@ class Settings(BaseSettings):
 
     app_env: str = "local"
     bot_token: Optional[str] = Field(default=None, alias="BOT_TOKEN")
+    admin_user_ids_raw: str = Field(default="", alias="ADMIN_USER_IDS")
     extraction_provider: ExtractionProvider = Field(
         default=ExtractionProvider.STRUCTURED_PAYLOAD,
         alias="EXTRACTION_PROVIDER",
@@ -73,6 +74,19 @@ class Settings(BaseSettings):
             f"{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
+
+    @property
+    def admin_user_ids(self) -> tuple[int, ...]:
+        if not self.admin_user_ids_raw.strip():
+            return ()
+
+        values = []
+        for raw_value in self.admin_user_ids_raw.split(","):
+            stripped_value = raw_value.strip()
+            if not stripped_value:
+                continue
+            values.append(int(stripped_value))
+        return tuple(values)
 
 
 @lru_cache(maxsize=1)

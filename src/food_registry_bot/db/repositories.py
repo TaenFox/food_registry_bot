@@ -15,6 +15,7 @@ from food_registry_bot.db.models import (
     MealType,
     SupportedMetric,
     User,
+    UserAccess,
 )
 if TYPE_CHECKING:
     from food_registry_bot.nutrition.journal_adapter import PreparedNutritionRequest, ResolvedNutritionEstimate
@@ -34,6 +35,14 @@ class EntryItemMetricValue:
     code: str
     value: float
     confidence: str
+
+
+@dataclass(frozen=True)
+class KnownUserAccessView:
+    telegram_user_id: int
+    username: str | None
+    has_profile: bool
+    is_allowed: bool
 
 
 class UserRepository:
@@ -77,6 +86,70 @@ class UserRepository:
             timezone=timezone,
         )
         return user, True
+
+
+class UserAccessRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_by_telegram_user_id(self, telegram_user_id: int) -> Optional[UserAccess]:
+        statement = select(UserAccess).where(UserAccess.telegram_user_id == telegram_user_id)
+        return self._session.scalar(statement)
+
+    def is_allowed(self, telegram_user_id: int) -> bool:
+        access = self.get_by_telegram_user_id(telegram_user_id)
+        return bool(access and access.is_allowed)
+
+    def set_access(
+        self,
+        *,
+        telegram_user_id: int,
+        username: str | None,
+        is_allowed: bool,
+    ) -> UserAccess:
+        access = self.get_by_telegram_user_id(telegram_user_id)
+        if access is None:
+            access = UserAccess(
+                telegram_user_id=telegram_user_id,
+                username=username,
+                is_allowed=is_allowed,
+            )
+            self._session.add(access)
+        else:
+            access.username = username
+            access.is_allowed = is_allowed
+
+        self._session.flush()
+        return access
+
+    def list_known_users(self) -> list[KnownUserAccessView]:
+        users = list(self._session.scalars(select(User).order_by(User.telegram_user_id.asc())))
+        access_rows = list(
+            self._session.scalars(select(UserAccess).order_by(UserAccess.telegram_user_id.asc()))
+        )
+
+        users_by_telegram_id = {user.telegram_user_id: user for user in users}
+        access_by_telegram_id = {
+            access.telegram_user_id: access for access in access_rows
+        }
+
+        known_ids = sorted(set(users_by_telegram_id) | set(access_by_telegram_id))
+        result: list[KnownUserAccessView] = []
+        for telegram_user_id in known_ids:
+            user = users_by_telegram_id.get(telegram_user_id)
+            access = access_by_telegram_id.get(telegram_user_id)
+            result.append(
+                KnownUserAccessView(
+                    telegram_user_id=telegram_user_id,
+                    username=(user.username if user is not None else None) or (
+                        access.username if access is not None else None
+                    ),
+                    has_profile=user is not None,
+                    is_allowed=bool(access and access.is_allowed),
+                )
+            )
+
+        return result
 
 
 class EntryRepository:

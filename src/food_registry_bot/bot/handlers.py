@@ -5,13 +5,18 @@ from datetime import datetime, timezone
 
 from aiogram import Router
 from aiogram import F
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT, build_main_keyboard
 from food_registry_bot.db.models import EntryType
-from food_registry_bot.db.repositories import EntryItemCreate, EntryRepository, UserRepository
+from food_registry_bot.db.repositories import (
+    EntryItemCreate,
+    EntryRepository,
+    UserAccessRepository,
+    UserRepository,
+)
 from food_registry_bot.db.session import session_scope
 from food_registry_bot.extraction import (
     ExtractionImageInput,
@@ -39,6 +44,10 @@ class FoodWriteFlowError(RuntimeError):
     pass
 
 
+def is_admin_user(telegram_user_id: int, admin_user_ids: tuple[int, ...]) -> bool:
+    return telegram_user_id in admin_user_ids
+
+
 def ensure_user_registered(message: Message, session: Session) -> tuple[bool, int]:
     telegram_user = message.from_user
     if telegram_user is None:
@@ -49,6 +58,87 @@ def ensure_user_registered(message: Message, session: Session) -> tuple[bool, in
         username=telegram_user.username,
     )
     return created, user.id
+
+
+def user_has_access(message: Message, session: Session, admin_user_ids: tuple[int, ...]) -> bool:
+    telegram_user = message.from_user
+    if telegram_user is None:
+        return False
+
+    if is_admin_user(telegram_user.id, admin_user_ids):
+        return True
+
+    return UserAccessRepository(session).is_allowed(telegram_user.id)
+
+
+async def require_user_access(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...],
+) -> bool:
+    with session_scope(session_factory) as session:
+        telegram_user = message.from_user
+        has_access = user_has_access(message, session, admin_user_ids)
+        if not has_access and telegram_user is not None and not is_admin_user(telegram_user.id, admin_user_ids):
+            UserAccessRepository(session).set_access(
+                telegram_user_id=telegram_user.id,
+                username=telegram_user.username,
+                is_allowed=False,
+            )
+
+    if has_access:
+        return True
+
+    await message.answer("Доступ к боту не разрешён.")
+    return False
+
+
+def parse_target_telegram_user_id(command: CommandObject | None) -> int | None:
+    if command is None or command.args is None:
+        return None
+
+    raw_value = command.args.strip()
+    if not raw_value:
+        return None
+
+    try:
+        return int(raw_value)
+    except ValueError:
+        return None
+
+
+def build_admin_users_response(
+    known_users: list,
+    admin_user_ids: tuple[int, ...],
+) -> str:
+    if not known_users and not admin_user_ids:
+        return "Пока нет известных пользователей."
+
+    lines = ["Пользователи:"]
+    rendered_ids: set[int] = set()
+
+    for known_user in known_users:
+        rendered_ids.add(known_user.telegram_user_id)
+        username_suffix = f" @{known_user.username}" if known_user.username else ""
+        if known_user.telegram_user_id in admin_user_ids:
+            lines.append(f"- {known_user.telegram_user_id}{username_suffix} [admin]")
+            continue
+
+        status = "allowed" if known_user.is_allowed else "denied"
+        lines.append(f"- {known_user.telegram_user_id}{username_suffix} [{status}]")
+        next_command = (
+            f"/admin_deny {known_user.telegram_user_id}"
+            if known_user.is_allowed
+            else f"/admin_allow {known_user.telegram_user_id}"
+        )
+        lines.append(next_command)
+
+    for admin_user_id in sorted(admin_user_ids):
+        if admin_user_id in rendered_ids:
+            continue
+        lines.append(f"- {admin_user_id} [admin]")
+
+    return "\n".join(lines)
 
 
 def present_item_name(name: str) -> str:
@@ -137,8 +227,86 @@ async def build_extraction_request(message: Message) -> JournalExtractionRequest
     return None
 
 
+@router.message(Command("admin_allow"))
+async def handle_admin_allow(
+    message: Message,
+    command: CommandObject,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = message.from_user
+    if telegram_user is None or not is_admin_user(telegram_user.id, admin_user_ids):
+        await message.answer("Команда доступна только администратору.")
+        return
+
+    target_user_id = parse_target_telegram_user_id(command)
+    if target_user_id is None:
+        await message.answer("Использование: /admin_allow TELEGRAM_USER_ID")
+        return
+
+    with session_scope(session_factory) as session:
+        UserAccessRepository(session).set_access(
+            telegram_user_id=target_user_id,
+            username=None,
+            is_allowed=True,
+        )
+
+    await message.answer(f"Доступ разрешён для пользователя {target_user_id}.")
+
+
+@router.message(Command("admin_deny"))
+async def handle_admin_deny(
+    message: Message,
+    command: CommandObject,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = message.from_user
+    if telegram_user is None or not is_admin_user(telegram_user.id, admin_user_ids):
+        await message.answer("Команда доступна только администратору.")
+        return
+
+    target_user_id = parse_target_telegram_user_id(command)
+    if target_user_id is None:
+        await message.answer("Использование: /admin_deny TELEGRAM_USER_ID")
+        return
+
+    with session_scope(session_factory) as session:
+        UserAccessRepository(session).set_access(
+            telegram_user_id=target_user_id,
+            username=None,
+            is_allowed=False,
+        )
+
+    await message.answer(f"Доступ запрещён для пользователя {target_user_id}.")
+
+
+@router.message(Command("admin_users"))
+async def handle_admin_users(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = message.from_user
+    if telegram_user is None or not is_admin_user(telegram_user.id, admin_user_ids):
+        await message.answer("Команда доступна только администратору.")
+        return
+
+    with session_scope(session_factory) as session:
+        known_users = UserAccessRepository(session).list_known_users()
+
+    await message.answer(build_admin_users_response(known_users, admin_user_ids))
+
+
 @router.message(Command("start"))
-async def handle_start(message: Message, session_factory: sessionmaker[Session]) -> None:
+async def handle_start(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
     with session_scope(session_factory) as session:
         created, _ = ensure_user_registered(message, session)
 
@@ -156,12 +324,26 @@ async def handle_start(message: Message, session_factory: sessionmaker[Session])
 
 
 @router.message(Command("health"))
-async def handle_health(message: Message) -> None:
+async def handle_health(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
     await message.answer("ok")
 
 
 @router.message(Command("recent"))
-async def handle_recent(message: Message, session_factory: sessionmaker[Session]) -> None:
+async def handle_recent(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
         entries = EntryRepository(session).list_recent_for_user(user_id=user_id, limit=5)
@@ -170,7 +352,14 @@ async def handle_recent(message: Message, session_factory: sessionmaker[Session]
 
 
 @router.message(F.text == WATER_250_ML_BUTTON_TEXT)
-async def handle_water_250_ml(message: Message, session_factory: sessionmaker[Session]) -> None:
+async def handle_water_250_ml(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
     saved_items = [EntryItemCreate(name="water", quantity=250, unit="ml")]
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
@@ -191,7 +380,11 @@ async def handle_message(
     session_factory: sessionmaker[Session],
     extraction_service: JournalExtractionService = default_extraction_service,
     nutrition_service: NutritionEstimationService = default_nutrition_service,
+    admin_user_ids: tuple[int, ...] = (),
 ) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
     extraction_request = await build_extraction_request(message)
     if extraction_request is None:
         await message.answer(
@@ -221,7 +414,6 @@ async def handle_message(
         with session_scope(session_factory) as session:
             _, user_id = ensure_user_registered(message, session)
 
-            saved_entries = []
             food_entry_ids: list[int] = []
             for extracted_entry in extraction_result.payload.entries:
                 saved_entry = EntryRepository(session).create(
@@ -242,7 +434,6 @@ async def handle_message(
                         for item in extracted_entry.items
                     ],
                 )
-                saved_entries.append(saved_entry)
                 if extracted_entry.type is EntryType.FOOD:
                     food_entry_ids.append(saved_entry.id)
 
