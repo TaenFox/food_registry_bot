@@ -15,14 +15,37 @@ def build_main_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def build_summary_settings_keyboard(*, show_calories: bool) -> InlineKeyboardMarkup:
-    status = "on" if show_calories else "off"
+def build_summary_settings_keyboard(
+    *,
+    show_calories: bool,
+    show_protein: bool,
+    show_fat: bool,
+    show_carbs: bool,
+) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"Калории: {status}",
-                    callback_data=SummarySettingsCallback(action="toggle_show_calories").pack(),
+                    text=f"Калории: {'on' if show_calories else 'off'}",
+                    callback_data=SummarySettingsCallback(action="toggle_calories").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Белки: {'on' if show_protein else 'off'}",
+                    callback_data=SummarySettingsCallback(action="toggle_protein").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Жиры: {'on' if show_fat else 'off'}",
+                    callback_data=SummarySettingsCallback(action="toggle_fat").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Углеводы: {'on' if show_carbs else 'off'}",
+                    callback_data=SummarySettingsCallback(action="toggle_carbs").pack(),
                 )
             ]
         ]

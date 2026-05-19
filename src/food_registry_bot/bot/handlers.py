@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 from io import BytesIO
 from datetime import datetime, timezone
 
@@ -53,6 +54,12 @@ from food_registry_bot.nutrition import (
 router = Router()
 default_extraction_service = StructuredPayloadExtractionService()
 default_nutrition_service = StaticNutritionEstimationService(raw_payload="")
+SUMMARY_METRIC_LINES = (
+    ("calories", "К", "ккал"),
+    ("protein", "Б", "г"),
+    ("fat", "Ж", "г"),
+    ("carbs", "У", "г"),
+)
 
 
 class FoodWriteFlowError(RuntimeError):
@@ -404,21 +411,61 @@ def build_today_summary_response(summary: DailyNutritionSummary) -> str:
 def build_today_summary_response_with_preferences(
     summary: DailyNutritionSummary,
     *,
-    show_calories: bool,
+    enabled_metric_codes: tuple[str, ...],
 ) -> str:
     if summary.included_entry_count == 0 and summary.excluded_entry_count == 0:
         return "Сегодня пока нет сохранённых записей еды."
-    if not show_calories:
+    if not enabled_metric_codes:
         return "В summary сейчас нет включённых показателей."
-    return build_today_summary_response(summary)
+    lines: list[str] = []
+    for metric_code, short_label, unit in SUMMARY_METRIC_LINES:
+        if metric_code not in enabled_metric_codes:
+            continue
+        metric_value = getattr(summary.totals, metric_code)
+        lines.append(f"{short_label}: {round(metric_value, 1)} {unit}")
+
+    rendered_summary = "<pre>" + html.escape("\n".join(lines)) + "</pre>"
+
+    if not summary.is_complete:
+        return "\n\n".join(
+            [
+                rendered_summary,
+                (
+                    f"Есть записей еды без полного набора метрик: {summary.excluded_entry_count}."
+                    " Итог дня пока неполный."
+                ),
+            ]
+        )
+
+    return rendered_summary
 
 
-def build_summary_settings_response(*, show_calories: bool) -> str:
-    status = "включено" if show_calories else "выключено"
+def get_enabled_summary_metric_codes(preference) -> tuple[str, ...]:
+    enabled_metric_codes: list[str] = []
+    for metric_code, _short_label, _unit in SUMMARY_METRIC_LINES:
+        if getattr(preference, f"show_{metric_code}"):
+            enabled_metric_codes.append(metric_code)
+    return tuple(enabled_metric_codes)
+
+
+def build_summary_settings_response(
+    *,
+    show_calories: bool,
+    show_protein: bool,
+    show_fat: bool,
+    show_carbs: bool,
+) -> str:
+    statuses = {
+        True: "включено",
+        False: "выключено",
+    }
     return "\n".join(
         [
             "Настройки summary:",
-            f"- калории: {status}",
+            f"- калории: {statuses[show_calories]}",
+            f"- белки: {statuses[show_protein]}",
+            f"- жиры: {statuses[show_fat]}",
+            f"- углеводы: {statuses[show_carbs]}",
         ]
     )
 
@@ -654,23 +701,36 @@ async def handle_settings(
         preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
 
     await message.answer(
-        build_summary_settings_response(show_calories=preference.show_calories),
-        reply_markup=build_summary_settings_keyboard(show_calories=preference.show_calories),
+        build_summary_settings_response(
+            show_calories=preference.show_calories,
+            show_protein=preference.show_protein,
+            show_fat=preference.show_fat,
+            show_carbs=preference.show_carbs,
+        ),
+        reply_markup=build_summary_settings_keyboard(
+            show_calories=preference.show_calories,
+            show_protein=preference.show_protein,
+            show_fat=preference.show_fat,
+            show_carbs=preference.show_carbs,
+        ),
     )
 
 
-@router.callback_query(SummarySettingsCallback.filter(F.action == "toggle_show_calories"))
-async def handle_toggle_show_calories(
+@router.callback_query(SummarySettingsCallback.filter())
+async def handle_toggle_summary_metric(
     callback: CallbackQuery,
     callback_data: SummarySettingsCallback,
     session_factory: sessionmaker[Session],
     admin_user_ids: tuple[int, ...] = (),
 ) -> None:
-    _ = callback_data
     telegram_user = callback.from_user
     if telegram_user is None:
         await callback.answer("Пользователь не найден.", show_alert=True)
         return
+    if not callback_data.action.startswith("toggle_"):
+        await callback.answer("Неизвестное действие.", show_alert=True)
+        return
+    metric_code = callback_data.action.removeprefix("toggle_")
 
     with session_scope(session_factory) as session:
         if not (
@@ -687,12 +747,25 @@ async def handle_toggle_show_calories(
                 username=telegram_user.username,
             )
 
-        preference = UserSummaryPreferenceRepository(session).toggle_show_calories(user_id=user.id)
+        preference = UserSummaryPreferenceRepository(session).toggle_metric_visibility(
+            user_id=user.id,
+            metric_code=metric_code,
+        )
 
     if callback.message is not None:
         await callback.message.edit_text(
-            build_summary_settings_response(show_calories=preference.show_calories),
-            reply_markup=build_summary_settings_keyboard(show_calories=preference.show_calories),
+            build_summary_settings_response(
+                show_calories=preference.show_calories,
+                show_protein=preference.show_protein,
+                show_fat=preference.show_fat,
+                show_carbs=preference.show_carbs,
+            ),
+            reply_markup=build_summary_settings_keyboard(
+                show_calories=preference.show_calories,
+                show_protein=preference.show_protein,
+                show_fat=preference.show_fat,
+                show_carbs=preference.show_carbs,
+            ),
         )
     await callback.answer("Настройка обновлена.")
 
@@ -730,7 +803,7 @@ async def handle_today(
     await message.answer(
         build_today_summary_response_with_preferences(
             summary,
-            show_calories=preference.show_calories,
+            enabled_metric_codes=get_enabled_summary_metric_codes(preference),
         ),
         reply_markup=build_main_keyboard(),
     )

@@ -166,27 +166,53 @@ class UserSummaryPreferenceRepository:
         if preference is not None:
             return preference, False
 
-        preference = UserSummaryPreference(user_id=user_id, show_calories=True)
+        preference = UserSummaryPreference(
+            user_id=user_id,
+            show_calories=True,
+            show_protein=True,
+            show_fat=True,
+            show_carbs=True,
+        )
         self._session.add(preference)
         self._session.flush()
         return preference, True
 
-    def set_show_calories(
+    def set_metric_visibility(
         self,
         *,
         user_id: int,
-        show_calories: bool,
+        metric_code: str,
+        is_visible: bool,
     ) -> UserSummaryPreference:
         preference, _created = self.get_or_create(user_id=user_id)
-        preference.show_calories = show_calories
+        setattr(preference, self._resolve_metric_attribute(metric_code), is_visible)
         self._session.flush()
         return preference
 
-    def toggle_show_calories(self, *, user_id: int) -> UserSummaryPreference:
+    def toggle_metric_visibility(
+        self,
+        *,
+        user_id: int,
+        metric_code: str,
+    ) -> UserSummaryPreference:
         preference, _created = self.get_or_create(user_id=user_id)
-        preference.show_calories = not preference.show_calories
+        attribute_name = self._resolve_metric_attribute(metric_code)
+        setattr(preference, attribute_name, not getattr(preference, attribute_name))
         self._session.flush()
         return preference
+
+    @staticmethod
+    def _resolve_metric_attribute(metric_code: str) -> str:
+        metric_attributes = {
+            "calories": "show_calories",
+            "protein": "show_protein",
+            "fat": "show_fat",
+            "carbs": "show_carbs",
+        }
+        try:
+            return metric_attributes[metric_code]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported summary preference metric code: {metric_code}") from exc
 
 
 class EntryRepository:

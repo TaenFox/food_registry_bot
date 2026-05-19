@@ -149,18 +149,22 @@ def test_user_summary_preference_repository_creates_default_preferences_once() -
     assert created_again is False
     assert preference.id == same_preference.id
     assert preference.show_calories is True
+    assert preference.show_protein is True
+    assert preference.show_fat is True
+    assert preference.show_carbs is True
 
 
-def test_user_summary_preference_repository_toggles_show_calories() -> None:
+def test_user_summary_preference_repository_toggles_metric_visibility() -> None:
     session = create_test_session()
     user = UserRepository(session).create(telegram_user_id=7005, username="prefs_toggle_user")
     repository = UserSummaryPreferenceRepository(session)
 
-    toggled_preference = repository.toggle_show_calories(user_id=user.id)
+    toggled_preference = repository.toggle_metric_visibility(user_id=user.id, metric_code="protein")
 
-    assert toggled_preference.show_calories is False
+    assert toggled_preference.show_calories is True
+    assert toggled_preference.show_protein is False
     saved_preference = session.query(UserSummaryPreference).filter_by(user_id=user.id).one()
-    assert saved_preference.show_calories is False
+    assert saved_preference.show_protein is False
 
 
 def test_entry_repository_creates_entry_for_user() -> None:
