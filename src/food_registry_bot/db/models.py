@@ -90,6 +90,7 @@ class UserSummaryPreference(Base):
     show_fat: Mapped[bool] = mapped_column(default=True)
     show_carbs: Mapped[bool] = mapped_column(default=True)
     show_water: Mapped[bool] = mapped_column(default=True)
+    show_post_entry_delta_suffix: Mapped[bool] = mapped_column(default=True)
     summary_display_mode: Mapped[str] = mapped_column(String(16), default="text")
     nutrition_day_start_hour: Mapped[int] = mapped_column(default=4)
     created_at: Mapped[datetime] = mapped_column(

@@ -603,7 +603,14 @@ async def test_regular_message_saves_metrics_for_allowed_user() -> None:
     assert metric_count == 4
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сохранил:\n- яблоко: 180 г\n\nКБЖУ по еде:\n- калории: 220.0 ккал\n- белки: 7.6 г\n- жиры: 2.2 г\n- углеводы: 42.8 г",
+        "Сохранил:\n- яблоко: 180 г\n\n"
+        "<pre>"
+        "К: 220.0 / 1800 ккал (+220.0 ккал)\n"
+        "Б: 7.6 / 90 г (+7.6 г)\n"
+        "Ж: 2.2 / 60 г (+2.2 г)\n"
+        "У: 42.8 / 210 г (+42.8 г)\n"
+        "В: 0.0 / 2000 мл"
+        "</pre>",
     )
 
 
@@ -1015,6 +1022,7 @@ async def test_settings_returns_current_summary_preferences() -> None:
         "- жиры: включено\n"
         "- углеводы: включено\n"
         "- вода: включено\n"
+        "- дельта записи: включено\n"
         "- отображение: текст\n"
         "- начало дня: 04:00",
     )
@@ -1024,8 +1032,9 @@ async def test_settings_returns_current_summary_preferences() -> None:
     assert reply_markup.inline_keyboard[2][0].text == "Жиры: on"
     assert reply_markup.inline_keyboard[3][0].text == "Углеводы: on"
     assert reply_markup.inline_keyboard[4][0].text == "Вода: on"
-    assert reply_markup.inline_keyboard[5][0].text == "Отображение: текст"
-    assert reply_markup.inline_keyboard[6][0].text == "Начало дня: 04:00"
+    assert reply_markup.inline_keyboard[5][0].text == "Дельта записи: on"
+    assert reply_markup.inline_keyboard[6][0].text == "Отображение: текст"
+    assert reply_markup.inline_keyboard[7][0].text == "Начало дня: 04:00"
 
 
 async def test_toggle_summary_metric_updates_preference_and_message() -> None:
@@ -1043,6 +1052,7 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
                 show_fat=True,
                 show_carbs=True,
                 show_water=True,
+                show_post_entry_delta_suffix=True,
             )
         )
         session.commit()
@@ -1073,6 +1083,7 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
         "- жиры: включено\n"
         "- углеводы: включено\n"
         "- вода: включено\n"
+        "- дельта записи: включено\n"
         "- отображение: текст\n"
         "- начало дня: 04:00",
     )
@@ -1097,6 +1108,7 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
                 show_fat=True,
                 show_carbs=True,
                 show_water=True,
+                show_post_entry_delta_suffix=True,
                 nutrition_day_start_hour=4,
             )
         )
@@ -1126,11 +1138,12 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
         "- жиры: включено\n"
         "- углеводы: включено\n"
         "- вода: включено\n"
+        "- дельта записи: включено\n"
         "- отображение: текст\n"
         "- начало дня: 06:00",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[6][0].text == "Начало дня: 06:00"
+    assert reply_markup.inline_keyboard[7][0].text == "Начало дня: 06:00"
 
 
 async def test_cycle_summary_display_mode_updates_preference_and_message() -> None:
@@ -1148,6 +1161,7 @@ async def test_cycle_summary_display_mode_updates_preference_and_message() -> No
                 show_fat=True,
                 show_carbs=True,
                 show_water=True,
+                show_post_entry_delta_suffix=True,
                 summary_display_mode="text",
                 nutrition_day_start_hour=4,
             )
@@ -1178,11 +1192,65 @@ async def test_cycle_summary_display_mode_updates_preference_and_message() -> No
         "- жиры: включено\n"
         "- углеводы: включено\n"
         "- вода: включено\n"
+        "- дельта записи: включено\n"
         "- отображение: бары\n"
         "- начало дня: 04:00",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[5][0].text == "Отображение: бары"
+    assert reply_markup.inline_keyboard[6][0].text == "Отображение: бары"
+
+
+async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "settings_delta_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="settings_delta_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(
+            UserSummaryPreference(
+                user_id=user.id,
+                show_calories=True,
+                show_protein=True,
+                show_fat=True,
+                show_carbs=True,
+                show_water=True,
+                show_post_entry_delta_suffix=True,
+            )
+        )
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="settings_delta_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_toggle_summary_metric(
+        callback,
+        SummarySettingsCallback(action="toggle_post_entry_delta_suffix"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_preference = session.query(UserSummaryPreference).one()
+
+    assert saved_preference.show_post_entry_delta_suffix is False
+    assert callback.message.edit_text.await_args.args == (
+        "Настройки summary:\n"
+        "- калории: включено\n"
+        "- белки: включено\n"
+        "- жиры: включено\n"
+        "- углеводы: включено\n"
+        "- вода: включено\n"
+        "- дельта записи: выключено\n"
+        "- отображение: текст\n"
+        "- начало дня: 04:00",
+    )
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[5][0].text == "Дельта записи: off"
+    callback.answer.assert_awaited_once_with("Настройка обновлена.")
 
 
 async def test_today_uses_preference_nutrition_day_start_hour() -> None:
@@ -1571,7 +1639,123 @@ async def test_water_button_creates_water_entry_for_allowed_user() -> None:
     assert saved_entry.entry_type == EntryType.WATER
     assert saved_item.name == "water"
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Сохранил:\n- вода: 250 мл",)
+    assert message.answer.await_args.args == (
+        "Сохранил:\n- вода: 250 мл\n\n"
+        "<pre>"
+        "К: 0.0 / 1800 ккал\n"
+        "Б: 0.0 / 90 г\n"
+        "Ж: 0.0 / 60 г\n"
+        "У: 0.0 / 210 г\n"
+        "В: 250.0 / 2000 мл (+250.0 мл)"
+        "</pre>",
+    )
+
+
+async def test_water_button_shows_delta_bar_report_in_bars_mode() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "water_bar_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="water_bar_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(
+            UserSummaryPreference(
+                user_id=user.id,
+                show_calories=False,
+                show_protein=False,
+                show_fat=False,
+                show_carbs=False,
+                show_water=True,
+                summary_display_mode="bars",
+            )
+        )
+        water_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.WATER,
+            occurred_at=datetime.now(timezone.utc),
+        )
+        session.add(water_entry)
+        session.flush()
+        session.add(EntryItem(entry_id=water_entry.id, position=0, name="water", quantity=500, unit="ml"))
+        session.commit()
+
+    message = SimpleNamespace(
+        text=WATER_250_ML_BUTTON_TEXT,
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="water_bar_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_water_250_ml(message, session_factory, admin_user_ids=(ADMIN_ID,))
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Сохранил:\n- вода: 250 мл\n\n<pre>В [██▓░░░░░░░] 37.5% 750.0/2000 мл (+250.0 мл)</pre>",
+    )
+
+
+async def test_confirmation_hides_delta_suffix_when_setting_is_disabled() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "delta_off_user")
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.FOOD,
+                        items=[ExtractedJournalItem(name="яблоко", quantity=180, unit="г")],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload='{"entries":[{"type":"food","items":[{"name":"яблоко","quantity":180,"unit":"г"}]}]}',
+        )
+    )
+    nutrition_service = StaticNutritionEstimationService(
+        raw_payload=build_metric_payload(["entry-1:item-0"])
+    )
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="delta_off_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(
+            UserSummaryPreference(
+                user_id=user.id,
+                show_calories=True,
+                show_protein=True,
+                show_fat=True,
+                show_carbs=True,
+                show_water=True,
+                show_post_entry_delta_suffix=False,
+            )
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        text="яблоко",
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="delta_off_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        nutrition_service=nutrition_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Сохранил:\n- яблоко: 180 г\n\n"
+        "<pre>"
+        "К: 220.0 / 1800 ккал\n"
+        "Б: 7.6 / 90 г\n"
+        "Ж: 2.2 / 60 г\n"
+        "У: 42.8 / 210 г\n"
+        "В: 0.0 / 2000 мл"
+        "</pre>",
+    )
 
 
 async def test_photo_message_creates_entries_and_food_metrics_for_allowed_user() -> None:
@@ -1628,7 +1812,14 @@ async def test_photo_message_creates_entries_and_food_metrics_for_allowed_user()
     assert metric_count == 8
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сохранил:\n- омлет\n- тост\n\nКБЖУ по еде:\n- калории: 441.0 ккал\n- белки: 16.2 г\n- жиры: 5.4 г\n- углеводы: 86.6 г",
+        "Сохранил:\n- омлет\n- тост\n\n"
+        "<pre>"
+        "К: 441.0 / 1800 ккал (+441.0 ккал)\n"
+        "Б: 16.2 / 90 г (+16.2 г)\n"
+        "Ж: 5.4 / 60 г (+5.4 г)\n"
+        "У: 86.6 / 210 г (+86.6 г)\n"
+        "В: 0.0 / 2000 мл"
+        "</pre>",
     )
 
 

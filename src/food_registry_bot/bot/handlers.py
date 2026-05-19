@@ -401,25 +401,11 @@ def build_saved_items_confirmation(items: list[EntryItemCreate]) -> str:
     return "\n".join(lines)
 
 
-def build_extracted_payload_confirmation(payload, nutrition_result: SuccessfulNutritionEstimation | None = None) -> str:
-    lines = ["Сохранил:"]
-    for entry in payload.entries:
-        for item in entry.items:
-            lines.append(format_saved_item_line(item.name, item.quantity, item.unit))
-
-    if nutrition_result is not None:
-        lines.extend(
-            [
-                "",
-                "КБЖУ по еде:",
-                f"- калории: {round(nutrition_result.metric_totals.get('calories', 0.0), 1)} ккал",
-                f"- белки: {round(nutrition_result.metric_totals.get('protein', 0.0), 1)} г",
-                f"- жиры: {round(nutrition_result.metric_totals.get('fat', 0.0), 1)} г",
-                f"- углеводы: {round(nutrition_result.metric_totals.get('carbs', 0.0), 1)} г",
-            ]
-        )
-
-    return "\n".join(lines)
+def build_write_confirmation_response(saved_items: list[EntryItemCreate], day_report: str | None = None) -> str:
+    saved_items_confirmation = build_saved_items_confirmation(saved_items)
+    if day_report is None:
+        return saved_items_confirmation
+    return "\n\n".join([saved_items_confirmation, day_report])
 
 
 def build_recent_entries_response(entries: list) -> str:
@@ -467,6 +453,8 @@ def build_today_summary_response_with_preferences(
     summary_display_mode: str = "text",
     goal_progress: DailyNutritionGoalProgress | None = None,
     water_summary: DailyWaterSummary | None = None,
+    metric_deltas: dict[str, float] | None = None,
+    show_post_entry_delta_suffix: bool = True,
 ) -> str:
     if (
         summary.included_entry_count == 0
@@ -483,21 +471,39 @@ def build_today_summary_response_with_preferences(
         if metric_code not in enabled_metric_codes:
             continue
         metric_progress = getattr(goal_progress, metric_code) if goal_progress is not None else None
+        metric_delta = 0.0 if metric_deltas is None else metric_deltas.get(metric_code, 0.0)
         if metric_progress is not None:
             if summary_display_mode == "bars":
-                lines.append(build_metric_progress_bar_line(short_label, unit, metric_progress))
+                if metric_delta > 0:
+                    lines.append(
+                        build_metric_progress_delta_bar_line(
+                            short_label,
+                            unit,
+                            metric_progress=metric_progress,
+                            delta_value=metric_delta,
+                            show_delta_suffix=show_post_entry_delta_suffix,
+                        )
+                    )
+                else:
+                    lines.append(build_metric_progress_bar_line(short_label, unit, metric_progress))
             else:
-                lines.append(
+                line = (
                     f"{short_label}: {round(metric_progress.consumed_value, 1)} / "
                     f"{metric_progress.goal_value} {unit}"
                 )
+                if metric_delta > 0 and show_post_entry_delta_suffix:
+                    line += f" (+{round(metric_delta, 1)} {unit})"
+                lines.append(line)
             continue
 
         if metric_code == "water":
             metric_value = 0 if water_summary is None else water_summary.total_ml
         else:
             metric_value = getattr(summary.totals, metric_code)
-        lines.append(f"{short_label}: {round(metric_value, 1)} {unit}")
+        line = f"{short_label}: {round(metric_value, 1)} {unit}"
+        if metric_delta > 0 and show_post_entry_delta_suffix:
+            line += f" (+{round(metric_delta, 1)} {unit})"
+        lines.append(line)
 
     rendered_summary = "<pre>" + html.escape("\n".join(lines)) + "</pre>"
 
@@ -531,6 +537,7 @@ def build_summary_settings_response(
     show_fat: bool,
     show_carbs: bool,
     show_water: bool,
+    show_post_entry_delta_suffix: bool,
     summary_display_mode: str,
     nutrition_day_start_hour: int,
 ) -> str:
@@ -546,6 +553,7 @@ def build_summary_settings_response(
             f"- жиры: {statuses[show_fat]}",
             f"- углеводы: {statuses[show_carbs]}",
             f"- вода: {statuses[show_water]}",
+            f"- дельта записи: {statuses[show_post_entry_delta_suffix]}",
             f"- отображение: {SUMMARY_DISPLAY_MODE_LABELS[summary_display_mode]}",
             f"- начало дня: {nutrition_day_start_hour:02d}:00",
         ]
@@ -567,6 +575,141 @@ def build_metric_progress_bar_line(
     overflow_bar = "█" * overflow_cells
     percentage = round(progress_ratio * 100, 1)
     return f"{short_label} {base_bar}{overflow_bar} {percentage}% {round(consumed, 1)}/{goal} {unit}"
+
+
+def build_metric_progress_delta_bar_line(
+    short_label: str,
+    unit: str,
+    *,
+    metric_progress: MetricGoalProgress,
+    delta_value: float,
+    show_delta_suffix: bool,
+) -> str:
+    consumed = metric_progress.consumed_value
+    goal = metric_progress.goal_value
+    before_consumed = max(consumed - delta_value, 0.0)
+    before_ratio = before_consumed / goal if goal else 0.0
+    after_ratio = consumed / goal if goal else 0.0
+
+    before_filled_cells = min(int(before_ratio * 10), 10)
+    after_filled_cells = min(int(after_ratio * 10), 10)
+    added_filled_cells = max(after_filled_cells - before_filled_cells, 0)
+    empty_cells = 10 - after_filled_cells
+
+    base_bar = (
+        "["
+        + ("█" * before_filled_cells)
+        + ("▓" * added_filled_cells)
+        + ("░" * empty_cells)
+        + "]"
+    )
+
+    before_overflow_cells = max(int((before_consumed - goal) / goal * 10), 0) if before_consumed > goal else 0
+    after_overflow_cells = max(int((consumed - goal) / goal * 10), 0) if consumed > goal else 0
+    added_overflow_cells = max(after_overflow_cells - before_overflow_cells, 0)
+    overflow_bar = ("█" * before_overflow_cells) + ("▓" * added_overflow_cells)
+    percentage = round(after_ratio * 100, 1)
+    line = (
+        f"{short_label} {base_bar}{overflow_bar} {percentage}% "
+        f"{round(consumed, 1)}/{goal} {unit}"
+    )
+    if show_delta_suffix:
+        line += f" (+{round(delta_value, 1)} {unit})"
+    return line
+
+
+def build_saved_items_from_payload(payload) -> list[EntryItemCreate]:
+    items: list[EntryItemCreate] = []
+    for entry in payload.entries:
+        for item in entry.items:
+            items.append(
+                EntryItemCreate(
+                    name=item.name,
+                    quantity=item.quantity,
+                    unit=item.unit,
+                )
+            )
+    return items
+
+
+def resolve_metric_deltas(
+    *,
+    saved_items: list[EntryItemCreate],
+    nutrition_result: SuccessfulNutritionEstimation | None,
+) -> dict[str, float]:
+    metric_deltas: dict[str, float] = {}
+    if nutrition_result is not None:
+        for metric_code, metric_value in nutrition_result.metric_totals.items():
+            metric_deltas[metric_code] = metric_value
+
+    water_delta = sum(
+        item.quantity
+        for item in saved_items
+        if item.name == "water" and item.unit == "ml" and item.quantity is not None and item.quantity > 0
+    )
+    if water_delta > 0:
+        metric_deltas["water"] = float(water_delta)
+
+    return metric_deltas
+
+
+def resolve_summary_dates_for_occurred_at_values(
+    *,
+    occurred_at_values: list[datetime],
+    timezone_name: str,
+    nutrition_day_start_hour: int,
+) -> set[date]:
+    return {
+        resolve_local_summary_date(
+            reference_at=occurred_at,
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
+        )
+        for occurred_at in occurred_at_values
+    }
+
+
+def build_daily_report_for_summary_date(
+    *,
+    session: Session,
+    user_id: int,
+    timezone_name: str,
+    summary_date: date,
+    summary_preference,
+    metric_deltas: dict[str, float] | None = None,
+) -> str:
+    summary = DailyNutritionSummaryUseCase(session).run(
+        user_id=user_id,
+        timezone_name=timezone_name,
+        summary_date=summary_date,
+        nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+    )
+    water_summary = DailyWaterSummaryUseCase(session).run(
+        user_id=user_id,
+        timezone_name=timezone_name,
+        summary_date=summary_date,
+        nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+    )
+    goal_snapshot = DailyNutritionGoalSnapshotUseCase(session).get_or_create(
+        user_id=user_id,
+        summary_date=summary_date,
+        timezone_name=timezone_name,
+        nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+    )
+    goal_progress = DailyNutritionGoalProgressUseCase().build(
+        summary=summary,
+        water_summary=water_summary,
+        snapshot=goal_snapshot,
+    )
+    return build_today_summary_response_with_preferences(
+        summary,
+        enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
+        summary_display_mode=summary_preference.summary_display_mode,
+        goal_progress=goal_progress,
+        water_summary=water_summary,
+        metric_deltas=metric_deltas,
+        show_post_entry_delta_suffix=summary_preference.show_post_entry_delta_suffix,
+    )
 
 
 def build_goal_response(
@@ -861,6 +1004,7 @@ async def handle_settings(
             show_fat=preference.show_fat,
             show_carbs=preference.show_carbs,
             show_water=preference.show_water,
+            show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
             summary_display_mode=preference.summary_display_mode,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
         ),
@@ -870,6 +1014,7 @@ async def handle_settings(
             show_fat=preference.show_fat,
             show_carbs=preference.show_carbs,
             show_water=preference.show_water,
+            show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
             summary_display_mode=preference.summary_display_mode,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
         ),
@@ -914,6 +1059,8 @@ async def handle_toggle_summary_metric(
             preference = preference_repository.cycle_nutrition_day_start_hour(user_id=user.id)
         elif callback_data.action == "cycle_summary_display_mode":
             preference = preference_repository.cycle_summary_display_mode(user_id=user.id)
+        elif callback_data.action == "toggle_post_entry_delta_suffix":
+            preference = preference_repository.toggle_post_entry_delta_suffix(user_id=user.id)
         else:
             metric_code = callback_data.action.removeprefix("toggle_")
             preference = preference_repository.toggle_metric_visibility(
@@ -929,6 +1076,7 @@ async def handle_toggle_summary_metric(
                 show_fat=preference.show_fat,
                 show_carbs=preference.show_carbs,
                 show_water=preference.show_water,
+                show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
                 summary_display_mode=preference.summary_display_mode,
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
             ),
@@ -938,6 +1086,7 @@ async def handle_toggle_summary_metric(
                 show_fat=preference.show_fat,
                 show_carbs=preference.show_carbs,
                 show_water=preference.show_water,
+                show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
                 summary_display_mode=preference.summary_display_mode,
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
             ),
@@ -970,38 +1119,16 @@ async def handle_today(
             timezone_name=user.timezone,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
         )
-        summary = DailyNutritionSummaryUseCase(session).run(
+        rendered_report = build_daily_report_for_summary_date(
+            session=session,
             user_id=user_id,
             timezone_name=user.timezone,
             summary_date=summary_date,
-            nutrition_day_start_hour=preference.nutrition_day_start_hour,
-        )
-        water_summary = DailyWaterSummaryUseCase(session).run(
-            user_id=user_id,
-            timezone_name=user.timezone,
-            summary_date=summary_date,
-            nutrition_day_start_hour=preference.nutrition_day_start_hour,
-        )
-        goal_snapshot = DailyNutritionGoalSnapshotUseCase(session).get_or_create(
-            user_id=user_id,
-            summary_date=summary_date,
-            timezone_name=user.timezone,
-            nutrition_day_start_hour=preference.nutrition_day_start_hour,
-        )
-        goal_progress = DailyNutritionGoalProgressUseCase().build(
-            summary=summary,
-            water_summary=water_summary,
-            snapshot=goal_snapshot,
+            summary_preference=preference,
         )
 
     await message.answer(
-        build_today_summary_response_with_preferences(
-            summary,
-            enabled_metric_codes=get_enabled_summary_metric_codes(preference),
-            summary_display_mode=preference.summary_display_mode,
-            goal_progress=goal_progress,
-            water_summary=water_summary,
-        ),
+        rendered_report,
         reply_markup=build_main_keyboard(),
     )
 
@@ -1082,17 +1209,39 @@ async def handle_water_250_ml(
         return
 
     saved_items = [EntryItemCreate(name="water", quantity=250, unit="ml")]
+    day_report: str | None = None
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
+        user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
+        if user is None:
+            raise RuntimeError("User profile was not found after registration")
+        preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+        occurred_at = datetime.now(timezone.utc)
         EntryRepository(session).create(
             user_id=user_id,
             entry_type=EntryType.WATER,
-            occurred_at=datetime.now(timezone.utc),
+            occurred_at=occurred_at,
             source_text="250 мл",
             items=saved_items,
         )
+        summary_date = resolve_local_summary_date(
+            reference_at=occurred_at,
+            timezone_name=user.timezone,
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
+        )
+        day_report = build_daily_report_for_summary_date(
+            session=session,
+            user_id=user_id,
+            timezone_name=user.timezone,
+            summary_date=summary_date,
+            summary_preference=preference,
+            metric_deltas={"water": 250.0},
+        )
 
-    await message.answer(build_saved_items_confirmation(saved_items), reply_markup=build_main_keyboard())
+    await message.answer(
+        build_write_confirmation_response(saved_items, day_report),
+        reply_markup=build_main_keyboard(),
+    )
 
 
 @router.message()
@@ -1131,16 +1280,24 @@ async def handle_message(
         return
 
     nutrition_result: SuccessfulNutritionEstimation | None = None
+    confirmation_text: str | None = None
     try:
         with session_scope(session_factory) as session:
             _, user_id = ensure_user_registered(message, session)
+            user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
+            if user is None:
+                raise RuntimeError("User profile was not found after registration")
+            summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
 
             food_entry_ids: list[int] = []
+            saved_items = build_saved_items_from_payload(extraction_result.payload)
+            occurred_at_values: list[datetime] = []
             for extracted_entry in extraction_result.payload.entries:
+                occurred_at = extracted_entry.occurred_at or datetime.now(timezone.utc)
                 saved_entry = EntryRepository(session).create(
                     user_id=user_id,
                     entry_type=extracted_entry.type,
-                    occurred_at=extracted_entry.occurred_at or datetime.now(timezone.utc),
+                    occurred_at=occurred_at,
                     source_text=None,
                     extraction_provider=extraction_result.extraction_provider,
                     extraction_model=extraction_result.extraction_model,
@@ -1155,6 +1312,7 @@ async def handle_message(
                         for item in extracted_entry.items
                     ],
                 )
+                occurred_at_values.append(occurred_at)
                 if extracted_entry.type is EntryType.FOOD:
                     food_entry_ids.append(saved_entry.id)
 
@@ -1168,11 +1326,35 @@ async def handle_message(
                 if isinstance(nutrition_flow_result, SkippedNutritionEstimation):
                     raise FoodWriteFlowError(nutrition_flow_result.reason)
                 nutrition_result = nutrition_flow_result
+
+            summary_dates = resolve_summary_dates_for_occurred_at_values(
+                occurred_at_values=occurred_at_values,
+                timezone_name=user.timezone,
+                nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+            )
+            if len(summary_dates) == 1:
+                summary_date = next(iter(summary_dates))
+                confirmation_text = build_write_confirmation_response(
+                    saved_items,
+                    build_daily_report_for_summary_date(
+                        session=session,
+                        user_id=user_id,
+                        timezone_name=user.timezone,
+                        summary_date=summary_date,
+                        summary_preference=summary_preference,
+                        metric_deltas=resolve_metric_deltas(
+                            saved_items=saved_items,
+                            nutrition_result=nutrition_result,
+                        ),
+                    ),
+                )
+            else:
+                confirmation_text = build_write_confirmation_response(saved_items)
     except FoodWriteFlowError as exc:
         await message.answer(str(exc), reply_markup=build_main_keyboard())
         return
 
     await message.answer(
-        build_extracted_payload_confirmation(extraction_result.payload, nutrition_result),
+        confirmation_text,
         reply_markup=build_main_keyboard(),
     )

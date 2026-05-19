@@ -158,6 +158,7 @@ def test_user_summary_preference_repository_creates_default_preferences_once() -
     assert preference.show_fat is True
     assert preference.show_carbs is True
     assert preference.show_water is True
+    assert preference.show_post_entry_delta_suffix is True
     assert preference.summary_display_mode == "text"
     assert preference.nutrition_day_start_hour == 4
 

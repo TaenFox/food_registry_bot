@@ -186,6 +186,7 @@ class UserSummaryPreferenceRepository:
             show_fat=True,
             show_carbs=True,
             show_water=True,
+            show_post_entry_delta_suffix=True,
             summary_display_mode="text",
             nutrition_day_start_hour=4,
         )
@@ -230,6 +231,12 @@ class UserSummaryPreferenceRepository:
         current_index = SUPPORTED_SUMMARY_DISPLAY_MODES.index(preference.summary_display_mode)
         next_index = (current_index + 1) % len(SUPPORTED_SUMMARY_DISPLAY_MODES)
         preference.summary_display_mode = SUPPORTED_SUMMARY_DISPLAY_MODES[next_index]
+        self._session.flush()
+        return preference
+
+    def toggle_post_entry_delta_suffix(self, *, user_id: int) -> UserSummaryPreference:
+        preference, _created = self.get_or_create(user_id=user_id)
+        preference.show_post_entry_delta_suffix = not preference.show_post_entry_delta_suffix
         self._session.flush()
         return preference
 

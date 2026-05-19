@@ -26,6 +26,7 @@ def build_summary_settings_keyboard(
     show_fat: bool,
     show_carbs: bool,
     show_water: bool,
+    show_post_entry_delta_suffix: bool,
     summary_display_mode: str,
     nutrition_day_start_hour: int,
 ) -> InlineKeyboardMarkup:
@@ -59,6 +60,12 @@ def build_summary_settings_keyboard(
                 InlineKeyboardButton(
                     text=f"Вода: {'on' if show_water else 'off'}",
                     callback_data=SummarySettingsCallback(action="toggle_water").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Дельта записи: {'on' if show_post_entry_delta_suffix else 'off'}",
+                    callback_data=SummarySettingsCallback(action="toggle_post_entry_delta_suffix").pack(),
                 )
             ],
             [
