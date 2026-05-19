@@ -813,6 +813,131 @@ async def test_today_returns_bju_lines_when_calories_disabled_but_bju_enabled() 
     )
 
 
+async def test_today_shows_calorie_goal_progress_when_snapshot_exists() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "today_goal_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="today_goal_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        item = EntryItem(entry_id=entry.id, position=0, name="омлет")
+        session.add(item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=item.id, metric_id=1, value=320.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=2, value=24.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=3, value=19.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=4, value=11.0, confidence="medium"),
+                UserSummaryPreference(
+                    user_id=user.id,
+                    show_calories=True,
+                    show_protein=True,
+                    show_fat=True,
+                    show_carbs=True,
+                ),
+                UserGoalPreference(
+                    user_id=user.id,
+                    calorie_goal=1800,
+                ),
+                DailyGoalSnapshot(
+                    user_id=user.id,
+                    summary_date=datetime(2026, 5, 19, tzinfo=timezone.utc).date(),
+                    timezone="Europe/Moscow",
+                    nutrition_day_start_hour=4,
+                    calorie_goal=1800,
+                ),
+            ]
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="today_goal_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_today(message, session_factory, admin_user_ids=(ADMIN_ID,))
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "<pre>"
+        "К: 320.0 / 1800 ккал\n"
+        "Б: 24.0 г\n"
+        "Ж: 19.0 г\n"
+        "У: 11.0 г"
+        "</pre>",
+    )
+
+
+async def test_today_does_not_show_calorie_goal_progress_when_calories_hidden() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "today_hidden_goal_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="today_hidden_goal_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        item = EntryItem(entry_id=entry.id, position=0, name="омлет")
+        session.add(item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=item.id, metric_id=1, value=320.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=2, value=24.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=3, value=19.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=4, value=11.0, confidence="medium"),
+                UserSummaryPreference(
+                    user_id=user.id,
+                    show_calories=False,
+                    show_protein=True,
+                    show_fat=True,
+                    show_carbs=True,
+                ),
+                UserGoalPreference(
+                    user_id=user.id,
+                    calorie_goal=1800,
+                ),
+                DailyGoalSnapshot(
+                    user_id=user.id,
+                    summary_date=datetime(2026, 5, 19, tzinfo=timezone.utc).date(),
+                    timezone="Europe/Moscow",
+                    nutrition_day_start_hour=4,
+                    calorie_goal=1800,
+                ),
+            ]
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="today_hidden_goal_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_today(message, session_factory, admin_user_ids=(ADMIN_ID,))
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "<pre>"
+        "Б: 24.0 г\n"
+        "Ж: 19.0 г\n"
+        "У: 11.0 г"
+        "</pre>",
+    )
+
+
 async def test_settings_returns_current_summary_preferences() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "settings_user")

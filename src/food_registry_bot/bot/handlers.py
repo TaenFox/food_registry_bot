@@ -39,6 +39,8 @@ from food_registry_bot.extraction import (
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
     DailyCalorieGoalSnapshotUseCase,
+    DailyCalorieProgress,
+    DailyCalorieProgressUseCase,
     DailyNutritionSummary,
     DailyNutritionSummaryUseCase,
     FailedNutritionEstimation,
@@ -414,6 +416,7 @@ def build_today_summary_response_with_preferences(
     summary: DailyNutritionSummary,
     *,
     enabled_metric_codes: tuple[str, ...],
+    calorie_progress: DailyCalorieProgress | None = None,
 ) -> str:
     if summary.included_entry_count == 0 and summary.excluded_entry_count == 0:
         return "Сегодня пока нет сохранённых записей еды."
@@ -423,6 +426,13 @@ def build_today_summary_response_with_preferences(
     for metric_code, short_label, unit in SUMMARY_METRIC_LINES:
         if metric_code not in enabled_metric_codes:
             continue
+        if metric_code == "calories" and calorie_progress is not None:
+            lines.append(
+                f"{short_label}: {round(calorie_progress.consumed_calories, 1)} / "
+                f"{calorie_progress.goal_calories} {unit}"
+            )
+            continue
+
         metric_value = getattr(summary.totals, metric_code)
         lines.append(f"{short_label}: {round(metric_value, 1)} {unit}")
 
@@ -845,11 +855,22 @@ async def handle_today(
             summary_date=summary_date,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
         )
+        goal_snapshot = DailyCalorieGoalSnapshotUseCase(session).get_or_create(
+            user_id=user_id,
+            summary_date=summary_date,
+            timezone_name=user.timezone,
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
+        )
+        calorie_progress = DailyCalorieProgressUseCase().build(
+            summary=summary,
+            snapshot=goal_snapshot,
+        )
 
     await message.answer(
         build_today_summary_response_with_preferences(
             summary,
             enabled_metric_codes=get_enabled_summary_metric_codes(preference),
+            calorie_progress=calorie_progress,
         ),
         reply_markup=build_main_keyboard(),
     )
