@@ -80,6 +80,7 @@ class UserSummaryPreference(Base):
     show_protein: Mapped[bool] = mapped_column(default=True)
     show_fat: Mapped[bool] = mapped_column(default=True)
     show_carbs: Mapped[bool] = mapped_column(default=True)
+    nutrition_day_start_hour: Mapped[int] = mapped_column(default=4)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

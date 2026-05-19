@@ -152,6 +152,7 @@ def test_user_summary_preference_repository_creates_default_preferences_once() -
     assert preference.show_protein is True
     assert preference.show_fat is True
     assert preference.show_carbs is True
+    assert preference.nutrition_day_start_hour == 4
 
 
 def test_user_summary_preference_repository_toggles_metric_visibility() -> None:
@@ -165,6 +166,18 @@ def test_user_summary_preference_repository_toggles_metric_visibility() -> None:
     assert toggled_preference.show_protein is False
     saved_preference = session.query(UserSummaryPreference).filter_by(user_id=user.id).one()
     assert saved_preference.show_protein is False
+
+
+def test_user_summary_preference_repository_cycles_nutrition_day_start_hour() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7006, username="prefs_day_start_user")
+    repository = UserSummaryPreferenceRepository(session)
+
+    first_hour = repository.cycle_nutrition_day_start_hour(user_id=user.id).nutrition_day_start_hour
+    second_hour = repository.cycle_nutrition_day_start_hour(user_id=user.id).nutrition_day_start_hour
+
+    assert first_hour == 6
+    assert second_hour == 0
 
 
 def test_entry_repository_creates_entry_for_user() -> None:

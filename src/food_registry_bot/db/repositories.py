@@ -21,6 +21,8 @@ from food_registry_bot.db.models import (
 if TYPE_CHECKING:
     from food_registry_bot.nutrition.journal_adapter import PreparedNutritionRequest, ResolvedNutritionEstimate
 
+SUPPORTED_NUTRITION_DAY_START_HOURS = (0, 2, 4, 6)
+
 
 @dataclass(frozen=True)
 class EntryItemCreate:
@@ -172,6 +174,7 @@ class UserSummaryPreferenceRepository:
             show_protein=True,
             show_fat=True,
             show_carbs=True,
+            nutrition_day_start_hour=4,
         )
         self._session.add(preference)
         self._session.flush()
@@ -198,6 +201,14 @@ class UserSummaryPreferenceRepository:
         preference, _created = self.get_or_create(user_id=user_id)
         attribute_name = self._resolve_metric_attribute(metric_code)
         setattr(preference, attribute_name, not getattr(preference, attribute_name))
+        self._session.flush()
+        return preference
+
+    def cycle_nutrition_day_start_hour(self, *, user_id: int) -> UserSummaryPreference:
+        preference, _created = self.get_or_create(user_id=user_id)
+        current_index = SUPPORTED_NUTRITION_DAY_START_HOURS.index(preference.nutrition_day_start_hour)
+        next_index = (current_index + 1) % len(SUPPORTED_NUTRITION_DAY_START_HOURS)
+        preference.nutrition_day_start_hour = SUPPORTED_NUTRITION_DAY_START_HOURS[next_index]
         self._session.flush()
         return preference
 

@@ -39,6 +39,7 @@ Daily nutrition factual layer уже реализован отдельно от 
 - `show_protein`
 - `show_fat`
 - `show_carbs`
+- `nutrition_day_start_hour`
 
 Они определяют, показывать ли пользователю отдельные строки по:
 
@@ -46,6 +47,8 @@ Daily nutrition factual layer уже реализован отдельно от 
 - белкам;
 - жирам;
 - углеводам.
+
+`nutrition_day_start_hour` определяет, в какой локальный час начинается nutrition-day пользователя для `/today` и других дневных summaries.
 
 ### 3. Значение по умолчанию
 
@@ -55,6 +58,7 @@ Daily nutrition factual layer уже реализован отдельно от 
 - `show_protein = true`
 - `show_fat = true`
 - `show_carbs = true`
+- `nutrition_day_start_hour = 4`
 
 Строка может быть создана лениво при первом чтении `/settings` или при первом изменении настройки.
 
@@ -75,8 +79,18 @@ Telegram presentation layer обязан:
 На этом шаге вводится `/settings`:
 
 - команда показывает текущие значения summary preferences;
+- команда показывает текущее значение `nutrition_day_start_hour`;
 - под сообщением доступны inline toggle-кнопки;
 - нажатие кнопки меняет значение в БД и обновляет сообщение.
+
+Для `nutrition_day_start_hour` на этом шаге используются только заранее поддержанные значения:
+
+- `00:00`
+- `02:00`
+- `04:00`
+- `06:00`
+
+Кнопка в `/settings` циклически переключает их.
 
 ### 6. Поведение `/today`
 
@@ -85,6 +99,7 @@ Telegram presentation layer обязан:
 На первом шаге:
 
 - `/today` показывает отдельные строки только по включённым показателям;
+- `/today` использует `nutrition_day_start_hour` пользователя при определении текущего nutrition-day;
 - для БЖУ используются краткие префиксы строк:
   - `Б:`
   - `Ж:`

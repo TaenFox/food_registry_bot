@@ -11,8 +11,6 @@ from food_registry_bot.db.models import Entry
 from food_registry_bot.db.repositories import EntryRepository
 from food_registry_bot.nutrition.contract import SUPPORTED_NUTRITION_METRIC_CODES
 
-NUTRITION_DAY_START_HOUR = 4
-
 
 class DailyNutritionTotals(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -69,18 +67,28 @@ def _normalize_datetime(value: datetime) -> datetime:
     return value
 
 
-def resolve_local_summary_date(*, reference_at: datetime, timezone_name: str) -> date:
+def resolve_local_summary_date(
+    *,
+    reference_at: datetime,
+    timezone_name: str,
+    nutrition_day_start_hour: int = 4,
+) -> date:
     user_timezone = ZoneInfo(timezone_name)
     local_reference_at = _normalize_datetime(reference_at).astimezone(user_timezone)
-    nutrition_day_anchor = local_reference_at - timedelta(hours=NUTRITION_DAY_START_HOUR)
+    nutrition_day_anchor = local_reference_at - timedelta(hours=nutrition_day_start_hour)
     return nutrition_day_anchor.date()
 
 
-def resolve_day_bounds_utc(*, summary_date: date, timezone_name: str) -> tuple[datetime, datetime]:
+def resolve_day_bounds_utc(
+    *,
+    summary_date: date,
+    timezone_name: str,
+    nutrition_day_start_hour: int = 4,
+) -> tuple[datetime, datetime]:
     user_timezone = ZoneInfo(timezone_name)
     start_local = datetime.combine(
         summary_date,
-        time(hour=NUTRITION_DAY_START_HOUR),
+        time(hour=nutrition_day_start_hour),
         tzinfo=user_timezone,
     )
     end_local = start_local + timedelta(days=1)
@@ -111,10 +119,12 @@ class DailyNutritionSummaryUseCase:
         user_id: int,
         timezone_name: str,
         summary_date: date,
+        nutrition_day_start_hour: int = 4,
     ) -> DailyNutritionSummary:
         occurred_at_from, occurred_at_to = resolve_day_bounds_utc(
             summary_date=summary_date,
             timezone_name=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
         )
         entries = self._entry_repository.list_food_for_user_between(
             user_id=user_id,

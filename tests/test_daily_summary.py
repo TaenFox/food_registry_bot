@@ -72,11 +72,13 @@ def test_daily_summary_uses_local_day_boundaries() -> None:
     summary_date = resolve_local_summary_date(
         reference_at=datetime(2026, 5, 19, 9, 0, tzinfo=timezone.utc),
         timezone_name=user.timezone,
+        nutrition_day_start_hour=4,
     )
     summary = DailyNutritionSummaryUseCase(session).run(
         user_id=user.id,
         timezone_name=user.timezone,
         summary_date=summary_date,
+        nutrition_day_start_hour=4,
     )
 
     assert summary.summary_date.isoformat() == "2026-05-19"
@@ -119,7 +121,9 @@ def test_local_time_before_four_am_belongs_to_previous_nutrition_day() -> None:
         summary_date=resolve_local_summary_date(
             reference_at=datetime(2026, 5, 19, 0, 45, tzinfo=timezone.utc),
             timezone_name=user.timezone,
+            nutrition_day_start_hour=4,
         ),
+        nutrition_day_start_hour=4,
     )
     current_day_summary = DailyNutritionSummaryUseCase(session).run(
         user_id=user.id,
@@ -127,7 +131,9 @@ def test_local_time_before_four_am_belongs_to_previous_nutrition_day() -> None:
         summary_date=resolve_local_summary_date(
             reference_at=datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc),
             timezone_name=user.timezone,
+            nutrition_day_start_hour=4,
         ),
+        nutrition_day_start_hour=4,
     )
 
     assert previous_day_summary.summary_date.isoformat() == "2026-05-18"
@@ -173,7 +179,9 @@ def test_daily_summary_excludes_incomplete_food_entries() -> None:
         summary_date=resolve_local_summary_date(
             reference_at=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
             timezone_name=user.timezone,
+            nutrition_day_start_hour=4,
         ),
+        nutrition_day_start_hour=4,
     )
 
     assert summary.is_complete is False
@@ -183,3 +191,43 @@ def test_daily_summary_excludes_incomplete_food_entries() -> None:
     assert summary.totals.protein == 18.0
     assert summary.totals.fat == 14.0
     assert summary.totals.carbs == 12.0
+
+
+def test_daily_summary_uses_custom_nutrition_day_start_hour() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(
+        telegram_user_id=8004,
+        username="custom_day_user",
+        timezone="Europe/Moscow",
+    )
+    repository = EntryRepository(session)
+    early_entry = repository.create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 19, 0, 30, tzinfo=timezone.utc),
+        items=[EntryItemCreate(name="ночной перекус")],
+    )
+    later_entry = repository.create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 19, 3, 30, tzinfo=timezone.utc),
+        items=[EntryItemCreate(name="поздний завтрак")],
+    )
+    save_metrics(early_entry, values=(150.0, 10.0, 5.0, 12.0))
+    save_metrics(later_entry, values=(300.0, 20.0, 8.0, 25.0))
+    session.commit()
+
+    summary = DailyNutritionSummaryUseCase(session).run(
+        user_id=user.id,
+        timezone_name=user.timezone,
+        summary_date=resolve_local_summary_date(
+            reference_at=datetime(2026, 5, 19, 3, 0, tzinfo=timezone.utc),
+            timezone_name=user.timezone,
+            nutrition_day_start_hour=6,
+        ),
+        nutrition_day_start_hour=6,
+    )
+
+    assert summary.summary_date.isoformat() == "2026-05-19"
+    assert [entry.entry_id for entry in summary.entries] == [later_entry.id]
+    assert summary.totals.calories == 300.0

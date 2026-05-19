@@ -454,6 +454,7 @@ def build_summary_settings_response(
     show_protein: bool,
     show_fat: bool,
     show_carbs: bool,
+    nutrition_day_start_hour: int,
 ) -> str:
     statuses = {
         True: "включено",
@@ -466,6 +467,7 @@ def build_summary_settings_response(
             f"- белки: {statuses[show_protein]}",
             f"- жиры: {statuses[show_fat]}",
             f"- углеводы: {statuses[show_carbs]}",
+            f"- начало дня: {nutrition_day_start_hour:02d}:00",
         ]
     )
 
@@ -706,12 +708,14 @@ async def handle_settings(
             show_protein=preference.show_protein,
             show_fat=preference.show_fat,
             show_carbs=preference.show_carbs,
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
         ),
         reply_markup=build_summary_settings_keyboard(
             show_calories=preference.show_calories,
             show_protein=preference.show_protein,
             show_fat=preference.show_fat,
             show_carbs=preference.show_carbs,
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
         ),
     )
 
@@ -727,11 +731,12 @@ async def handle_toggle_summary_metric(
     if telegram_user is None:
         await callback.answer("Пользователь не найден.", show_alert=True)
         return
-    if not callback_data.action.startswith("toggle_"):
+    if not (
+        callback_data.action.startswith("toggle_")
+        or callback_data.action == "cycle_nutrition_day_start_hour"
+    ):
         await callback.answer("Неизвестное действие.", show_alert=True)
         return
-    metric_code = callback_data.action.removeprefix("toggle_")
-
     with session_scope(session_factory) as session:
         if not (
             is_admin_user(telegram_user.id, admin_user_ids)
@@ -747,10 +752,15 @@ async def handle_toggle_summary_metric(
                 username=telegram_user.username,
             )
 
-        preference = UserSummaryPreferenceRepository(session).toggle_metric_visibility(
-            user_id=user.id,
-            metric_code=metric_code,
-        )
+        preference_repository = UserSummaryPreferenceRepository(session)
+        if callback_data.action == "cycle_nutrition_day_start_hour":
+            preference = preference_repository.cycle_nutrition_day_start_hour(user_id=user.id)
+        else:
+            metric_code = callback_data.action.removeprefix("toggle_")
+            preference = preference_repository.toggle_metric_visibility(
+                user_id=user.id,
+                metric_code=metric_code,
+            )
 
     if callback.message is not None:
         await callback.message.edit_text(
@@ -759,12 +769,14 @@ async def handle_toggle_summary_metric(
                 show_protein=preference.show_protein,
                 show_fat=preference.show_fat,
                 show_carbs=preference.show_carbs,
+                nutrition_day_start_hour=preference.nutrition_day_start_hour,
             ),
             reply_markup=build_summary_settings_keyboard(
                 show_calories=preference.show_calories,
                 show_protein=preference.show_protein,
                 show_fat=preference.show_fat,
                 show_carbs=preference.show_carbs,
+                nutrition_day_start_hour=preference.nutrition_day_start_hour,
             ),
         )
     await callback.answer("Настройка обновлена.")
@@ -788,17 +800,19 @@ async def handle_today(
         user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
         if user is None:
             raise RuntimeError("User profile was not found after registration")
+        preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
 
         summary_date = resolve_local_summary_date(
             reference_at=datetime.now(timezone.utc),
             timezone_name=user.timezone,
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
         )
         summary = DailyNutritionSummaryUseCase(session).run(
             user_id=user_id,
             timezone_name=user.timezone,
             summary_date=summary_date,
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
         )
-        preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
 
     await message.answer(
         build_today_summary_response_with_preferences(

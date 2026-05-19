@@ -21,6 +21,7 @@ def build_summary_settings_keyboard(
     show_protein: bool,
     show_fat: bool,
     show_carbs: bool,
+    nutrition_day_start_hour: int,
 ) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -46,6 +47,12 @@ def build_summary_settings_keyboard(
                 InlineKeyboardButton(
                     text=f"Углеводы: {'on' if show_carbs else 'off'}",
                     callback_data=SummarySettingsCallback(action="toggle_carbs").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Начало дня: {nutrition_day_start_hour:02d}:00",
+                    callback_data=SummarySettingsCallback(action="cycle_nutrition_day_start_hour").pack(),
                 )
             ]
         ]
