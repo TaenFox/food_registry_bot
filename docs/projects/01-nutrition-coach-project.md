@@ -335,7 +335,7 @@
 
 Статус:
 
-- `[ ]` позже, отдельным шагом
+- `[x]` выполнен
 
 Цель:
 
@@ -350,6 +350,10 @@
 Главный риск этапа:
 
 - не допустить, чтобы coaching photo по ошибке шёл в factual save flow.
+
+Связанный ADR:
+
+- [ADR-026](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/adr/ADR-026-multimodal-coaching-photo-boundary.md:1)
 
 ## 7. Что нужно фиксировать ADR перед следующими этапами
 

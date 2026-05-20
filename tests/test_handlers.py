@@ -2100,11 +2100,12 @@ async def test_handle_message_routes_conversation_text_without_creating_entries(
     extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
     captured_reply_args = {}
 
-    def reply_stub(*, user_message, factual_context, session_summary, recent_turns):
+    def reply_stub(*, user_message, factual_context, session_summary, recent_turns, images=()):
         captured_reply_args["user_message"] = user_message
         captured_reply_args["factual_context"] = factual_context
         captured_reply_args["session_summary"] = session_summary
         captured_reply_args["recent_turns"] = recent_turns
+        captured_reply_args["images"] = images
         return SimpleNamespace(text=f"Ответ на: {user_message}", updated_session_summary="обновлённый summary")
 
     conversation_service = SimpleNamespace(
@@ -2135,6 +2136,7 @@ async def test_handle_message_routes_conversation_text_without_creating_entries(
     factual_context = captured_reply_args["factual_context"]
     assert captured_reply_args["session_summary"] is None
     assert captured_reply_args["recent_turns"] == []
+    assert captured_reply_args["images"] == ()
     assert factual_context.summary_date.isoformat() == "2026-05-20"
     assert factual_context.day_totals["water"] == 0.0
     assert factual_context.goal_progress["calories"].goal_value == 1800
@@ -2158,7 +2160,7 @@ async def test_handle_message_sends_conversation_reply_as_plain_text() -> None:
     allow_user(session_factory, ALLOWED_USER_ID, "conversation_html_user")
     extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
     conversation_service = SimpleNamespace(
-        reply=lambda *, user_message, factual_context, session_summary, recent_turns: SimpleNamespace(
+        reply=lambda *, user_message, factual_context, session_summary, recent_turns, images=(): SimpleNamespace(
             text="Перед тренировкой лучше держать жиры <30 г и не переедать.",
             updated_session_summary="summary",
         )
@@ -2279,10 +2281,11 @@ async def test_handle_message_routes_follow_up_to_conversation_when_active_sessi
     extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
     captured_reply_args = {}
 
-    def reply_stub(*, user_message, factual_context, session_summary, recent_turns):
+    def reply_stub(*, user_message, factual_context, session_summary, recent_turns, images=()):
         captured_reply_args["user_message"] = user_message
         captured_reply_args["session_summary"] = session_summary
         captured_reply_args["recent_turns"] = recent_turns
+        captured_reply_args["images"] = images
         return SimpleNamespace(text="уточняю сценарий А", updated_session_summary="обновлённый followup summary")
 
     message = SimpleNamespace(
@@ -2319,6 +2322,7 @@ async def test_handle_message_routes_follow_up_to_conversation_when_active_sessi
 
     assert captured_reply_args["user_message"] == "это будет сценарий А"
     assert captured_reply_args["session_summary"] == "говорили про питание перед тренировкой"
+    assert captured_reply_args["images"] == ()
     assert [(turn.role, turn.content) for turn in captured_reply_args["recent_turns"]] == [
         ("user", "что лучше съесть перед вечерней тренировкой?"),
         ("assistant", "дам два сценария"),
@@ -2372,10 +2376,11 @@ async def test_handle_message_routes_reply_to_coach_message_into_same_session_ev
     extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
     captured_reply_args = {}
 
-    def reply_stub(*, user_message, factual_context, session_summary, recent_turns):
+    def reply_stub(*, user_message, factual_context, session_summary, recent_turns, images=()):
         captured_reply_args["user_message"] = user_message
         captured_reply_args["session_summary"] = session_summary
         captured_reply_args["recent_turns"] = recent_turns
+        captured_reply_args["images"] = images
         return SimpleNamespace(text="тогда бери только быстрые углеводы", updated_session_summary="уточнили быстрый перекус")
 
     message = SimpleNamespace(
@@ -2412,6 +2417,7 @@ async def test_handle_message_routes_reply_to_coach_message_into_same_session_ev
 
     assert captured_reply_args["user_message"] == "а если она через 10 минут?"
     assert captured_reply_args["session_summary"] == "говорили про предтренировочный перекус"
+    assert captured_reply_args["images"] == ()
     assert [(turn.role, turn.content) for turn in captured_reply_args["recent_turns"]] == [
         ("user", "что лучше съесть перед вечерней тренировкой?"),
         ("assistant", "если через 10 минут, бери лёгкий быстрый перекус"),
@@ -2427,6 +2433,52 @@ async def test_handle_message_routes_reply_to_coach_message_into_same_session_ev
     assert saved_messages[-1].telegram_message_id == 654889
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == ("тогда бери только быстрые углеводы",)
+
+
+async def test_photo_message_with_explicit_coaching_caption_routes_to_conversation() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "photo_conversation_user")
+    extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
+    captured_reply_args = {}
+
+    def reply_stub(*, user_message, factual_context, session_summary, recent_turns, images=()):
+        captured_reply_args["user_message"] = user_message
+        captured_reply_args["images"] = images
+        return SimpleNamespace(text="Из этого можно сделать лёгкий ужин с упором на овощи и обычный белок.", updated_session_summary="обсуждали продукты по фото")
+
+    async def download_stub(_photo, destination):
+        destination.write(b"fridge-image-bytes")
+
+    message = SimpleNamespace(
+        text=None,
+        caption="что лучше приготовить из этого?",
+        message_id=990,
+        chat=SimpleNamespace(id=98770),
+        photo=[SimpleNamespace(file_id="small"), SimpleNamespace(file_id="large")],
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="photo_conversation_user"),
+        bot=SimpleNamespace(download=AsyncMock(side_effect=download_stub)),
+        answer=AsyncMock(return_value=SimpleNamespace(message_id=654990, chat=SimpleNamespace(id=98770))),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        conversation_service=SimpleNamespace(reply=reply_stub),
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 0
+        saved_session = session.query(ConversationSession).one()
+
+    assert captured_reply_args["user_message"] == "что лучше приготовить из этого?"
+    assert len(captured_reply_args["images"]) == 1
+    assert captured_reply_args["images"][0].data == b"fridge-image-bytes"
+    assert saved_session.summary_text == "обсуждали продукты по фото"
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("Из этого можно сделать лёгкий ужин с упором на овощи и обычный белок.",)
+    assert message.answer.await_args.kwargs["reply_to_message_id"] == 990
 
 
 async def test_handle_message_routes_clear_journal_text_to_extraction_flow() -> None:

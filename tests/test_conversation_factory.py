@@ -7,6 +7,7 @@ from food_registry_bot.conversation.factory import create_conversation_service
 from food_registry_bot.conversation.llm_client import LLMConversationClientError
 from food_registry_bot.conversation.openai_client import OpenAIResponsesConversationClient
 from food_registry_bot.conversation.service import DisabledConversationService, LLMConversationService
+from food_registry_bot.extraction.request import ExtractionImageInput
 
 
 def test_create_conversation_service_returns_disabled_without_openai_key() -> None:
@@ -211,6 +212,51 @@ def test_openai_conversation_client_serializes_recent_turns_from_dataclass_objec
     assert '"content": "что лучше съесть перед вечерней тренировкой?"' in serialized_payload
     assert reply_text == "Ок, уточняю ответ."
     assert updated_summary == "новый summary"
+
+
+def test_openai_conversation_client_serializes_input_images_for_multimodal_coaching() -> None:
+    captured_kwargs = {}
+
+    def create_stub(**kwargs):
+        captured_kwargs.update(kwargs)
+        return SimpleNamespace(
+            output_text='{"reply_text":"Из этого можно сделать овощной ужин.","updated_session_summary":"обсуждали фото продуктов"}'
+        )
+
+    sdk_client = SimpleNamespace(
+        responses=SimpleNamespace(create=create_stub)
+    )
+    client = OpenAIResponsesConversationClient(
+        api_key="test-key",
+        model="gpt-5-mini",
+        client=sdk_client,
+    )
+
+    reply_text, updated_summary = client.generate_reply(
+        user_message="что лучше приготовить из этого?",
+        factual_context=NutritionCoachFactualContext(
+            summary_date="2026-05-20",
+            timezone="Europe/Moscow",
+            nutrition_day_start_hour=4,
+            day_totals={"calories": 1012.0, "protein": 52.0, "fat": 40.1, "carbs": 107.9, "fiber": 21.7, "water": 750.0},
+            goal_progress={},
+            recent_entries=[],
+            nutrition_summary_is_complete=True,
+            excluded_food_entry_count=0,
+            water_summary_is_complete=True,
+            excluded_water_entry_count=0,
+        ),
+        session_summary=None,
+        recent_turns=[],
+        images=(ExtractionImageInput(data=b"image-bytes", media_type="image/jpeg"),),
+    )
+
+    content = captured_kwargs["input"][0]["content"]
+    image_part = content[-1]
+    assert image_part["type"] == "input_image"
+    assert image_part["image_url"].startswith("data:image/jpeg;base64,")
+    assert reply_text == "Из этого можно сделать овощной ужин."
+    assert updated_summary == "обсуждали фото продуктов"
 
 
 def test_openai_conversation_client_returns_post_entry_comment_from_json_payload() -> None:

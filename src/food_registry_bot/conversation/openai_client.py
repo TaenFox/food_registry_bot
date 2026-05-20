@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from typing import Optional
 from typing import Any
@@ -10,6 +11,7 @@ from food_registry_bot.conversation.context import (
     NutritionCoachConversationTurn,
     NutritionCoachFactualContext,
 )
+from food_registry_bot.extraction.request import ExtractionImageInput
 from food_registry_bot.conversation.llm_client import LLMConversationClientError
 
 
@@ -55,6 +57,7 @@ class OpenAIResponsesConversationClient:
         factual_context: NutritionCoachFactualContext,
         session_summary: str | None,
         recent_turns: list[NutritionCoachConversationTurn],
+        images: tuple[ExtractionImageInput, ...] = (),
     ) -> tuple[str, str | None]:
         stripped_message = user_message.strip()
         if not stripped_message:
@@ -72,6 +75,7 @@ class OpenAIResponsesConversationClient:
                             factual_context=factual_context,
                             session_summary=session_summary,
                             recent_turns=recent_turns,
+                            images=images,
                         ),
                     }
                 ],
@@ -161,8 +165,9 @@ class OpenAIResponsesConversationClient:
         factual_context: NutritionCoachFactualContext,
         session_summary: str | None,
         recent_turns: list[NutritionCoachConversationTurn],
+        images: tuple[ExtractionImageInput, ...],
     ) -> list[dict[str, str]]:
-        return [
+        content = [
             {
                 "type": "input_text",
                 "text": "Return valid json only.",
@@ -197,6 +202,17 @@ class OpenAIResponsesConversationClient:
                 "text": user_message,
             },
         ]
+
+        for image in images:
+            encoded_image = base64.b64encode(image.data).decode("utf-8")
+            content.append(
+                {
+                    "type": "input_image",
+                    "image_url": f"data:{image.media_type};base64,{encoded_image}",
+                }
+            )
+
+        return content
 
     @staticmethod
     def _build_post_entry_user_content(
@@ -239,6 +255,7 @@ class OpenAIResponsesConversationClient:
             "Treat the incoming message as a conversational request, not as a journal entry to save. "
             "Always use the provided factual day context as the current source of truth for the user's day. "
             "Use session_summary and recent_turns only as bounded context for the current short conversation. "
+            "If an image is provided, treat it as conversational input such as a fridge photo, product photo, or meal-choice photo, not as a consumed-food record to save. "
             "Be practical, concise, and transparent about uncertainty. "
             "Do not claim that you saved data or changed user settings. "
             "Help with nutrition, hydration, meal-planning, product-based meal suggestions, and nutrition around training. "

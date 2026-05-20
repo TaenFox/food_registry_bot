@@ -41,6 +41,19 @@ _CONVERSATION_PATTERNS = (
     "трениров",
     "самочувств",
 )
+_PHOTO_CONVERSATION_PATTERNS = (
+    "что приготовить",
+    "что лучше приготовить",
+    "что можно приготовить",
+    "что съесть",
+    "что лучше съесть",
+    "что выбрать",
+    "из этого",
+    "из этих продуктов",
+    "в холодильнике",
+    "вот что есть",
+    "вот продукты",
+)
 _JOURNAL_PREFIXES = (
     "лог:",
     "запиши",
@@ -92,6 +105,15 @@ class RuleBasedMessageRoutingService:
         has_active_conversation_session: bool = False,
     ) -> MessageRoutingDecision:
         if request.images:
+            if request.text:
+                lowered_photo_text = request.text.strip().lower()
+                if lowered_photo_text.startswith("/"):
+                    return MessageRoutingDecision(route=AMBIGUOUS, reason="slash_like_photo_text")
+                if self._looks_like_conversation_photo(
+                    lowered_photo_text,
+                    has_active_conversation_session=has_active_conversation_session,
+                ):
+                    return MessageRoutingDecision(route=CONVERSATION, reason="photo_conversation_cue")
             return MessageRoutingDecision(route=JOURNAL, reason="photo_message")
 
         if not request.text:
@@ -136,6 +158,23 @@ class RuleBasedMessageRoutingService:
             return True
 
         return _QUANTITY_PATTERN.match(text) is not None
+
+    @staticmethod
+    def _looks_like_conversation_photo(
+        text: str,
+        *,
+        has_active_conversation_session: bool,
+    ) -> bool:
+        if RuleBasedMessageRoutingService._looks_conversational(text):
+            return True
+
+        if any(pattern in text for pattern in _PHOTO_CONVERSATION_PATTERNS):
+            return True
+
+        if has_active_conversation_session and RuleBasedMessageRoutingService._word_count(text) > 0:
+            return True
+
+        return False
 
     @staticmethod
     def _word_count(text: str) -> int:

@@ -8,6 +8,7 @@ from food_registry_bot.conversation.context import (
     NutritionCoachConversationTurn,
     NutritionCoachFactualContext,
 )
+from food_registry_bot.extraction.request import ExtractionImageInput
 from food_registry_bot.conversation.llm_client import (
     LLMConversationClient,
     LLMConversationClientError,
@@ -32,6 +33,7 @@ class ConversationService(Protocol):
         factual_context: NutritionCoachFactualContext,
         session_summary: str | None,
         recent_turns: list[NutritionCoachConversationTurn],
+        images: tuple[ExtractionImageInput, ...] = (),
     ) -> ConversationReply:
         """Return a conversational reply."""
 
@@ -53,11 +55,13 @@ class DisabledConversationService:
         factual_context: NutritionCoachFactualContext,
         session_summary: str | None,
         recent_turns: list[NutritionCoachConversationTurn],
+        images: tuple[ExtractionImageInput, ...] = (),
     ) -> ConversationReply:
         _ = user_message
         _ = factual_context
         _ = session_summary
         _ = recent_turns
+        _ = images
         return ConversationReply(
             text=(
                 "Nutrition coach пока не настроен. "
@@ -92,6 +96,7 @@ class LLMConversationService:
         factual_context: NutritionCoachFactualContext,
         session_summary: str | None,
         recent_turns: list[NutritionCoachConversationTurn],
+        images: tuple[ExtractionImageInput, ...] = (),
     ) -> ConversationReply:
         try:
             text, updated_session_summary = self._client.generate_reply(
@@ -99,6 +104,7 @@ class LLMConversationService:
                 factual_context=factual_context,
                 session_summary=session_summary,
                 recent_turns=recent_turns,
+                images=images,
             )
         except LLMConversationClientError as exc:
             logger.exception("Nutrition coach request failed: %s", exc)

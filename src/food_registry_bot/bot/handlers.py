@@ -1391,6 +1391,7 @@ async def handle_message(
                 factual_context=factual_context,
                 session_summary=conversation_session.summary_text,
                 recent_turns=[turn for turn in recent_turns],
+                images=extraction_request.images,
             )
         sent_message = await message.answer(
             build_conversation_response(conversation_reply.text),

@@ -6,6 +6,7 @@ from food_registry_bot.conversation.context import (
     NutritionCoachConversationTurn,
     NutritionCoachFactualContext,
 )
+from food_registry_bot.extraction.request import ExtractionImageInput
 
 
 class LLMConversationClientError(RuntimeError):
@@ -28,6 +29,7 @@ class LLMConversationClient(Protocol):
         factual_context: NutritionCoachFactualContext,
         session_summary: str | None,
         recent_turns: list[NutritionCoachConversationTurn],
+        images: tuple[ExtractionImageInput, ...] = (),
     ) -> tuple[str, str | None]:
         """Return a plain-text conversational reply and updated session summary."""
 
