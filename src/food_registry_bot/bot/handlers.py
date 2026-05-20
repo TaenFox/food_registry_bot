@@ -17,7 +17,14 @@ from food_registry_bot.bot.keyboards import (
     build_main_keyboard,
     build_summary_settings_keyboard,
 )
+from food_registry_bot.bot.message_routing import (
+    AMBIGUOUS,
+    CONVERSATION,
+    MessageRoutingService,
+    RuleBasedMessageRoutingService,
+)
 from food_registry_bot.bot.payloads import SummarySettingsCallback
+from food_registry_bot.conversation import ConversationService, DisabledConversationService
 from food_registry_bot.db.models import EntryType
 from food_registry_bot.db.session import session_scope
 from food_registry_bot.db.repositories import (
@@ -34,7 +41,6 @@ from food_registry_bot.extraction import (
     JournalExtractionService,
     JournalExtractionRequest,
     StructuredPayloadExtractionService,
-    ValidExtractionPayload,
 )
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
@@ -48,7 +54,6 @@ from food_registry_bot.nutrition import (
     DailyNutritionSummaryUseCase,
     FailedNutritionEstimation,
     NutritionBackfillCompleted,
-    NutritionBackfillProgress,
     NutritionEstimationService,
     resolve_local_summary_date,
     SUPPORTED_NUTRITION_METRIC_CODES,
@@ -61,6 +66,8 @@ from food_registry_bot.nutrition import (
 router = Router()
 default_extraction_service = StructuredPayloadExtractionService()
 default_nutrition_service = StaticNutritionEstimationService(raw_payload="")
+default_conversation_service = DisabledConversationService()
+default_message_routing_service = RuleBasedMessageRoutingService()
 SUMMARY_METRIC_LINES = (
     ("calories", "К", "ккал"),
     ("protein", "Б", "г"),
@@ -89,6 +96,25 @@ BAR_MODE_LABEL_WIDTH = 6
 
 class FoodWriteFlowError(RuntimeError):
     pass
+
+
+def build_ambiguous_message_response() -> str:
+    return (
+        "Не понял, это запись в дневник или вопрос.\n"
+        "Если хочешь сохранить факт, пришли явную запись еды или воды.\n"
+        "Если хочешь совет или объяснение, задай вопрос прямо."
+    )
+
+
+def build_conversation_response(reply_text: str) -> str:
+    return reply_text
+
+
+def build_reply_kwargs(message: Message) -> dict[str, int]:
+    message_id = getattr(message, "message_id", None)
+    if message_id is None:
+        return {}
+    return {"reply_to_message_id": message_id}
 
 
 def is_admin_user(telegram_user_id: int, admin_user_ids: tuple[int, ...]) -> bool:
@@ -1270,6 +1296,8 @@ async def handle_message(
     session_factory: sessionmaker[Session],
     extraction_service: JournalExtractionService = default_extraction_service,
     nutrition_service: NutritionEstimationService = default_nutrition_service,
+    conversation_service: ConversationService = default_conversation_service,
+    message_routing_service: MessageRoutingService = default_message_routing_service,
     admin_user_ids: tuple[int, ...] = (),
 ) -> None:
     if not await require_user_access(message, session_factory, admin_user_ids):
@@ -1280,6 +1308,26 @@ async def handle_message(
         await message.answer(
             "Пока поддерживаются текстовые сообщения, фото еды и кнопка воды.",
             reply_markup=build_main_keyboard(),
+        )
+        return
+
+    routing_decision = message_routing_service.route(extraction_request)
+    if routing_decision.route == CONVERSATION:
+        conversation_reply = conversation_service.reply(
+            user_message=extraction_request.text or "",
+        )
+        await message.answer(
+            build_conversation_response(conversation_reply.text),
+            reply_markup=build_main_keyboard(),
+            **build_reply_kwargs(message),
+        )
+        return
+
+    if routing_decision.route == AMBIGUOUS:
+        await message.answer(
+            build_ambiguous_message_response(),
+            reply_markup=build_main_keyboard(),
+            **build_reply_kwargs(message),
         )
         return
 

@@ -29,6 +29,7 @@ def test_settings_default_to_structured_payload_extraction_and_llm_nutrition() -
         llm_model="gpt-5-mini",
         nutrition_provider=NutritionProvider.LLM,
         nutrition_model="gpt-5-mini",
+        conversation_model="gpt-5-mini",
     )
 
     assert settings.admin_user_ids == (1001, 1002)
@@ -36,3 +37,4 @@ def test_settings_default_to_structured_payload_extraction_and_llm_nutrition() -
     assert settings.llm_model == "gpt-5-mini"
     assert settings.nutrition_provider == NutritionProvider.LLM
     assert settings.nutrition_model == "gpt-5-mini"
+    assert settings.conversation_model == "gpt-5-mini"

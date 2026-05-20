@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.handlers import (
+    build_ambiguous_message_response,
     handle_admin,
     handle_admin_allow,
     handle_admin_backfill_nutrition,
@@ -27,6 +28,7 @@ from food_registry_bot.bot.handlers import (
     handle_toggle_summary_metric,
     handle_water_250_ml,
 )
+from food_registry_bot.bot.message_routing import MessageRoutingDecision
 from food_registry_bot.bot.payloads import SummarySettingsCallback
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT
 from food_registry_bot.db.base import Base
@@ -1966,3 +1968,131 @@ async def test_handler_rolls_back_food_write_when_nutrition_payload_is_invalid()
 
     message.answer.assert_awaited_once()
     assert "невалидный structured payload" in message.answer.await_args.args[0]
+
+
+async def test_handle_message_routes_conversation_text_without_creating_entries() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "conversation_user")
+    extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
+    conversation_service = SimpleNamespace(
+        reply=lambda *, user_message: SimpleNamespace(text=f"Ответ на: {user_message}")
+    )
+    message = SimpleNamespace(
+        text="Как добрать белок без лишних калорий?",
+        message_id=321,
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="conversation_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        conversation_service=conversation_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 0
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("Ответ на: Как добрать белок без лишних калорий?",)
+    assert message.answer.await_args.kwargs["reply_to_message_id"] == 321
+
+
+async def test_handle_message_returns_ambiguous_reply_without_creating_entries() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "ambiguous_user")
+    extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
+    message_routing_service = SimpleNamespace(
+        route=lambda _request: MessageRoutingDecision(route="ambiguous", reason="test_ambiguous")
+    )
+    message = SimpleNamespace(
+        text="Сегодня как-то странно с едой и режимом",
+        message_id=654,
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="ambiguous_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        message_routing_service=message_routing_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 0
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (build_ambiguous_message_response(),)
+    assert message.answer.await_args.kwargs["reply_to_message_id"] == 654
+
+
+async def test_handle_message_does_not_route_slash_like_text_to_journal() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "slash_user")
+    extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
+    message = SimpleNamespace(
+        text="/админ",
+        message_id=777,
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="slash_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 0
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (build_ambiguous_message_response(),)
+    assert message.answer.await_args.kwargs["reply_to_message_id"] == 777
+
+
+async def test_handle_message_routes_clear_journal_text_to_extraction_flow() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "journal_route_user")
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.FOOD,
+                        items=[ExtractedJournalItem(name="гречка"), ExtractedJournalItem(name="курица")],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload='{"entries":[{"type":"food","items":[{"name":"гречка"},{"name":"курица"}]}]}',
+        )
+    )
+    nutrition_service = StaticNutritionEstimationService(
+        raw_payload=build_metric_payload(["entry-1:item-0", "entry-1:item-1"])
+    )
+    message = SimpleNamespace(
+        text="съел гречку с курицей",
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="journal_route_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        nutrition_service=nutrition_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 1
+        assert session.query(EntryItem).count() == 2
+
+    message.answer.assert_awaited_once()

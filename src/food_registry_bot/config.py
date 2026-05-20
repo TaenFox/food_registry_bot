@@ -55,6 +55,7 @@ class Settings(BaseSettings):
         alias="NUTRITION_PROVIDER",
     )
     nutrition_model: str = Field(default="gpt-5-mini", alias="NUTRITION_MODEL")
+    conversation_model: str = Field(default="gpt-5-mini", alias="CONVERSATION_MODEL")
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
 
     postgres_host: str = Field(default="localhost", alias="POSTGRES_HOST")

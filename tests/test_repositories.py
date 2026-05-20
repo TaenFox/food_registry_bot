@@ -16,7 +16,6 @@ from food_registry_bot.db.models import (
     UserSummaryPreference,
 )
 from food_registry_bot.db.repositories import (
-    DailyGoalSnapshotRepository,
     EntryItemCreate,
     EntryItemMetricRepository,
     EntryItemMetricValue,
