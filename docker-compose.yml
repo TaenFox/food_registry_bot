@@ -22,10 +22,12 @@ services:
       context: .
     container_name: food_registry_bot
     restart: unless-stopped
+    mem_limit: 200m
     depends_on:
       postgres:
         condition: service_healthy
     environment:
+      APP_VERSION: ${APP_VERSION:-unknown}
       APP_ENV: ${APP_ENV:-docker}
       BOT_TOKEN: ${BOT_TOKEN:?BOT_TOKEN is required}
       ADMIN_USER_IDS: ${ADMIN_USER_IDS:?ADMIN_USER_IDS is required}

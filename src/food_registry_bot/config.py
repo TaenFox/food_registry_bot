@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     )
 
     app_env: str = "local"
+    app_version: str = Field(default="unknown", alias="APP_VERSION")
     bot_token: Optional[str] = Field(default=None, alias="BOT_TOKEN")
     admin_user_ids_raw: str = Field(default="", alias="ADMIN_USER_IDS")
     extraction_provider: ExtractionProvider = Field(

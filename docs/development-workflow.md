@@ -94,6 +94,8 @@ Merge feature-ветки в `develop` выполняется только по �
 
 `/.github/workflows/release-on-tag.yml`
 
+Этот workflow также можно запустить вручную через `workflow_dispatch` и передать `git_ref`, например `main`, чтобы безопасно проверить деплой до первого релизного тега.
+
 Что делает workflow:
 
 1. Подключается к серверу по SSH.
