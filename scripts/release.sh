@@ -26,6 +26,11 @@ done
 
 cd "$PROJECT_ROOT"
 
+APP_VERSION="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"
+export APP_VERSION
+
+echo "Версия релиза: $APP_VERSION"
+
 echo "Проверяю docker compose конфиг..."
 "$COMPOSE_SCRIPT" config >/dev/null
 

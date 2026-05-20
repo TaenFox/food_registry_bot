@@ -24,6 +24,7 @@ def create_dispatcher(
     nutrition_service: NutritionEstimationService,
     conversation_service: ConversationService,
     admin_user_ids: tuple[int, ...],
+    app_version: str = "unknown",
 ) -> Dispatcher:
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
@@ -34,4 +35,5 @@ def create_dispatcher(
     dispatcher.workflow_data["message_routing_service"] = RuleBasedMessageRoutingService()
     dispatcher.workflow_data["admin_user_ids"] = admin_user_ids
     dispatcher.workflow_data["backfill_tracker"] = AdminBackfillTracker()
+    dispatcher.workflow_data["app_version"] = app_version
     return dispatcher

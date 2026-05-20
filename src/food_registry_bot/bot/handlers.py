@@ -351,6 +351,7 @@ def build_admin_overview_response(
     known_users: list,
     incomplete_food_entry_count: int,
     backfill_status_line: str,
+    app_version: str,
 ) -> str:
     regular_known_users = [
         known_user
@@ -364,6 +365,7 @@ def build_admin_overview_response(
     return "\n".join(
         [
             "Панель администратора:",
+            f"- версия бота: {app_version}",
             f"- текущий админ: {admin_user_id}",
             f"- админов в конфиге: {len(admin_user_ids)}",
             f"- известных пользователей: {len(regular_known_users)}",
@@ -1009,6 +1011,7 @@ async def handle_admin(
     session_factory: sessionmaker[Session],
     backfill_tracker: AdminBackfillTracker,
     admin_user_ids: tuple[int, ...] = (),
+    app_version: str = "unknown",
 ) -> None:
     telegram_user = message.from_user
     if telegram_user is None or not is_admin_user(telegram_user.id, admin_user_ids):
@@ -1028,6 +1031,7 @@ async def handle_admin(
             known_users=known_users,
             incomplete_food_entry_count=incomplete_food_entry_count,
             backfill_status_line=build_admin_backfill_status_line(backfill_tracker),
+            app_version=app_version,
         )
     )
 
