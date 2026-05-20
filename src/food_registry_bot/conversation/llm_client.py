@@ -1,0 +1,43 @@
+from __future__ import annotations
+
+from typing import Protocol
+
+from food_registry_bot.conversation.context import (
+    NutritionCoachConversationTurn,
+    NutritionCoachFactualContext,
+)
+from food_registry_bot.extraction.request import ExtractionImageInput
+
+
+class LLMConversationClientError(RuntimeError):
+    pass
+
+
+class LLMConversationClient(Protocol):
+    @property
+    def provider_name(self) -> str:
+        ...
+
+    @property
+    def model_name(self) -> str:
+        ...
+
+    def generate_reply(
+        self,
+        *,
+        user_message: str,
+        factual_context: NutritionCoachFactualContext,
+        session_summary: str | None,
+        recent_turns: list[NutritionCoachConversationTurn],
+        images: tuple[ExtractionImageInput, ...] = (),
+    ) -> tuple[str, str | None]:
+        """Return a plain-text conversational reply and updated session summary."""
+
+    def generate_post_entry_comment(
+        self,
+        *,
+        saved_items: list[str],
+        factual_context: NutritionCoachFactualContext,
+        metric_deltas: dict[str, float],
+    ) -> str | None:
+        """Return a short nutrition-aware post-entry comment, or None."""
