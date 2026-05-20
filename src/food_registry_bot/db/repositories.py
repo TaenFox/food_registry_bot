@@ -644,16 +644,39 @@ class ConversationMessageRepository:
         role: ConversationMessageRole,
         content: str,
         created_at: datetime,
+        telegram_chat_id: int | None = None,
+        telegram_message_id: int | None = None,
     ) -> ConversationMessage:
         message = ConversationMessage(
             session_id=session_id,
             role=role,
             content=content,
+            telegram_chat_id=telegram_chat_id,
+            telegram_message_id=telegram_message_id,
             created_at=created_at,
         )
         self._session.add(message)
         self._session.flush()
         return message
+
+    def get_session_by_assistant_message(
+        self,
+        *,
+        telegram_chat_id: int,
+        telegram_message_id: int,
+    ) -> ConversationSession | None:
+        statement = (
+            select(ConversationSession)
+            .join(ConversationMessage, ConversationMessage.session_id == ConversationSession.id)
+            .where(
+                ConversationMessage.role == ConversationMessageRole.ASSISTANT,
+                ConversationMessage.telegram_chat_id == telegram_chat_id,
+                ConversationMessage.telegram_message_id == telegram_message_id,
+            )
+            .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+            .limit(1)
+        )
+        return self._session.scalar(statement)
 
     def list_recent_for_session(
         self,

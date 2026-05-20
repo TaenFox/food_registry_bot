@@ -1992,8 +1992,9 @@ async def test_handle_message_routes_conversation_text_without_creating_entries(
     message = SimpleNamespace(
         text="Как добрать белок без лишних калорий?",
         message_id=321,
+        chat=SimpleNamespace(id=98765),
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="conversation_user"),
-        answer=AsyncMock(),
+        answer=AsyncMock(return_value=SimpleNamespace(message_id=654321, chat=SimpleNamespace(id=98765))),
     )
 
     await handle_message(
@@ -2018,9 +2019,12 @@ async def test_handle_message_routes_conversation_text_without_creating_entries(
     assert factual_context.goal_progress["calories"].goal_value == 1800
     assert factual_context.recent_entries == []
     assert saved_session.summary_text == "обновлённый summary"
-    assert [(message.role.value, message.content) for message in saved_messages] == [
-        ("user", "Как добрать белок без лишних калорий?"),
-        ("assistant", "Ответ на: Как добрать белок без лишних калорий?"),
+    assert [
+        (saved_message.role.value, saved_message.content, saved_message.telegram_chat_id, saved_message.telegram_message_id)
+        for saved_message in saved_messages
+    ] == [
+        ("user", "Как добрать белок без лишних калорий?", None, None),
+        ("assistant", "Ответ на: Как добрать белок без лишних калорий?", 98765, 654321),
     ]
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == ("Ответ на: Как добрать белок без лишних калорий?",)
@@ -2041,8 +2045,9 @@ async def test_handle_message_sends_conversation_reply_as_plain_text() -> None:
     message = SimpleNamespace(
         text="что лучше съесть перед вечерней тренировкой?",
         message_id=322,
+        chat=SimpleNamespace(id=98766),
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="conversation_html_user"),
-        answer=AsyncMock(),
+        answer=AsyncMock(return_value=SimpleNamespace(message_id=654322, chat=SimpleNamespace(id=98766))),
     )
 
     await handle_message(
@@ -2069,6 +2074,7 @@ async def test_handle_message_returns_ambiguous_reply_without_creating_entries()
     message = SimpleNamespace(
         text="Сегодня как-то странно с едой и режимом",
         message_id=654,
+        chat=SimpleNamespace(id=98767),
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="ambiguous_user"),
         answer=AsyncMock(),
     )
@@ -2096,6 +2102,7 @@ async def test_handle_message_does_not_route_slash_like_text_to_journal() -> Non
     message = SimpleNamespace(
         text="/админ",
         message_id=777,
+        chat=SimpleNamespace(id=98768),
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="slash_user"),
         answer=AsyncMock(),
     )
@@ -2160,8 +2167,9 @@ async def test_handle_message_routes_follow_up_to_conversation_when_active_sessi
     message = SimpleNamespace(
         text="это будет сценарий А",
         message_id=888,
+        chat=SimpleNamespace(id=98769),
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="followup_user"),
-        answer=AsyncMock(),
+        answer=AsyncMock(return_value=SimpleNamespace(message_id=654888, chat=SimpleNamespace(id=98769))),
     )
 
     original_datetime = handle_message.__globals__["datetime"]
@@ -2203,6 +2211,101 @@ async def test_handle_message_routes_follow_up_to_conversation_when_active_sessi
     ]
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == ("уточняю сценарий А",)
+
+
+async def test_handle_message_routes_reply_to_coach_message_into_same_session_even_after_ttl() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "reply_followup_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="reply_followup_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        coach_session = ConversationSession(
+            user_id=user.id,
+            summary_text="говорили про предтренировочный перекус",
+            started_at=datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc),
+            last_message_at=datetime(2026, 5, 20, 10, 30, tzinfo=timezone.utc),
+        )
+        session.add(coach_session)
+        session.flush()
+        session.add_all(
+            [
+                ConversationMessage(
+                    session_id=coach_session.id,
+                    role=ConversationMessageRole.USER,
+                    content="что лучше съесть перед вечерней тренировкой?",
+                    created_at=datetime(2026, 5, 20, 10, 29, tzinfo=timezone.utc),
+                ),
+                ConversationMessage(
+                    session_id=coach_session.id,
+                    role=ConversationMessageRole.ASSISTANT,
+                    content="если через 10 минут, бери лёгкий быстрый перекус",
+                    telegram_chat_id=321123,
+                    telegram_message_id=654987,
+                    created_at=datetime(2026, 5, 20, 10, 30, tzinfo=timezone.utc),
+                ),
+            ]
+        )
+        session.commit()
+
+    extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
+    captured_reply_args = {}
+
+    def reply_stub(*, user_message, factual_context, session_summary, recent_turns):
+        captured_reply_args["user_message"] = user_message
+        captured_reply_args["session_summary"] = session_summary
+        captured_reply_args["recent_turns"] = recent_turns
+        return SimpleNamespace(text="тогда бери только быстрые углеводы", updated_session_summary="уточнили быстрый перекус")
+
+    message = SimpleNamespace(
+        text="а если она через 10 минут?",
+        message_id=889,
+        chat=SimpleNamespace(id=321123),
+        reply_to_message=SimpleNamespace(message_id=654987),
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="reply_followup_user"),
+        answer=AsyncMock(return_value=SimpleNamespace(message_id=654889, chat=SimpleNamespace(id=321123))),
+    )
+
+    original_datetime = handle_message.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 20, 12, 45, tzinfo=timezone.utc)
+
+    handle_message.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_message(
+            message,
+            session_factory,
+            extraction_service=extraction_service,
+            conversation_service=SimpleNamespace(reply=reply_stub),
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_message.__globals__["datetime"] = original_datetime
+
+    with session_factory() as session:
+        saved_session = session.query(ConversationSession).one()
+        saved_messages = session.query(ConversationMessage).order_by(ConversationMessage.id.asc()).all()
+
+    assert captured_reply_args["user_message"] == "а если она через 10 минут?"
+    assert captured_reply_args["session_summary"] == "говорили про предтренировочный перекус"
+    assert [(turn.role, turn.content) for turn in captured_reply_args["recent_turns"]] == [
+        ("user", "что лучше съесть перед вечерней тренировкой?"),
+        ("assistant", "если через 10 минут, бери лёгкий быстрый перекус"),
+    ]
+    assert saved_session.summary_text == "уточнили быстрый перекус"
+    assert [(saved_message.role.value, saved_message.content) for saved_message in saved_messages] == [
+        ("user", "что лучше съесть перед вечерней тренировкой?"),
+        ("assistant", "если через 10 минут, бери лёгкий быстрый перекус"),
+        ("user", "а если она через 10 минут?"),
+        ("assistant", "тогда бери только быстрые углеводы"),
+    ]
+    assert saved_messages[-1].telegram_chat_id == 321123
+    assert saved_messages[-1].telegram_message_id == 654889
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("тогда бери только быстрые углеводы",)
 
 
 async def test_handle_message_routes_clear_journal_text_to_extraction_flow() -> None:

@@ -344,6 +344,37 @@ def test_conversation_message_repository_lists_recent_turns_in_chronological_ord
     ]
 
 
+def test_conversation_message_repository_finds_session_by_assistant_telegram_message() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7012, username="coach_reply_link_user")
+    conversation_session = ConversationSessionRepository(session).create(
+        user_id=user.id,
+        started_at=datetime(2026, 5, 20, 11, 0, tzinfo=timezone.utc),
+    )
+    message_repository = ConversationMessageRepository(session)
+    message_repository.create(
+        session_id=conversation_session.id,
+        role=ConversationMessageRole.ASSISTANT,
+        content="уточни время тренировки",
+        telegram_chat_id=55001,
+        telegram_message_id=66002,
+        created_at=datetime(2026, 5, 20, 11, 5, tzinfo=timezone.utc),
+    )
+
+    found_session = message_repository.get_session_by_assistant_message(
+        telegram_chat_id=55001,
+        telegram_message_id=66002,
+    )
+    missing_session = message_repository.get_session_by_assistant_message(
+        telegram_chat_id=55001,
+        telegram_message_id=66003,
+    )
+
+    assert found_session is not None
+    assert found_session.id == conversation_session.id
+    assert missing_session is None
+
+
 def test_entry_repository_creates_entry_for_user() -> None:
     session = create_test_session()
     user = UserRepository(session).create(telegram_user_id=202, username="bob")

@@ -29,7 +29,7 @@ from food_registry_bot.conversation import (
     DisabledConversationService,
     NutritionCoachContextBuilder,
 )
-from food_registry_bot.db.models import ConversationMessageRole, EntryType
+from food_registry_bot.db.models import ConversationMessageRole, ConversationSession, EntryType
 from food_registry_bot.db.session import session_scope
 from food_registry_bot.db.repositories import (
     ConversationMessageRepository,
@@ -1309,16 +1309,28 @@ async def handle_message(
     if not await require_user_access(message, session_factory, admin_user_ids):
         return
 
-    active_conversation_session_exists = False
+    active_conversation_session_id: int | None = None
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
-        active_conversation_session_exists = (
-            ConversationSessionRepository(session).get_active_for_user(
+        reply_to_message = getattr(message, "reply_to_message", None)
+        reply_to_message_id = getattr(reply_to_message, "message_id", None)
+        chat = getattr(message, "chat", None)
+        chat_id = getattr(chat, "id", None)
+        if reply_to_message_id is not None and chat_id is not None:
+            replied_session = ConversationMessageRepository(session).get_session_by_assistant_message(
+                telegram_chat_id=chat_id,
+                telegram_message_id=reply_to_message_id,
+            )
+            if replied_session is not None:
+                active_conversation_session_id = replied_session.id
+
+        if active_conversation_session_id is None:
+            active_conversation_session = ConversationSessionRepository(session).get_active_for_user(
                 user_id=user_id,
                 reference_at=datetime.now(timezone.utc),
             )
-            is not None
-        )
+            if active_conversation_session is not None:
+                active_conversation_session_id = active_conversation_session.id
 
     extraction_request = await build_extraction_request(message)
     if extraction_request is None:
@@ -1330,22 +1342,32 @@ async def handle_message(
 
     routing_decision = message_routing_service.route(
         extraction_request,
-        has_active_conversation_session=active_conversation_session_exists,
+        has_active_conversation_session=active_conversation_session_id is not None,
     )
     if routing_decision.route == CONVERSATION:
+        current_time = datetime.now(timezone.utc)
         with session_scope(session_factory) as session:
             _, user_id = ensure_user_registered(message, session)
             user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
             if user is None:
                 raise RuntimeError("User profile was not found after registration")
             summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
-            current_time = datetime.now(timezone.utc)
-            conversation_session = ConversationSessionRepository(session).create_or_get_active(
-                user_id=user_id,
-                reference_at=current_time,
-            )
+            session_repository = ConversationSessionRepository(session)
+            if active_conversation_session_id is not None:
+                conversation_session = session.get(ConversationSession, active_conversation_session_id)
+                if conversation_session is None:
+                    conversation_session = session_repository.create_or_get_active(
+                        user_id=user_id,
+                        reference_at=current_time,
+                    )
+            else:
+                conversation_session = session_repository.create_or_get_active(
+                    user_id=user_id,
+                    reference_at=current_time,
+                )
+            conversation_session_id = conversation_session.id
             recent_turns = ConversationMessageRepository(session).list_recent_for_session(
-                session_id=conversation_session.id,
+                session_id=conversation_session_id,
                 limit=6,
             )
             factual_context = NutritionCoachContextBuilder(session).build(
@@ -1358,33 +1380,34 @@ async def handle_message(
                 user_message=extraction_request.text or "",
                 factual_context=factual_context,
                 session_summary=conversation_session.summary_text,
-                recent_turns=[
-                    turn for turn in recent_turns
-                ],
+                recent_turns=[turn for turn in recent_turns],
             )
-            ConversationMessageRepository(session).create(
-                session_id=conversation_session.id,
-                role=ConversationMessageRole.USER,
-                content=extraction_request.text or "",
-                created_at=current_time,
-            )
-            ConversationMessageRepository(session).create(
-                session_id=conversation_session.id,
-                role=ConversationMessageRole.ASSISTANT,
-                content=conversation_reply.text,
-                created_at=current_time,
-            )
-            ConversationSessionRepository(session).update_summary_and_touch(
-                session_id=conversation_session.id,
-                summary_text=conversation_reply.updated_session_summary,
-                last_message_at=current_time,
-            )
-        await message.answer(
+        sent_message = await message.answer(
             build_conversation_response(conversation_reply.text),
             reply_markup=build_main_keyboard(),
             parse_mode=None,
             **build_reply_kwargs(message),
         )
+        with session_scope(session_factory) as session:
+            ConversationMessageRepository(session).create(
+                session_id=conversation_session_id,
+                role=ConversationMessageRole.USER,
+                content=extraction_request.text or "",
+                created_at=current_time,
+            )
+            ConversationMessageRepository(session).create(
+                session_id=conversation_session_id,
+                role=ConversationMessageRole.ASSISTANT,
+                content=conversation_reply.text,
+                created_at=current_time,
+                telegram_chat_id=getattr(getattr(sent_message, "chat", None), "id", None),
+                telegram_message_id=getattr(sent_message, "message_id", None),
+            )
+            ConversationSessionRepository(session).update_summary_and_touch(
+                session_id=conversation_session_id,
+                summary_text=conversation_reply.updated_session_summary,
+                last_message_at=current_time,
+            )
         return
 
     if routing_decision.route == AMBIGUOUS:

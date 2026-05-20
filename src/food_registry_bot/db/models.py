@@ -308,6 +308,8 @@ class ConversationMessage(Base):
         Enum(ConversationMessageRole, name="conversation_message_role", values_callable=enum_values)
     )
     content: Mapped[str] = mapped_column(Text)
+    telegram_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, index=True)
+    telegram_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
     session: Mapped["ConversationSession"] = relationship(back_populates="messages")
