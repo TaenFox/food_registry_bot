@@ -64,8 +64,8 @@ class DisabledConversationService:
         _ = images
         return ConversationReply(
             text=(
-                "Режим консультации пока недоступен. "
-                "Попробуй позже или продолжай пользоваться дневником записей."
+                "Режим консультации сейчас недоступен. "
+                "Пока можешь продолжать вести дневник: отправить запись еды, фото блюда или воду."
             ),
             provider="disabled",
             model=None,
@@ -109,7 +109,7 @@ class LLMConversationService:
         except LLMConversationClientError as exc:
             logger.exception("Nutrition coach request failed: %s", exc)
             return ConversationReply(
-                text=f"Не удалось получить ответ в режиме консультации. Причина: {exc}",
+                text="Не получилось ответить в режиме консультации. Попробуй задать вопрос короче или повторить позже.",
                 provider=self._client.provider_name,
                 model=self._client.model_name,
                 updated_session_summary=session_summary,

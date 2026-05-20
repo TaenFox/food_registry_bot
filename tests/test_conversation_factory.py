@@ -360,5 +360,5 @@ def test_llm_conversation_service_includes_error_reason_in_fallback_reply() -> N
         recent_turns=[],
     )
 
-    assert reply.text == "Не удалось получить ответ в режиме консультации. Причина: test failure"
+    assert reply.text == "Не получилось ответить в режиме консультации. Попробуй задать вопрос короче или повторить позже."
     assert reply.updated_session_summary == "старый summary"

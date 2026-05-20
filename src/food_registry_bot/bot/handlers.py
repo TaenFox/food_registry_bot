@@ -114,9 +114,9 @@ class FoodWriteFlowError(RuntimeError):
 
 def build_ambiguous_message_response() -> str:
     return (
-        "Не понял, это запись в дневник или вопрос.\n"
-        "Если хочешь сохранить факт, пришли явную запись еды или воды.\n"
-        "Если хочешь совет или объяснение, задай вопрос прямо."
+        "Не до конца понял, это запись в дневник или вопрос.\n"
+        "Если хочешь сохранить запись, напиши еду или воду прямо, например: `гречка с курицей` или `вода 300 мл`.\n"
+        "Если хочешь совет, задай вопрос текстом, например: `как добрать белок сегодня?`"
     )
 
 
@@ -176,7 +176,9 @@ async def require_user_access(
     if has_access:
         return True
 
-    await message.answer("Доступ к боту не разрешён.")
+    await message.answer(
+        "Сейчас у тебя нет доступа к боту. Если он нужен, попроси администратора добавить твой Telegram ID."
+    )
     return False
 
 
@@ -496,31 +498,31 @@ def build_recent_entry_display_line(*, index: int, entry, timezone_name: str) ->
 
 def build_recent_entries_response(entries: list, *, timezone_name: str, selection_mode: bool = False) -> str:
     if not entries:
-        return "Пока нет сохранённых записей."
+        return "Пока записей нет. Отправь еду текстом, фото блюда или нажми кнопку воды."
 
     lines = ["Последние записи:"]
     for index, entry in enumerate(entries, start=1):
         lines.append(build_recent_entry_display_line(index=index, entry=entry, timezone_name=timezone_name))
     if selection_mode:
-        lines.extend(["", "Выбери запись для удаления."])
+        lines.extend(["", "Выбери запись, которую нужно удалить."])
     return "\n".join(lines)
 
 
 def build_recent_entry_delete_confirmation(*, entry, timezone_name: str) -> str:
     return "\n".join(
         [
-            "Удалить запись целиком?",
+            "Удалить эту запись?",
             "",
             f"{format_entry_timestamp(entry, timezone_name)} — {build_recent_entry_title(entry)}",
             "",
-            "Это действие необратимо.",
+            "Это действие необратимо. Если запись понадобится снова, её нужно будет создать заново.",
         ]
     )
 
 
 def build_today_summary_response(summary: DailyNutritionSummary) -> str:
     if summary.included_entry_count == 0 and summary.excluded_entry_count == 0:
-        return "Сегодня пока нет сохранённых записей еды."
+        return "За текущий день пока нет записей еды."
 
     lines = ["Итог за сегодня:"]
     lines.append(f"- калории: {round(summary.totals.calories, 1)} ккал")
@@ -556,9 +558,9 @@ def build_today_summary_response_with_preferences(
             water_summary.included_entry_count == 0 and water_summary.excluded_entry_count == 0
         ))
     ):
-        return "Сегодня пока нет сохранённых записей."
+        return "За текущий день пока нет записей. Отправь еду, фото блюда или воду."
     if not enabled_metric_codes:
-        return "В summary сейчас нет включённых показателей."
+        return "В summary сейчас всё скрыто. Включи хотя бы один показатель в /settings."
     lines: list[str] = []
     for metric_code, short_label, unit in SUMMARY_METRIC_LINES:
         if metric_code not in enabled_metric_codes:
@@ -1091,13 +1093,29 @@ async def handle_start(
 
     if created:
         await message.answer(
-            "Профиль создан. Можешь отправить запись еды, фото блюда или нажать кнопку воды.",
+            "Профиль создан.\n"
+            "Что можно сделать:\n"
+            "- отправить запись еды текстом или фото блюда;\n"
+            "- нажать кнопку воды;\n"
+            "- задать вопрос о питании;\n"
+            "- посмотреть итог дня: /today;\n"
+            "- посмотреть и удалить последние записи: /recent;\n"
+            "- посмотреть или изменить цели: /goal;\n"
+            "- настроить summary: /settings.",
             reply_markup=build_main_keyboard(),
         )
         return
 
     await message.answer(
-        "Профиль уже есть. Можешь отправить запись еды, фото блюда или нажать кнопку воды.",
+        "Бот готов.\n"
+        "Что можно сделать:\n"
+        "- отправить запись еды текстом или фото блюда;\n"
+        "- нажать кнопку воды;\n"
+        "- задать вопрос о питании;\n"
+        "- посмотреть итог дня: /today;\n"
+        "- посмотреть и удалить последние записи: /recent;\n"
+        "- посмотреть или изменить цели: /goal;\n"
+        "- настроить summary: /settings.",
         reply_markup=build_main_keyboard(),
     )
 
@@ -1157,7 +1175,7 @@ async def handle_recent_delete_callback(
             is_admin_user(telegram_user.id, admin_user_ids)
             or UserAccessRepository(session).is_allowed(telegram_user.id)
         ):
-            await callback.answer("Доступ к боту не разрешён.", show_alert=True)
+            await callback.answer("Нет доступа к боту. Попроси администратора его выдать.", show_alert=True)
             return
 
         user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
@@ -1208,7 +1226,7 @@ async def handle_recent_delete_callback(
             entry_id=callback_data.entry_id,
         )
         if selected_entry is None:
-            await callback.answer("Запись уже удалена или недоступна.", show_alert=True)
+            await callback.answer("Эта запись уже удалена или больше недоступна.", show_alert=True)
             return
 
         if callback_data.action == "select":
@@ -1234,7 +1252,7 @@ async def handle_recent_delete_callback(
             else None
         ),
     )
-    await callback.answer("Запись удалена.")
+    await callback.answer("Запись удалена. Список уже обновлён.")
 
 
 @router.message(Command("settings"))
@@ -1299,7 +1317,7 @@ async def handle_toggle_summary_metric(
             is_admin_user(telegram_user.id, admin_user_ids)
             or UserAccessRepository(session).is_allowed(telegram_user.id)
         ):
-            await callback.answer("Доступ к боту не разрешён.", show_alert=True)
+            await callback.answer("Нет доступа к боту. Попроси администратора его выдать.", show_alert=True)
             return
 
         user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
@@ -1348,7 +1366,7 @@ async def handle_toggle_summary_metric(
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
             ),
         )
-    await callback.answer("Настройки обновлены.")
+    await callback.answer("Сохранил настройки.")
 
 
 @router.message(Command("today"))
@@ -1542,7 +1560,7 @@ async def handle_message(
         extraction_request = await build_extraction_request(message)
         if extraction_request is None:
             await message.answer(
-                "Сейчас поддерживаются текстовые записи, фото еды и кнопка воды.",
+                "Сейчас я умею принимать текстовые записи, фото еды и кнопку воды. Если хочешь совет, задай вопрос текстом.",
                 reply_markup=build_main_keyboard(),
             )
             return
@@ -1638,7 +1656,7 @@ async def handle_message(
 
         if extraction_result is None:
             await message.answer(
-                "Не удалось распознать запись. Попробуй сформулировать её короче или отправь другое фото.",
+                "Не смог уверенно распознать запись. Попробуй написать её короче, например `омлет и кофе`, или отправь другое фото.",
                 reply_markup=build_main_keyboard(),
             )
             return

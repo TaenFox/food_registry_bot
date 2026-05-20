@@ -148,7 +148,9 @@ async def test_start_denies_unallowed_user() -> None:
     assert saved_access.username == "denied_user"
     assert saved_access.is_allowed is False
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Доступ к боту не разрешён.",)
+    assert message.answer.await_args.args == (
+        "Сейчас у тебя нет доступа к боту. Если он нужен, попроси администратора добавить твой Telegram ID.",
+    )
 
 
 async def test_start_creates_user_for_allowed_user() -> None:
@@ -167,7 +169,15 @@ async def test_start_creates_user_for_allowed_user() -> None:
     assert saved_user.username == "allowed_user"
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Профиль создан. Можешь отправить запись еды, фото блюда или нажать кнопку воды.",
+        "Профиль создан.\n"
+        "Что можно сделать:\n"
+        "- отправить запись еды текстом или фото блюда;\n"
+        "- нажать кнопку воды;\n"
+        "- задать вопрос о питании;\n"
+        "- посмотреть итог дня: /today;\n"
+        "- посмотреть и удалить последние записи: /recent;\n"
+        "- посмотреть или изменить цели: /goal;\n"
+        "- настроить summary: /settings.",
     )
 
 
@@ -181,7 +191,9 @@ async def test_health_denies_unallowed_user() -> None:
     await handle_health(message, session_factory, admin_user_ids=(ADMIN_ID,))
 
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Доступ к боту не разрешён.",)
+    assert message.answer.await_args.args == (
+        "Сейчас у тебя нет доступа к боту. Если он нужен, попроси администратора добавить твой Telegram ID.",
+    )
 
 
 async def test_admin_allow_sets_user_access() -> None:
@@ -665,7 +677,9 @@ async def test_regular_message_denies_unallowed_user_before_processing() -> None
         assert session.query(Entry).count() == 0
 
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Доступ к боту не разрешён.",)
+    assert message.answer.await_args.args == (
+        "Сейчас у тебя нет доступа к боту. Если он нужен, попроси администратора добавить твой Telegram ID.",
+    )
 
 
 async def test_recent_returns_latest_entries_for_allowed_user() -> None:
@@ -736,7 +750,7 @@ async def test_recent_delete_open_shows_entry_selection_buttons() -> None:
         "1. 14:00 — вода (250 мл)\n"
         "2. 13:00 — яблоко\n"
         "\n"
-        "Выбери запись для удаления.",
+        "Выбери запись, которую нужно удалить.",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "14:00 · вода (250 мл)"
@@ -776,7 +790,7 @@ async def test_recent_delete_open_returns_selection_screen() -> None:
         "Последние записи:\n"
         "1. 13:00 — яблоко\n"
         "\n"
-        "Выбери запись для удаления.",
+        "Выбери запись, которую нужно удалить.",
     )
 
 
@@ -840,7 +854,7 @@ async def test_recent_delete_confirm_removes_entry_and_refreshes_recent_list() -
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Выбрать для удаления"
     callback.message.answer.assert_not_awaited()
-    callback.answer.assert_awaited_once_with("Запись удалена.")
+    callback.answer.assert_awaited_once_with("Запись удалена. Список уже обновлён.")
 
 
 async def test_recent_delete_returns_safe_error_for_stale_button() -> None:
@@ -876,7 +890,7 @@ async def test_recent_delete_returns_safe_error_for_stale_button() -> None:
     )
 
     callback.message.edit_text.assert_not_awaited()
-    callback.answer.assert_awaited_once_with("Запись уже удалена или недоступна.", show_alert=True)
+    callback.answer.assert_awaited_once_with("Эта запись уже удалена или больше недоступна.", show_alert=True)
 
 
 async def test_today_returns_daily_nutrition_totals_for_allowed_user() -> None:
@@ -992,7 +1006,7 @@ async def test_today_returns_empty_enabled_metrics_message_when_calories_hidden(
     )
 
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("В summary сейчас нет включённых показателей.",)
+    assert message.answer.await_args.args == ("В summary сейчас всё скрыто. Включи хотя бы один показатель в /settings.",)
 
 
 async def test_today_returns_bju_lines_when_calories_disabled_but_bju_enabled() -> None:
@@ -1345,7 +1359,7 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Калории: on"
     assert reply_markup.inline_keyboard[1][0].text == "Белки: off"
-    callback.answer.assert_awaited_once_with("Настройки обновлены.")
+    callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
 async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -> None:
@@ -1511,7 +1525,7 @@ async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[6][0].text == "Дельта записи: off"
-    callback.answer.assert_awaited_once_with("Настройки обновлены.")
+    callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
 async def test_today_uses_preference_nutrition_day_start_hour() -> None:
