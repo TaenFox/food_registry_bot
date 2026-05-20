@@ -111,7 +111,6 @@ class RuleBasedMessageRoutingService:
                     return MessageRoutingDecision(route=AMBIGUOUS, reason="slash_like_photo_text")
                 if self._looks_like_conversation_photo(
                     lowered_photo_text,
-                    has_active_conversation_session=has_active_conversation_session,
                 ):
                     return MessageRoutingDecision(route=CONVERSATION, reason="photo_conversation_cue")
             return MessageRoutingDecision(route=JOURNAL, reason="photo_message")
@@ -162,16 +161,11 @@ class RuleBasedMessageRoutingService:
     @staticmethod
     def _looks_like_conversation_photo(
         text: str,
-        *,
-        has_active_conversation_session: bool,
     ) -> bool:
         if RuleBasedMessageRoutingService._looks_conversational(text):
             return True
 
         if any(pattern in text for pattern in _PHOTO_CONVERSATION_PATTERNS):
-            return True
-
-        if has_active_conversation_session and RuleBasedMessageRoutingService._word_count(text) > 0:
             return True
 
         return False

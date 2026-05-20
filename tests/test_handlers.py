@@ -2483,6 +2483,86 @@ async def test_photo_message_with_explicit_coaching_caption_routes_to_conversati
     assert message.answer.await_args.kwargs["reply_to_message_id"] == 990
 
 
+async def test_photo_message_with_journal_caption_stays_journal_even_with_active_conversation_session() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "photo_journal_active_session_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="photo_journal_active_session_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        coach_session = ConversationSession(
+            user_id=user.id,
+            summary_text="говорили про ужин",
+            started_at=datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc),
+            last_message_at=datetime(2026, 5, 20, 12, 30, tzinfo=timezone.utc),
+        )
+        session.add(coach_session)
+        session.commit()
+
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.FOOD,
+                        items=[ExtractedJournalItem(name="курица"), ExtractedJournalItem(name="кускус")],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload='{"entries":[{"type":"food","items":[{"name":"курица"},{"name":"кускус"}]}]}',
+        )
+    )
+    nutrition_service = StaticNutritionEstimationService(
+        raw_payload=build_metric_payload(["entry-1:item-0", "entry-1:item-1"])
+    )
+
+    async def download_stub(_photo, destination):
+        destination.write(b"meal-image-bytes")
+
+    message = SimpleNamespace(
+        text=None,
+        caption="Запиши в обед",
+        message_id=991,
+        chat=SimpleNamespace(id=98771),
+        photo=[SimpleNamespace(file_id="small"), SimpleNamespace(file_id="large")],
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="photo_journal_active_session_user"),
+        bot=SimpleNamespace(download=AsyncMock(side_effect=download_stub), send_chat_action=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    original_datetime = handle_message.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 20, 12, 40, tzinfo=timezone.utc)
+
+    handle_message.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_message(
+            message,
+            session_factory,
+            extraction_service=extraction_service,
+            nutrition_service=nutrition_service,
+            conversation_service=SimpleNamespace(reply=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("reply must not be called"))),
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_message.__globals__["datetime"] = original_datetime
+
+    with session_factory() as session:
+        saved_entries = session.query(Entry).all()
+        saved_messages = session.query(ConversationMessage).all()
+
+    assert len(saved_entries) == 1
+    assert saved_entries[0].entry_type == EntryType.FOOD
+    assert saved_messages == []
+    message.answer.assert_awaited_once()
+    assert "Сохранил:" in message.answer.await_args.args[0]
+
+
 async def test_handle_message_routes_clear_journal_text_to_extraction_flow() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "journal_route_user")
