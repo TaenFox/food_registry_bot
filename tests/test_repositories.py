@@ -49,6 +49,7 @@ def create_test_session() -> Session:
             SupportedMetric(code="protein", name="Protein", unit="g"),
             SupportedMetric(code="fat", name="Fat", unit="g"),
             SupportedMetric(code="carbs", name="Carbs", unit="g"),
+            SupportedMetric(code="fiber", name="Fiber", unit="g"),
         ]
     )
     session.commit()
@@ -68,6 +69,7 @@ def build_metric_payload(item_ids: list[str], *, confidence: str = "medium") -> 
                     {"code": "protein", "value": 7.6 + index, "confidence": confidence},
                     {"code": "fat", "value": 2.2 + index, "confidence": confidence},
                     {"code": "carbs", "value": 42.8 + index, "confidence": confidence},
+                    {"code": "fiber", "value": 5.1 + index, "confidence": confidence},
                 ],
             }
         )
@@ -400,11 +402,12 @@ def test_entry_repository_lists_incomplete_food_entry_ids() -> None:
             EntryItemMetricValue(code="protein", value=2.0, confidence="medium"),
             EntryItemMetricValue(code="fat", value=1.0, confidence="medium"),
             EntryItemMetricValue(code="carbs", value=20.0, confidence="medium"),
+            EntryItemMetricValue(code="fiber", value=3.0, confidence="medium"),
         ],
     )
 
     incomplete_ids = repository.list_incomplete_food_entry_ids(
-        required_metric_codes=["calories", "protein", "fat", "carbs"],
+        required_metric_codes=["calories", "protein", "fat", "carbs", "fiber"],
         limit=10,
     )
 
@@ -416,7 +419,7 @@ def test_supported_metric_repository_lists_seeded_metrics() -> None:
 
     metrics = SupportedMetricRepository(session).list_all()
 
-    assert [metric.code for metric in metrics] == ["calories", "protein", "fat", "carbs"]
+    assert [metric.code for metric in metrics] == ["calories", "protein", "fat", "carbs", "fiber"]
 
 
 def test_entry_item_metric_repository_upserts_metric_values() -> None:
@@ -491,14 +494,14 @@ def test_nutrition_persistence_service_saves_metrics_for_saved_entries() -> None
         resolved_estimates=resolved_estimates,
     )
 
-    assert len(saved_metrics) == 8
+    assert len(saved_metrics) == 10
     persisted_metrics = (
         session.query(EntryItemMetric)
         .join(SupportedMetric, SupportedMetric.id == EntryItemMetric.metric_id)
         .order_by(EntryItemMetric.entry_item_id.asc(), SupportedMetric.code.asc())
         .all()
     )
-    assert len(persisted_metrics) == 8
+    assert len(persisted_metrics) == 10
     assert [
         (metric.entry_item.position, metric.metric.code, metric.value, metric.confidence)
         for metric in persisted_metrics
@@ -506,10 +509,12 @@ def test_nutrition_persistence_service_saves_metrics_for_saved_entries() -> None
         (0, "calories", 220.0, "medium"),
         (0, "carbs", 42.8, "medium"),
         (0, "fat", 2.2, "medium"),
+        (0, "fiber", 5.1, "medium"),
         (0, "protein", 7.6, "medium"),
         (1, "calories", 221.0, "medium"),
         (1, "carbs", 43.8, "medium"),
         (1, "fat", 3.2, "medium"),
+        (1, "fiber", 6.1, "medium"),
         (1, "protein", 8.6, "medium"),
     ]
 

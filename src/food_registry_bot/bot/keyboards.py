@@ -25,6 +25,7 @@ def build_summary_settings_keyboard(
     show_protein: bool,
     show_fat: bool,
     show_carbs: bool,
+    show_fiber: bool,
     show_water: bool,
     show_post_entry_delta_suffix: bool,
     summary_display_mode: str,
@@ -54,6 +55,12 @@ def build_summary_settings_keyboard(
                 InlineKeyboardButton(
                     text=f"Углеводы: {'on' if show_carbs else 'off'}",
                     callback_data=SummarySettingsCallback(action="toggle_carbs").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Клетчатка: {'on' if show_fiber else 'off'}",
+                    callback_data=SummarySettingsCallback(action="toggle_fiber").pack(),
                 )
             ],
             [

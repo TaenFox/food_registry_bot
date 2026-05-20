@@ -27,6 +27,7 @@ class DailyNutritionGoalProgress(BaseModel):
     protein: MetricGoalProgress
     fat: MetricGoalProgress
     carbs: MetricGoalProgress
+    fiber: MetricGoalProgress
     water: MetricGoalProgress
 
 
@@ -59,6 +60,11 @@ class DailyNutritionGoalProgressUseCase:
                 metric_code="carbs",
                 consumed_value=summary.totals.carbs,
                 goal_value=snapshot.carbs_goal,
+            ),
+            fiber=self._build_metric_progress(
+                metric_code="fiber",
+                consumed_value=summary.totals.fiber,
+                goal_value=snapshot.fiber_goal,
             ),
             water=self._build_metric_progress(
                 metric_code="water",

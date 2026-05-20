@@ -19,6 +19,7 @@ class DailyNutritionTotals(BaseModel):
     protein: float = Field(default=0.0, ge=0)
     fat: float = Field(default=0.0, ge=0)
     carbs: float = Field(default=0.0, ge=0)
+    fiber: float = Field(default=0.0, ge=0)
 
 
 class DailyNutritionItemSummary(BaseModel):
@@ -105,6 +106,7 @@ def _merge_totals(left: DailyNutritionTotals, right: DailyNutritionTotals) -> Da
         protein=left.protein + right.protein,
         fat=left.fat + right.fat,
         carbs=left.carbs + right.carbs,
+        fiber=left.fiber + right.fiber,
     )
 
 
@@ -171,6 +173,7 @@ class DailyNutritionSummaryUseCase:
                 protein=metric_values["protein"],
                 fat=metric_values["fat"],
                 carbs=metric_values["carbs"],
+                fiber=metric_values["fiber"],
             )
             item_summaries.append(
                 DailyNutritionItemSummary(

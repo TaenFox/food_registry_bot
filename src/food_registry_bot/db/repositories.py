@@ -25,12 +25,13 @@ if TYPE_CHECKING:
 
 SUPPORTED_NUTRITION_DAY_START_HOURS = (0, 2, 4, 6)
 SUPPORTED_SUMMARY_DISPLAY_MODES = ("text", "bars")
-SUPPORTED_GOAL_METRIC_CODES = ("calories", "protein", "fat", "carbs", "water")
+SUPPORTED_GOAL_METRIC_CODES = ("calories", "protein", "fat", "carbs", "fiber", "water")
 DEFAULT_DAILY_GOALS = {
     "calories": 1800,
     "protein": 90,
     "fat": 60,
     "carbs": 210,
+    "fiber": 25,
     "water": 2000,
 }
 
@@ -185,6 +186,7 @@ class UserSummaryPreferenceRepository:
             show_protein=True,
             show_fat=True,
             show_carbs=True,
+            show_fiber=True,
             show_water=True,
             show_post_entry_delta_suffix=True,
             summary_display_mode="text",
@@ -247,6 +249,7 @@ class UserSummaryPreferenceRepository:
             "protein": "show_protein",
             "fat": "show_fat",
             "carbs": "show_carbs",
+            "fiber": "show_fiber",
             "water": "show_water",
         }
         try:
@@ -274,6 +277,7 @@ class UserGoalPreferenceRepository:
             protein_goal=DEFAULT_DAILY_GOALS["protein"],
             fat_goal=DEFAULT_DAILY_GOALS["fat"],
             carbs_goal=DEFAULT_DAILY_GOALS["carbs"],
+            fiber_goal=DEFAULT_DAILY_GOALS["fiber"],
             water_goal=DEFAULT_DAILY_GOALS["water"],
         )
         self._session.add(preference)
@@ -302,6 +306,7 @@ class UserGoalPreferenceRepository:
             "protein": "protein_goal",
             "fat": "fat_goal",
             "carbs": "carbs_goal",
+            "fiber": "fiber_goal",
             "water": "water_goal",
         }
         try:
@@ -337,6 +342,7 @@ class DailyGoalSnapshotRepository:
         protein_goal: int,
         fat_goal: int,
         carbs_goal: int,
+        fiber_goal: int,
         water_goal: int,
     ) -> DailyGoalSnapshot:
         snapshot = DailyGoalSnapshot(
@@ -348,6 +354,7 @@ class DailyGoalSnapshotRepository:
             protein_goal=protein_goal,
             fat_goal=fat_goal,
             carbs_goal=carbs_goal,
+            fiber_goal=fiber_goal,
             water_goal=water_goal,
         )
         self._session.add(snapshot)

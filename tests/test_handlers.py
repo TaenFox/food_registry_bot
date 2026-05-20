@@ -73,6 +73,7 @@ def create_session_factory() -> sessionmaker[Session]:
                 SupportedMetric(code="protein", name="Protein", unit="g"),
                 SupportedMetric(code="fat", name="Fat", unit="g"),
                 SupportedMetric(code="carbs", name="Carbs", unit="g"),
+                SupportedMetric(code="fiber", name="Fiber", unit="g"),
             ]
         )
         session.commit()
@@ -98,10 +99,31 @@ def build_metric_payload(item_ids: list[str], *, confidence: str = "medium") -> 
                     {"code": "protein", "value": 7.6 + index, "confidence": confidence},
                     {"code": "fat", "value": 2.2 + index, "confidence": confidence},
                     {"code": "carbs", "value": 42.8 + index, "confidence": confidence},
+                    {"code": "fiber", "value": 5.1 + index, "confidence": confidence},
                 ],
             }
         )
     return json.dumps({"items": items}, ensure_ascii=False)
+
+
+async def call_handle_today_at(
+    *,
+    fixed_now: datetime,
+    message,
+    session_factory: sessionmaker[Session],
+) -> None:
+    original_datetime = handle_today.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return fixed_now
+
+    handle_today.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_today(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    finally:
+        handle_today.__globals__["datetime"] = original_datetime
 
 
 async def test_start_denies_unallowed_user() -> None:
@@ -448,7 +470,7 @@ async def test_admin_backfill_nutrition_recomputes_incomplete_entries() -> None:
     await backfill_tracker.task
 
     with session_factory() as session:
-        assert session.query(EntryItemMetric).count() == 4
+        assert session.query(EntryItemMetric).count() == 5
 
     assert message.answer.await_count == 1
     assert message.answer.await_args.args == ("Запускаю backfill nutrition. Лимит: 20.",)
@@ -457,7 +479,7 @@ async def test_admin_backfill_nutrition_recomputes_incomplete_entries() -> None:
         "Backfill nutrition завершён.\n"
         "Выбрано entries: 1\n"
         "Обработано entries: 1\n"
-        "Сохранено метрик: 4",
+        "Сохранено метрик: 5",
     )
 
 
@@ -600,7 +622,7 @@ async def test_regular_message_saves_metrics_for_allowed_user() -> None:
 
     assert saved_entry.entry_type == EntryType.FOOD
     assert saved_item.name == "яблоко"
-    assert metric_count == 4
+    assert metric_count == 5
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         "Сохранил:\n- яблоко: 180 г\n\n"
@@ -609,6 +631,7 @@ async def test_regular_message_saves_metrics_for_allowed_user() -> None:
         "Б: 7.6 / 90 г (+7.6 г)\n"
         "Ж: 2.2 / 60 г (+2.2 г)\n"
         "У: 42.8 / 210 г (+42.8 г)\n"
+        "Кл: 5.1 / 25 г (+5.1 г)\n"
         "В: 0.0 / 2000 мл"
         "</pre>",
     )
@@ -698,6 +721,7 @@ async def test_today_returns_daily_nutrition_totals_for_allowed_user() -> None:
                 EntryItemMetric(entry_item_id=included_item.id, metric_id=2, value=24.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=included_item.id, metric_id=3, value=19.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=included_item.id, metric_id=4, value=11.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=included_item.id, metric_id=5, value=6.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=excluded_item.id, metric_id=1, value=120.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=excluded_item.id, metric_id=2, value=4.0, confidence="medium"),
             ]
@@ -709,7 +733,11 @@ async def test_today_returns_daily_nutrition_totals_for_allowed_user() -> None:
         answer=AsyncMock(),
     )
 
-    await handle_today(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    await call_handle_today_at(
+        fixed_now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
@@ -718,6 +746,7 @@ async def test_today_returns_daily_nutrition_totals_for_allowed_user() -> None:
         "Б: 24.0 / 90 г\n"
         "Ж: 19.0 / 60 г\n"
         "У: 11.0 / 210 г\n"
+        "Кл: 6.0 / 25 г\n"
         "В: 0.0 / 2000 мл"
         "</pre>\n"
         "\n"
@@ -748,12 +777,14 @@ async def test_today_returns_empty_enabled_metrics_message_when_calories_hidden(
                 EntryItemMetric(entry_item_id=item.id, metric_id=2, value=24.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=item.id, metric_id=3, value=19.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=item.id, metric_id=4, value=11.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=5, value=6.0, confidence="medium"),
                 UserSummaryPreference(
                     user_id=user.id,
                     show_calories=False,
                     show_protein=False,
                     show_fat=False,
                     show_carbs=False,
+                    show_fiber=False,
                     show_water=False,
                 ),
             ]
@@ -765,7 +796,11 @@ async def test_today_returns_empty_enabled_metrics_message_when_calories_hidden(
         answer=AsyncMock(),
     )
 
-    await handle_today(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    await call_handle_today_at(
+        fixed_now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == ("В summary сейчас нет включённых показателей.",)
@@ -794,12 +829,14 @@ async def test_today_returns_bju_lines_when_calories_disabled_but_bju_enabled() 
                 EntryItemMetric(entry_item_id=item.id, metric_id=2, value=24.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=item.id, metric_id=3, value=19.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=item.id, metric_id=4, value=11.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=5, value=6.0, confidence="medium"),
                 UserSummaryPreference(
                     user_id=user.id,
                     show_calories=False,
                     show_protein=True,
                     show_fat=True,
                     show_carbs=True,
+                    show_fiber=False,
                     show_water=False,
                 ),
             ]
@@ -811,7 +848,11 @@ async def test_today_returns_bju_lines_when_calories_disabled_but_bju_enabled() 
         answer=AsyncMock(),
     )
 
-    await handle_today(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    await call_handle_today_at(
+        fixed_now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
@@ -846,12 +887,14 @@ async def test_today_shows_calorie_goal_progress_when_snapshot_exists() -> None:
                 EntryItemMetric(entry_item_id=item.id, metric_id=2, value=24.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=item.id, metric_id=3, value=19.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=item.id, metric_id=4, value=11.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=5, value=6.0, confidence="medium"),
                 UserSummaryPreference(
                     user_id=user.id,
                     show_calories=True,
                     show_protein=True,
                     show_fat=True,
                     show_carbs=True,
+                    show_fiber=False,
                     show_water=False,
                 ),
                 UserGoalPreference(
@@ -860,6 +903,7 @@ async def test_today_shows_calorie_goal_progress_when_snapshot_exists() -> None:
                     protein_goal=90,
                     fat_goal=60,
                     carbs_goal=210,
+                    fiber_goal=25,
                     water_goal=2000,
                 ),
                 DailyGoalSnapshot(
@@ -871,6 +915,7 @@ async def test_today_shows_calorie_goal_progress_when_snapshot_exists() -> None:
                     protein_goal=90,
                     fat_goal=60,
                     carbs_goal=210,
+                    fiber_goal=25,
                     water_goal=2000,
                 ),
             ]
@@ -882,7 +927,11 @@ async def test_today_shows_calorie_goal_progress_when_snapshot_exists() -> None:
         answer=AsyncMock(),
     )
 
-    await handle_today(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    await call_handle_today_at(
+        fixed_now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
@@ -917,6 +966,7 @@ async def test_today_shows_water_progress_for_water_entries() -> None:
                 show_protein=False,
                 show_fat=False,
                 show_carbs=False,
+                show_fiber=False,
                 show_water=True,
             )
         )
@@ -927,7 +977,11 @@ async def test_today_shows_water_progress_for_water_entries() -> None:
         answer=AsyncMock(),
     )
 
-    await handle_today(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    await call_handle_today_at(
+        fixed_now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == ("<pre>В: 500.0 / 2000 мл</pre>",)
@@ -956,12 +1010,14 @@ async def test_today_does_not_show_calorie_goal_progress_when_calories_hidden() 
                 EntryItemMetric(entry_item_id=item.id, metric_id=2, value=24.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=item.id, metric_id=3, value=19.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=item.id, metric_id=4, value=11.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=5, value=6.0, confidence="medium"),
                 UserSummaryPreference(
                     user_id=user.id,
                     show_calories=False,
                     show_protein=True,
                     show_fat=True,
                     show_carbs=True,
+                    show_fiber=False,
                     show_water=False,
                 ),
                 UserGoalPreference(
@@ -970,6 +1026,7 @@ async def test_today_does_not_show_calorie_goal_progress_when_calories_hidden() 
                     protein_goal=90,
                     fat_goal=60,
                     carbs_goal=210,
+                    fiber_goal=25,
                     water_goal=2000,
                 ),
                 DailyGoalSnapshot(
@@ -981,6 +1038,7 @@ async def test_today_does_not_show_calorie_goal_progress_when_calories_hidden() 
                     protein_goal=90,
                     fat_goal=60,
                     carbs_goal=210,
+                    fiber_goal=25,
                     water_goal=2000,
                 ),
             ]
@@ -992,7 +1050,11 @@ async def test_today_does_not_show_calorie_goal_progress_when_calories_hidden() 
         answer=AsyncMock(),
     )
 
-    await handle_today(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    await call_handle_today_at(
+        fixed_now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
@@ -1021,6 +1083,7 @@ async def test_settings_returns_current_summary_preferences() -> None:
         "- белки: включено\n"
         "- жиры: включено\n"
         "- углеводы: включено\n"
+        "- клетчатка: включено\n"
         "- вода: включено\n"
         "- дельта записи: включено\n"
         "- отображение: текст\n"
@@ -1031,10 +1094,11 @@ async def test_settings_returns_current_summary_preferences() -> None:
     assert reply_markup.inline_keyboard[1][0].text == "Белки: on"
     assert reply_markup.inline_keyboard[2][0].text == "Жиры: on"
     assert reply_markup.inline_keyboard[3][0].text == "Углеводы: on"
-    assert reply_markup.inline_keyboard[4][0].text == "Вода: on"
-    assert reply_markup.inline_keyboard[5][0].text == "Дельта записи: on"
-    assert reply_markup.inline_keyboard[6][0].text == "Отображение: текст"
-    assert reply_markup.inline_keyboard[7][0].text == "Начало дня: 04:00"
+    assert reply_markup.inline_keyboard[4][0].text == "Клетчатка: on"
+    assert reply_markup.inline_keyboard[5][0].text == "Вода: on"
+    assert reply_markup.inline_keyboard[6][0].text == "Дельта записи: on"
+    assert reply_markup.inline_keyboard[7][0].text == "Отображение: текст"
+    assert reply_markup.inline_keyboard[8][0].text == "Начало дня: 04:00"
 
 
 async def test_toggle_summary_metric_updates_preference_and_message() -> None:
@@ -1051,6 +1115,7 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
                 show_protein=True,
                 show_fat=True,
                 show_carbs=True,
+                show_fiber=True,
                 show_water=True,
                 show_post_entry_delta_suffix=True,
             )
@@ -1082,6 +1147,7 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
         "- белки: выключено\n"
         "- жиры: включено\n"
         "- углеводы: включено\n"
+        "- клетчатка: включено\n"
         "- вода: включено\n"
         "- дельта записи: включено\n"
         "- отображение: текст\n"
@@ -1107,6 +1173,7 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
                 show_protein=True,
                 show_fat=True,
                 show_carbs=True,
+                show_fiber=True,
                 show_water=True,
                 show_post_entry_delta_suffix=True,
                 nutrition_day_start_hour=4,
@@ -1137,13 +1204,14 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
         "- белки: включено\n"
         "- жиры: включено\n"
         "- углеводы: включено\n"
+        "- клетчатка: включено\n"
         "- вода: включено\n"
         "- дельта записи: включено\n"
         "- отображение: текст\n"
         "- начало дня: 06:00",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[7][0].text == "Начало дня: 06:00"
+    assert reply_markup.inline_keyboard[8][0].text == "Начало дня: 06:00"
 
 
 async def test_cycle_summary_display_mode_updates_preference_and_message() -> None:
@@ -1160,6 +1228,7 @@ async def test_cycle_summary_display_mode_updates_preference_and_message() -> No
                 show_protein=True,
                 show_fat=True,
                 show_carbs=True,
+                show_fiber=True,
                 show_water=True,
                 show_post_entry_delta_suffix=True,
                 summary_display_mode="text",
@@ -1191,13 +1260,14 @@ async def test_cycle_summary_display_mode_updates_preference_and_message() -> No
         "- белки: включено\n"
         "- жиры: включено\n"
         "- углеводы: включено\n"
+        "- клетчатка: включено\n"
         "- вода: включено\n"
         "- дельта записи: включено\n"
         "- отображение: бары\n"
         "- начало дня: 04:00",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[6][0].text == "Отображение: бары"
+    assert reply_markup.inline_keyboard[7][0].text == "Отображение: бары"
 
 
 async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -> None:
@@ -1214,6 +1284,7 @@ async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -
                 show_protein=True,
                 show_fat=True,
                 show_carbs=True,
+                show_fiber=True,
                 show_water=True,
                 show_post_entry_delta_suffix=True,
             )
@@ -1243,13 +1314,14 @@ async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -
         "- белки: включено\n"
         "- жиры: включено\n"
         "- углеводы: включено\n"
+        "- клетчатка: включено\n"
         "- вода: включено\n"
         "- дельта записи: выключено\n"
         "- отображение: текст\n"
         "- начало дня: 04:00",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[5][0].text == "Дельта записи: off"
+    assert reply_markup.inline_keyboard[6][0].text == "Дельта записи: off"
     callback.answer.assert_awaited_once_with("Настройка обновлена.")
 
 
@@ -1282,16 +1354,19 @@ async def test_today_uses_preference_nutrition_day_start_hour() -> None:
                 EntryItemMetric(entry_item_id=early_item.id, metric_id=2, value=10.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=early_item.id, metric_id=3, value=5.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=early_item.id, metric_id=4, value=12.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=early_item.id, metric_id=5, value=3.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=later_item.id, metric_id=1, value=300.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=later_item.id, metric_id=2, value=20.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=later_item.id, metric_id=3, value=8.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=later_item.id, metric_id=4, value=25.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=later_item.id, metric_id=5, value=7.0, confidence="medium"),
                 UserSummaryPreference(
                     user_id=user.id,
                     show_calories=True,
                     show_protein=False,
                     show_fat=False,
                     show_carbs=False,
+                    show_fiber=False,
                     show_water=False,
                     nutrition_day_start_hour=6,
                 ),
@@ -1344,12 +1419,14 @@ async def test_today_shows_calorie_progress_bar_in_bars_mode() -> None:
                 EntryItemMetric(entry_item_id=item.id, metric_id=2, value=24.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=item.id, metric_id=3, value=19.0, confidence="medium"),
                 EntryItemMetric(entry_item_id=item.id, metric_id=4, value=11.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=5, value=6.0, confidence="medium"),
                 UserSummaryPreference(
                     user_id=user.id,
                     show_calories=True,
                     show_protein=True,
                     show_fat=True,
                     show_carbs=True,
+                    show_fiber=False,
                     show_water=False,
                     summary_display_mode="bars",
                 ),
@@ -1359,6 +1436,7 @@ async def test_today_shows_calorie_progress_bar_in_bars_mode() -> None:
                     protein_goal=90,
                     fat_goal=60,
                     carbs_goal=210,
+                    fiber_goal=25,
                     water_goal=2000,
                 ),
                 DailyGoalSnapshot(
@@ -1370,6 +1448,7 @@ async def test_today_shows_calorie_progress_bar_in_bars_mode() -> None:
                     protein_goal=90,
                     fat_goal=60,
                     carbs_goal=210,
+                    fiber_goal=25,
                     water_goal=2000,
                 ),
             ]
@@ -1381,15 +1460,19 @@ async def test_today_shows_calorie_progress_bar_in_bars_mode() -> None:
         answer=AsyncMock(),
     )
 
-    await handle_today(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    await call_handle_today_at(
+        fixed_now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         "<pre>"
-        "К [█░░░░░░░░░] 17.8% 320.0/1800 ккал\n"
-        "Б [██░░░░░░░░] 26.7% 24.0/90 г\n"
-        "Ж [███░░░░░░░] 31.7% 19.0/60 г\n"
-        "У [░░░░░░░░░░] 5.2% 11.0/210 г"
+        "Ккал   [█░░░░░░░░░] 17.8% 320.0/1800 ккал\n"
+        "Б      [██░░░░░░░░] 26.7% 24.0/90 г\n"
+        "Ж      [███░░░░░░░] 31.7% 19.0/60 г\n"
+        "У      [░░░░░░░░░░] 5.2% 11.0/210 г"
         "</pre>",
     )
 
@@ -1416,6 +1499,7 @@ async def test_today_shows_water_bar_in_bars_mode() -> None:
                 show_protein=False,
                 show_fat=False,
                 show_carbs=False,
+                show_fiber=False,
                 show_water=True,
                 summary_display_mode="bars",
             )
@@ -1427,10 +1511,14 @@ async def test_today_shows_water_bar_in_bars_mode() -> None:
         answer=AsyncMock(),
     )
 
-    await handle_today(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    await call_handle_today_at(
+        fixed_now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
 
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("<pre>В [██░░░░░░░░] 25.0% 500.0/2000 мл</pre>",)
+    assert message.answer.await_args.args == ("<pre>В      [██░░░░░░░░] 25.0% 500.0/2000 мл</pre>",)
 
 
 async def test_goal_returns_default_goals_when_preference_is_not_created() -> None:
@@ -1462,6 +1550,7 @@ async def test_goal_returns_default_goals_when_preference_is_not_created() -> No
         "- белки: 90 г\n"
         "- жиры: 60 г\n"
         "- углеводы: 210 г\n"
+        "- клетчатка: 25 г\n"
         "- вода: 2000 мл\n"
         "\n"
         "Настройка:\n"
@@ -1469,6 +1558,7 @@ async def test_goal_returns_default_goals_when_preference_is_not_created() -> No
         "- <code>/goal protein 90</code>\n"
         "- <code>/goal fat 60</code>\n"
         "- <code>/goal carbs 210</code>\n"
+        "- <code>/goal fiber 25</code>\n"
         "- <code>/goal water 2000</code>\n"
         "\n"
         "Пищевой день 2026-05-19:\n"
@@ -1476,6 +1566,7 @@ async def test_goal_returns_default_goals_when_preference_is_not_created() -> No
         "- белки: 90 г\n"
         "- жиры: 60 г\n"
         "- углеводы: 210 г\n"
+        "- клетчатка: 25 г\n"
         "- вода: 2000 мл\n"
         "Часовой пояс дня: Europe/Moscow.\n"
         "Начало пищевого дня: 04:00.",
@@ -1510,10 +1601,12 @@ async def test_goal_sets_preference_and_creates_snapshot_for_current_nutrition_d
 
     assert saved_goal.calorie_goal == 1800
     assert saved_goal.protein_goal == 90
+    assert saved_goal.fiber_goal == 25
     assert saved_goal.water_goal == 2000
     assert saved_snapshot.summary_date.isoformat() == "2026-05-19"
     assert saved_snapshot.calorie_goal == 1800
     assert saved_snapshot.protein_goal == 90
+    assert saved_snapshot.fiber_goal == 25
     assert saved_snapshot.water_goal == 2000
     assert saved_snapshot.timezone == "Europe/Moscow"
     assert saved_snapshot.nutrition_day_start_hour == 4
@@ -1524,6 +1617,7 @@ async def test_goal_sets_preference_and_creates_snapshot_for_current_nutrition_d
         "- белки: 90 г\n"
         "- жиры: 60 г\n"
         "- углеводы: 210 г\n"
+        "- клетчатка: 25 г\n"
         "- вода: 2000 мл\n"
         "\n"
         "Настройка:\n"
@@ -1531,6 +1625,7 @@ async def test_goal_sets_preference_and_creates_snapshot_for_current_nutrition_d
         "- <code>/goal protein 90</code>\n"
         "- <code>/goal fat 60</code>\n"
         "- <code>/goal carbs 210</code>\n"
+        "- <code>/goal fiber 25</code>\n"
         "- <code>/goal water 2000</code>\n"
         "\n"
         "Пищевой день 2026-05-19:\n"
@@ -1538,6 +1633,7 @@ async def test_goal_sets_preference_and_creates_snapshot_for_current_nutrition_d
         "- белки: 90 г\n"
         "- жиры: 60 г\n"
         "- углеводы: 210 г\n"
+        "- клетчатка: 25 г\n"
         "- вода: 2000 мл\n"
         "Часовой пояс дня: Europe/Moscow.\n"
         "Начало пищевого дня: 04:00.",
@@ -1590,6 +1686,7 @@ async def test_goal_hint_respects_enabled_summary_metrics() -> None:
                 show_protein=True,
                 show_fat=False,
                 show_carbs=True,
+                show_fiber=False,
                 show_water=False,
             )
         )
@@ -1646,6 +1743,7 @@ async def test_water_button_creates_water_entry_for_allowed_user() -> None:
         "Б: 0.0 / 90 г\n"
         "Ж: 0.0 / 60 г\n"
         "У: 0.0 / 210 г\n"
+        "Кл: 0.0 / 25 г\n"
         "В: 250.0 / 2000 мл (+250.0 мл)"
         "</pre>",
     )
@@ -1665,6 +1763,7 @@ async def test_water_button_shows_delta_bar_report_in_bars_mode() -> None:
                 show_protein=False,
                 show_fat=False,
                 show_carbs=False,
+                show_fiber=False,
                 show_water=True,
                 summary_display_mode="bars",
             )
@@ -1689,7 +1788,7 @@ async def test_water_button_shows_delta_bar_report_in_bars_mode() -> None:
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сохранил:\n- вода: 250 мл\n\n<pre>В [██▓░░░░░░░] 37.5% 750.0/2000 мл (+250.0 мл)</pre>",
+        "Сохранил:\n- вода: 250 мл\n\n<pre>В      [██▓░░░░░░░] 37.5% 750.0/2000 мл (+250.0 мл)</pre>",
     )
 
 
@@ -1725,6 +1824,7 @@ async def test_confirmation_hides_delta_suffix_when_setting_is_disabled() -> Non
                 show_protein=True,
                 show_fat=True,
                 show_carbs=True,
+                show_fiber=True,
                 show_water=True,
                 show_post_entry_delta_suffix=False,
             )
@@ -1753,6 +1853,7 @@ async def test_confirmation_hides_delta_suffix_when_setting_is_disabled() -> Non
         "Б: 7.6 / 90 г\n"
         "Ж: 2.2 / 60 г\n"
         "У: 42.8 / 210 г\n"
+        "Кл: 5.1 / 25 г\n"
         "В: 0.0 / 2000 мл"
         "</pre>",
     )
@@ -1809,7 +1910,7 @@ async def test_photo_message_creates_entries_and_food_metrics_for_allowed_user()
         ("омлет", "extraction_payload"),
         ("тост", "extraction_payload"),
     ]
-    assert metric_count == 8
+    assert metric_count == 10
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         "Сохранил:\n- омлет\n- тост\n\n"
@@ -1818,6 +1919,7 @@ async def test_photo_message_creates_entries_and_food_metrics_for_allowed_user()
         "Б: 16.2 / 90 г (+16.2 г)\n"
         "Ж: 5.4 / 60 г (+5.4 г)\n"
         "У: 86.6 / 210 г (+86.6 г)\n"
+        "Кл: 11.2 / 25 г (+11.2 г)\n"
         "В: 0.0 / 2000 мл"
         "</pre>",
     )

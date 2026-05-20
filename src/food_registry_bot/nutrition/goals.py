@@ -41,5 +41,6 @@ class DailyNutritionGoalSnapshotUseCase:
             protein_goal=preference.protein_goal,
             fat_goal=preference.fat_goal,
             carbs_goal=preference.carbs_goal,
+            fiber_goal=preference.fiber_goal,
             water_goal=preference.water_goal,
         )

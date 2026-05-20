@@ -66,6 +66,7 @@ SUMMARY_METRIC_LINES = (
     ("protein", "Б", "г"),
     ("fat", "Ж", "г"),
     ("carbs", "У", "г"),
+    ("fiber", "Кл", "г"),
     ("water", "В", "мл"),
 )
 GOAL_METRIC_LABELS = {
@@ -73,12 +74,17 @@ GOAL_METRIC_LABELS = {
     "protein": "белки",
     "fat": "жиры",
     "carbs": "углеводы",
+    "fiber": "клетчатка",
     "water": "вода",
 }
 SUMMARY_DISPLAY_MODE_LABELS = {
     "text": "текст",
     "bars": "бары",
 }
+BAR_MODE_LABELS = {
+    "К": "Ккал",
+}
+BAR_MODE_LABEL_WIDTH = 6
 
 
 class FoodWriteFlowError(RuntimeError):
@@ -536,6 +542,7 @@ def build_summary_settings_response(
     show_protein: bool,
     show_fat: bool,
     show_carbs: bool,
+    show_fiber: bool,
     show_water: bool,
     show_post_entry_delta_suffix: bool,
     summary_display_mode: str,
@@ -552,6 +559,7 @@ def build_summary_settings_response(
             f"- белки: {statuses[show_protein]}",
             f"- жиры: {statuses[show_fat]}",
             f"- углеводы: {statuses[show_carbs]}",
+            f"- клетчатка: {statuses[show_fiber]}",
             f"- вода: {statuses[show_water]}",
             f"- дельта записи: {statuses[show_post_entry_delta_suffix]}",
             f"- отображение: {SUMMARY_DISPLAY_MODE_LABELS[summary_display_mode]}",
@@ -574,7 +582,8 @@ def build_metric_progress_bar_line(
     overflow_cells = max(int((consumed - goal) / goal * 10), 0) if consumed > goal else 0
     overflow_bar = "█" * overflow_cells
     percentage = round(progress_ratio * 100, 1)
-    return f"{short_label} {base_bar}{overflow_bar} {percentage}% {round(consumed, 1)}/{goal} {unit}"
+    rendered_label = BAR_MODE_LABELS.get(short_label, short_label).ljust(BAR_MODE_LABEL_WIDTH)
+    return f"{rendered_label} {base_bar}{overflow_bar} {percentage}% {round(consumed, 1)}/{goal} {unit}"
 
 
 def build_metric_progress_delta_bar_line(
@@ -609,8 +618,9 @@ def build_metric_progress_delta_bar_line(
     added_overflow_cells = max(after_overflow_cells - before_overflow_cells, 0)
     overflow_bar = ("█" * before_overflow_cells) + ("▓" * added_overflow_cells)
     percentage = round(after_ratio * 100, 1)
+    rendered_label = BAR_MODE_LABELS.get(short_label, short_label).ljust(BAR_MODE_LABEL_WIDTH)
     line = (
-        f"{short_label} {base_bar}{overflow_bar} {percentage}% "
+        f"{rendered_label} {base_bar}{overflow_bar} {percentage}% "
         f"{round(consumed, 1)}/{goal} {unit}"
     )
     if show_delta_suffix:
@@ -727,12 +737,14 @@ def build_goal_response(
         f"- белки: {goal_preference.protein_goal} г",
         f"- жиры: {goal_preference.fat_goal} г",
         f"- углеводы: {goal_preference.carbs_goal} г",
+        f"- клетчатка: {goal_preference.fiber_goal} г",
         f"- вода: {goal_preference.water_goal} мл",
         f"Пищевой день {summary_date.isoformat()}:",
         f"- калории: {goal_snapshot.calorie_goal} ккал",
         f"- белки: {goal_snapshot.protein_goal} г",
         f"- жиры: {goal_snapshot.fat_goal} г",
         f"- углеводы: {goal_snapshot.carbs_goal} г",
+        f"- клетчатка: {goal_snapshot.fiber_goal} г",
         f"- вода: {goal_snapshot.water_goal} мл",
         f"Часовой пояс дня: {timezone_name}.",
         f"Начало пищевого дня: {nutrition_day_start_hour:02d}:00.",
@@ -745,17 +757,21 @@ def build_goal_response(
         if metric_code == "water":
             goal_command_lines.append(f"- <code>/goal water {goal_preference.water_goal}</code>")
             continue
+        if metric_code == "fiber":
+            goal_command_lines.append(f"- <code>/goal fiber {goal_preference.fiber_goal}</code>")
+            continue
         goal_value = getattr(goal_preference, f"{metric_code}_goal")
         goal_command_lines.append(f"- <code>/goal {metric_code} {goal_value}</code>")
 
     if goal_command_lines:
-        lines[6:6] = ["", "Настройка:", *goal_command_lines, ""]
+        lines[7:7] = ["", "Настройка:", *goal_command_lines, ""]
 
     if (
         goal_snapshot.calorie_goal != goal_preference.calorie_goal
         or goal_snapshot.protein_goal != goal_preference.protein_goal
         or goal_snapshot.fat_goal != goal_preference.fat_goal
         or goal_snapshot.carbs_goal != goal_preference.carbs_goal
+        or goal_snapshot.fiber_goal != goal_preference.fiber_goal
         or goal_snapshot.water_goal != goal_preference.water_goal
     ):
         lines.extend(
@@ -1003,6 +1019,7 @@ async def handle_settings(
             show_protein=preference.show_protein,
             show_fat=preference.show_fat,
             show_carbs=preference.show_carbs,
+            show_fiber=preference.show_fiber,
             show_water=preference.show_water,
             show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
             summary_display_mode=preference.summary_display_mode,
@@ -1013,6 +1030,7 @@ async def handle_settings(
             show_protein=preference.show_protein,
             show_fat=preference.show_fat,
             show_carbs=preference.show_carbs,
+            show_fiber=preference.show_fiber,
             show_water=preference.show_water,
             show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
             summary_display_mode=preference.summary_display_mode,
@@ -1075,6 +1093,7 @@ async def handle_toggle_summary_metric(
                 show_protein=preference.show_protein,
                 show_fat=preference.show_fat,
                 show_carbs=preference.show_carbs,
+                show_fiber=preference.show_fiber,
                 show_water=preference.show_water,
                 show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
                 summary_display_mode=preference.summary_display_mode,
@@ -1085,6 +1104,7 @@ async def handle_toggle_summary_metric(
                 show_protein=preference.show_protein,
                 show_fat=preference.show_fat,
                 show_carbs=preference.show_carbs,
+                show_fiber=preference.show_fiber,
                 show_water=preference.show_water,
                 show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
                 summary_display_mode=preference.summary_display_mode,
@@ -1150,7 +1170,7 @@ async def handle_goal(
     parsed_goal = parse_goal_command_args(command)
     if command.args is not None and command.args.strip() and parsed_goal is None:
         await message.answer(
-            "Использование: <code>/goal 1800</code>, <code>/goal protein 90</code> или <code>/goal water 2000</code>"
+            "Использование: <code>/goal 1800</code>, <code>/goal protein 90</code>, <code>/goal fiber 25</code> или <code>/goal water 2000</code>"
         )
         return
 
