@@ -6,6 +6,7 @@ import logging
 import html
 from io import BytesIO
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 from aiogram import Router
 from aiogram import F
@@ -17,6 +18,9 @@ from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.keyboards import (
     WATER_250_ML_BUTTON_TEXT,
     build_main_keyboard,
+    build_recent_entries_delete_keyboard,
+    build_recent_entry_confirmation_keyboard,
+    build_recent_entry_selection_keyboard,
     build_summary_settings_keyboard,
 )
 from food_registry_bot.bot.message_routing import (
@@ -25,7 +29,7 @@ from food_registry_bot.bot.message_routing import (
     MessageRoutingService,
     RuleBasedMessageRoutingService,
 )
-from food_registry_bot.bot.payloads import SummarySettingsCallback
+from food_registry_bot.bot.payloads import RecentEntryDeleteCallback, SummarySettingsCallback
 from food_registry_bot.conversation import (
     ConversationService,
     DisabledConversationService,
@@ -457,21 +461,61 @@ def build_write_confirmation_response(
     return "\n\n".join(parts)
 
 
-def build_recent_entries_response(entries: list) -> str:
+def format_entry_timestamp(entry, timezone_name: str) -> str:
+    occurred_at = entry.occurred_at
+    if occurred_at.tzinfo is None:
+        occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+    return occurred_at.astimezone(ZoneInfo(timezone_name)).strftime("%H:%M")
+
+
+def build_recent_entry_title(entry) -> str:
+    item_texts = [
+        format_saved_item_line(item.name, item.quantity, item.unit).removeprefix("- ")
+        for item in sorted(entry.items, key=lambda current: current.position)
+    ]
+    if item_texts:
+        return ", ".join(item_texts)
+    return "запись без позиций"
+
+
+def truncate_button_label(value: str, *, max_length: int = 28) -> str:
+    if len(value) <= max_length:
+        return value
+    return value[: max_length - 1].rstrip() + "…"
+
+
+def build_recent_entry_button_label(entry, timezone_name: str) -> str:
+    return truncate_button_label(
+        f"{format_entry_timestamp(entry, timezone_name)} · {build_recent_entry_title(entry)}"
+    )
+
+
+def build_recent_entry_display_line(*, index: int, entry, timezone_name: str) -> str:
+    return f"{index}. {format_entry_timestamp(entry, timezone_name)} — {build_recent_entry_title(entry)}"
+
+
+def build_recent_entries_response(entries: list, *, timezone_name: str, selection_mode: bool = False) -> str:
     if not entries:
         return "Пока нет сохранённых записей."
 
     lines = ["Последние записи:"]
-    for entry in entries:
-        item_texts = [
-            format_saved_item_line(item.name, item.quantity, item.unit).removeprefix("- ")
-            for item in sorted(entry.items, key=lambda current: current.position)
-        ]
-        if item_texts:
-            lines.append("- " + ", ".join(item_texts))
-        else:
-            lines.append("- запись без позиций")
+    for index, entry in enumerate(entries, start=1):
+        lines.append(build_recent_entry_display_line(index=index, entry=entry, timezone_name=timezone_name))
+    if selection_mode:
+        lines.extend(["", "Выбери запись для удаления."])
     return "\n".join(lines)
+
+
+def build_recent_entry_delete_confirmation(*, entry, timezone_name: str) -> str:
+    return "\n".join(
+        [
+            "Удалить запись целиком?",
+            "",
+            f"{format_entry_timestamp(entry, timezone_name)} — {build_recent_entry_title(entry)}",
+            "",
+            "Это действие необратимо.",
+        ]
+    )
 
 
 def build_today_summary_response(summary: DailyNutritionSummary) -> str:
@@ -763,6 +807,18 @@ def build_daily_report_for_summary_date(
         metric_deltas=metric_deltas,
         show_post_entry_delta_suffix=summary_preference.show_post_entry_delta_suffix,
     )
+
+
+def resolve_recent_entry_for_callback(
+    *,
+    entry_repository: EntryRepository,
+    user_id: int,
+    entry_id: int,
+    limit: int = 5,
+):
+    recent_entries = entry_repository.list_recent_for_user(user_id=user_id, limit=limit)
+    recent_entry_by_id = {entry.id: entry for entry in recent_entries}
+    return recent_entries, recent_entry_by_id.get(entry_id)
 
 
 def build_goal_response(
@@ -1069,9 +1125,116 @@ async def handle_recent(
 
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
+        user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
+        if user is None:
+            raise RuntimeError("User profile was not found after registration")
         entries = EntryRepository(session).list_recent_for_user(user_id=user_id, limit=5)
 
-    await message.answer(build_recent_entries_response(entries), reply_markup=build_main_keyboard())
+    reply_markup = build_recent_entries_delete_keyboard() if entries else build_main_keyboard()
+    await message.answer(
+        build_recent_entries_response(entries, timezone_name=user.timezone),
+        reply_markup=reply_markup,
+    )
+
+
+@router.callback_query(RecentEntryDeleteCallback.filter())
+async def handle_recent_delete_callback(
+    callback: CallbackQuery,
+    callback_data: RecentEntryDeleteCallback,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = callback.from_user
+    if telegram_user is None:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+    if callback.message is None:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+
+    with session_scope(session_factory) as session:
+        if not (
+            is_admin_user(telegram_user.id, admin_user_ids)
+            or UserAccessRepository(session).is_allowed(telegram_user.id)
+        ):
+            await callback.answer("Доступ к боту не разрешён.", show_alert=True)
+            return
+
+        user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
+        if user is None:
+            user, _created = UserRepository(session).get_or_create(
+                telegram_user_id=telegram_user.id,
+                username=telegram_user.username,
+            )
+        entry_repository = EntryRepository(session)
+        recent_entries = entry_repository.list_recent_for_user(user_id=user.id, limit=5)
+
+        if callback_data.action == "close":
+            await callback.message.edit_text(
+                build_recent_entries_response(recent_entries, timezone_name=user.timezone),
+                reply_markup=(
+                    build_recent_entries_delete_keyboard()
+                    if recent_entries
+                    else None
+                ),
+            )
+            await callback.answer()
+            return
+
+        if callback_data.action == "open":
+            await callback.message.edit_text(
+                build_recent_entries_response(
+                    recent_entries,
+                    timezone_name=user.timezone,
+                    selection_mode=True,
+                ),
+                reply_markup=(
+                    build_recent_entry_selection_keyboard(
+                        entry_buttons=[
+                            (build_recent_entry_button_label(entry, user.timezone), entry.id)
+                            for entry in recent_entries
+                        ]
+                    )
+                    if recent_entries
+                    else None
+                ),
+            )
+            await callback.answer()
+            return
+
+        recent_entries, selected_entry = resolve_recent_entry_for_callback(
+            entry_repository=entry_repository,
+            user_id=user.id,
+            entry_id=callback_data.entry_id,
+        )
+        if selected_entry is None:
+            await callback.answer("Запись уже удалена или недоступна.", show_alert=True)
+            return
+
+        if callback_data.action == "select":
+            await callback.message.edit_text(
+                build_recent_entry_delete_confirmation(entry=selected_entry, timezone_name=user.timezone),
+                reply_markup=build_recent_entry_confirmation_keyboard(entry_id=selected_entry.id),
+            )
+            await callback.answer()
+            return
+
+        if callback_data.action != "confirm":
+            await callback.answer("Неизвестное действие.", show_alert=True)
+            return
+
+        entry_repository.delete(selected_entry)
+        updated_recent_entries = entry_repository.list_recent_for_user(user_id=user.id, limit=5)
+
+    await callback.message.edit_text(
+        build_recent_entries_response(updated_recent_entries, timezone_name=user.timezone),
+        reply_markup=(
+            build_recent_entries_delete_keyboard()
+            if updated_recent_entries
+            else None
+        ),
+    )
+    await callback.answer("Запись удалена.")
 
 
 @router.message(Command("settings"))

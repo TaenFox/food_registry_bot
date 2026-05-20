@@ -442,6 +442,18 @@ class EntryRepository:
         )
         return list(self._session.scalars(statement))
 
+    def get_by_id_for_user(self, *, entry_id: int, user_id: int) -> Optional[Entry]:
+        statement = (
+            select(Entry)
+            .where(Entry.id == entry_id, Entry.user_id == user_id)
+            .options(selectinload(Entry.items))
+        )
+        return self._session.scalar(statement)
+
+    def delete(self, entry: Entry) -> None:
+        self._session.delete(entry)
+        self._session.flush()
+
     def list_food_for_user_between(
         self,
         *,

@@ -1,6 +1,6 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
-from food_registry_bot.bot.payloads import SummarySettingsCallback
+from food_registry_bot.bot.payloads import RecentEntryDeleteCallback, SummarySettingsCallback
 
 WATER_250_ML_BUTTON_TEXT = "Вода 250 мл"
 SUMMARY_DISPLAY_MODE_BUTTON_LABELS = {
@@ -86,6 +86,60 @@ def build_summary_settings_keyboard(
                     text=f"Начало дня: {nutrition_day_start_hour:02d}:00",
                     callback_data=SummarySettingsCallback(action="cycle_nutrition_day_start_hour").pack(),
                 )
+            ]
+        ]
+    )
+
+
+def build_recent_entries_delete_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Выбрать для удаления",
+                    callback_data=RecentEntryDeleteCallback(action="open").pack(),
+                )
+            ]
+        ]
+    )
+
+
+def build_recent_entry_selection_keyboard(
+    *,
+    entry_buttons: list[tuple[str, int]],
+) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=button_text,
+                callback_data=RecentEntryDeleteCallback(action="select", entry_id=entry_id).pack(),
+            )
+        ]
+        for button_text, entry_id in entry_buttons
+    ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Отмена",
+                callback_data=RecentEntryDeleteCallback(action="close").pack(),
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_recent_entry_confirmation_keyboard(*, entry_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Подтвердить",
+                    callback_data=RecentEntryDeleteCallback(action="confirm", entry_id=entry_id).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="Отмена",
+                    callback_data=RecentEntryDeleteCallback(action="open").pack(),
+                ),
             ]
         ]
     )

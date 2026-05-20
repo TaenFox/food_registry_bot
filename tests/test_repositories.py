@@ -459,6 +459,28 @@ def test_entry_repository_lists_recent_entries_in_descending_order() -> None:
     assert [entry.id for entry in recent_entries] == [newer_entry.id, older_entry.id]
 
 
+def test_entry_repository_deletes_entry_with_items() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=406, username="delete_user")
+    repository = EntryRepository(session)
+
+    entry = repository.create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        source_text="яблоко",
+        items=[EntryItemCreate(name="яблоко")],
+    )
+
+    saved_entry = repository.get_by_id_for_user(entry_id=entry.id, user_id=user.id)
+    assert saved_entry is not None
+
+    repository.delete(saved_entry)
+
+    assert repository.get_by_id_for_user(entry_id=entry.id, user_id=user.id) is None
+    assert session.query(EntryItem).count() == 0
+
+
 def test_entry_repository_lists_incomplete_food_entry_ids() -> None:
     session = create_test_session()
     user = UserRepository(session).create(telegram_user_id=405, username="incomplete")
