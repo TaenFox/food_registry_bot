@@ -17,5 +17,29 @@ services:
       timeout: 5s
       retries: 10
 
+  bot:
+    build:
+      context: .
+    container_name: food_registry_bot
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: ${APP_ENV:-docker}
+      BOT_TOKEN: ${BOT_TOKEN:?BOT_TOKEN is required}
+      ADMIN_USER_IDS: ${ADMIN_USER_IDS:?ADMIN_USER_IDS is required}
+      EXTRACTION_PROVIDER: ${EXTRACTION_PROVIDER:-llm}
+      NUTRITION_PROVIDER: ${NUTRITION_PROVIDER:-llm}
+      LLM_MODEL: ${LLM_MODEL:-gpt-5-mini}
+      NUTRITION_MODEL: ${NUTRITION_MODEL:-gpt-5-mini}
+      CONVERSATION_MODEL: ${CONVERSATION_MODEL:-gpt-5-mini}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-food_registry}
+      POSTGRES_USER: ${POSTGRES_USER:-food_registry}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-food_registry}
+
 volumes:
   postgres_data:

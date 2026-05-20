@@ -222,6 +222,61 @@ LLM в проекте не сводится только к классифика
 - основная база данных: PostgreSQL;
 - развитие схемы БД должно идти через понятные инкрементальные миграции.
 
+## Запуск на сервере через Docker
+
+Для первого релиза проект можно поднимать на сервере через `docker compose`.
+
+Что нужно подготовить:
+
+- `BOT_TOKEN` - токен Telegram-бота;
+- `ADMIN_USER_IDS` - список Telegram user id админов через запятую;
+- `OPENAI_API_KEY` - ключ для extraction, nutrition estimation и conversational режима.
+
+Минимальный `.env` рядом с `docker-compose.yml`:
+
+```env
+APP_ENV=docker
+BOT_TOKEN=
+ADMIN_USER_IDS=
+OPENAI_API_KEY=
+
+POSTGRES_DB=food_registry
+POSTGRES_USER=food_registry
+POSTGRES_PASSWORD=food_registry
+
+EXTRACTION_PROVIDER=llm
+NUTRITION_PROVIDER=llm
+LLM_MODEL=gpt-5-mini
+NUTRITION_MODEL=gpt-5-mini
+CONVERSATION_MODEL=gpt-5-mini
+```
+
+Запуск:
+
+```bash
+docker compose up --build -d
+```
+
+Что делает этот запуск:
+
+- поднимает PostgreSQL;
+- собирает контейнер бота;
+- ждёт готовности базы;
+- выполняет `alembic upgrade head`;
+- запускает polling-процесс бота.
+
+Для просмотра логов:
+
+```bash
+docker compose logs -f bot
+```
+
+Для остановки:
+
+```bash
+docker compose down
+```
+
 ## Локальная конфигурация
 
 Секреты для локальной разработки не хранятся в репозитории и не добавляются в `.venv`.
