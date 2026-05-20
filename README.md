@@ -232,7 +232,17 @@ LLM в проекте не сводится только к классифика
 - `ADMIN_USER_IDS` - список Telegram user id админов через запятую;
 - `OPENAI_API_KEY` - ключ для extraction, nutrition estimation и conversational режима.
 
-Минимальный `.env` рядом с `docker-compose.yml`:
+Проект не требует создавать `.env` в корне репозитория. Для Docker используется тот же sibling-файл, что и для локальной разработки:
+
+`../food_registry_bot_local/.env`
+
+Если файла ещё нет, создай его так:
+
+```bash
+./scripts/init-dev-secrets.sh
+```
+
+Минимальное содержимое `../food_registry_bot_local/.env` для сервера:
 
 ```env
 APP_ENV=docker
@@ -251,14 +261,31 @@ NUTRITION_MODEL=gpt-5-mini
 CONVERSATION_MODEL=gpt-5-mini
 ```
 
+Для удобства есть wrapper-скрипт, который сам подставляет этот env-файл в `docker compose`.
+
+Для релизного деплоя есть отдельный скрипт:
+
+```bash
+./scripts/release.sh
+```
+
+Он:
+
+- проверяет наличие `../food_registry_bot_local/.env`;
+- проверяет обязательные переменные `BOT_TOKEN`, `ADMIN_USER_IDS`, `OPENAI_API_KEY`;
+- валидирует `docker compose` конфиг;
+- выполняет `up --build -d`;
+- показывает `ps` и последние логи бота.
+
 Запуск:
 
 ```bash
-docker compose up --build -d
+./scripts/docker-compose.sh up --build -d
 ```
 
 Что делает этот запуск:
 
+- читает переменные из `../food_registry_bot_local/.env`;
 - поднимает PostgreSQL;
 - собирает контейнер бота;
 - ждёт готовности базы;
@@ -268,14 +295,35 @@ docker compose up --build -d
 Для просмотра логов:
 
 ```bash
-docker compose logs -f bot
+./scripts/docker-compose.sh logs -f bot
+```
+
+Для проверки состояния контейнеров:
+
+```bash
+./scripts/docker-compose.sh ps
 ```
 
 Для остановки:
 
 ```bash
-docker compose down
+./scripts/docker-compose.sh down
 ```
+
+Быстрая проверка после запуска:
+
+1. `./scripts/docker-compose.sh ps` показывает `postgres` и `bot` в состоянии `running`.
+2. В `./scripts/docker-compose.sh logs -f bot` нет ошибок `BOT_TOKEN is not configured`, `OPENAI_API_KEY is required` или ошибок миграций.
+3. Бот отвечает на `/start` и `/today`.
+
+Если нужно обновить приложение на сервере:
+
+```bash
+git pull
+./scripts/release.sh
+```
+
+На этом шаге отдельный reverse proxy, отдельный worker-процесс и внешняя система мониторинга не требуются.
 
 ## Локальная конфигурация
 
