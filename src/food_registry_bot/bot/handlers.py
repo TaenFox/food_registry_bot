@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import logging
 import html
 from io import BytesIO
@@ -842,6 +843,37 @@ async def build_extraction_request(message: Message) -> JournalExtractionRequest
     return None
 
 
+async def send_typing_action(message: Message) -> None:
+    bot = getattr(message, "bot", None)
+    chat = getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", None)
+    if bot is None or chat_id is None:
+        return
+
+    send_chat_action = getattr(bot, "send_chat_action", None)
+    if send_chat_action is None:
+        return
+
+    await send_chat_action(chat_id=chat_id, action="typing")
+
+
+async def _typing_action_loop(*, message: Message, interval_seconds: float = 4.0) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        await send_typing_action(message)
+
+
+async def start_typing_indicator(message: Message) -> asyncio.Task | None:
+    bot = getattr(message, "bot", None)
+    chat = getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", None)
+    if bot is None or chat_id is None:
+        return None
+
+    await send_typing_action(message)
+    return asyncio.create_task(_typing_action_loop(message=message))
+
+
 @router.message(Command("admin_allow"))
 async def handle_admin_allow(
     message: Message,
@@ -1319,233 +1351,242 @@ async def handle_message(
     if not await require_user_access(message, session_factory, admin_user_ids):
         return
 
-    active_conversation_session_id: int | None = None
-    with session_scope(session_factory) as session:
-        _, user_id = ensure_user_registered(message, session)
-        reply_to_message = getattr(message, "reply_to_message", None)
-        reply_to_message_id = getattr(reply_to_message, "message_id", None)
-        chat = getattr(message, "chat", None)
-        chat_id = getattr(chat, "id", None)
-        if reply_to_message_id is not None and chat_id is not None:
-            replied_session = ConversationMessageRepository(session).get_session_by_assistant_message(
-                telegram_chat_id=chat_id,
-                telegram_message_id=reply_to_message_id,
-            )
-            if replied_session is not None:
-                active_conversation_session_id = replied_session.id
-
-        if active_conversation_session_id is None:
-            active_conversation_session = ConversationSessionRepository(session).get_active_for_user(
-                user_id=user_id,
-                reference_at=datetime.now(timezone.utc),
-            )
-            if active_conversation_session is not None:
-                active_conversation_session_id = active_conversation_session.id
-
-    extraction_request = await build_extraction_request(message)
-    if extraction_request is None:
-        await message.answer(
-            "Пока поддерживаются текстовые сообщения, фото еды и кнопка воды.",
-            reply_markup=build_main_keyboard(),
-        )
-        return
-
-    routing_decision = message_routing_service.route(
-        extraction_request,
-        has_active_conversation_session=active_conversation_session_id is not None,
-    )
-    if routing_decision.route == CONVERSATION:
-        current_time = datetime.now(timezone.utc)
+    typing_task = await start_typing_indicator(message)
+    try:
+        active_conversation_session_id: int | None = None
         with session_scope(session_factory) as session:
             _, user_id = ensure_user_registered(message, session)
-            user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
-            if user is None:
-                raise RuntimeError("User profile was not found after registration")
-            summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
-            session_repository = ConversationSessionRepository(session)
-            if active_conversation_session_id is not None:
-                conversation_session = session.get(ConversationSession, active_conversation_session_id)
-                if conversation_session is None:
+            reply_to_message = getattr(message, "reply_to_message", None)
+            reply_to_message_id = getattr(reply_to_message, "message_id", None)
+            chat = getattr(message, "chat", None)
+            chat_id = getattr(chat, "id", None)
+            if reply_to_message_id is not None and chat_id is not None:
+                replied_session = ConversationMessageRepository(session).get_session_by_assistant_message(
+                    telegram_chat_id=chat_id,
+                    telegram_message_id=reply_to_message_id,
+                )
+                if replied_session is not None:
+                    active_conversation_session_id = replied_session.id
+
+            if active_conversation_session_id is None:
+                active_conversation_session = ConversationSessionRepository(session).get_active_for_user(
+                    user_id=user_id,
+                    reference_at=datetime.now(timezone.utc),
+                )
+                if active_conversation_session is not None:
+                    active_conversation_session_id = active_conversation_session.id
+
+        extraction_request = await build_extraction_request(message)
+        if extraction_request is None:
+            await message.answer(
+                "Пока поддерживаются текстовые сообщения, фото еды и кнопка воды.",
+                reply_markup=build_main_keyboard(),
+            )
+            return
+
+        routing_decision = message_routing_service.route(
+            extraction_request,
+            has_active_conversation_session=active_conversation_session_id is not None,
+        )
+        if routing_decision.route == CONVERSATION:
+            current_time = datetime.now(timezone.utc)
+            with session_scope(session_factory) as session:
+                _, user_id = ensure_user_registered(message, session)
+                user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
+                if user is None:
+                    raise RuntimeError("User profile was not found after registration")
+                summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+                session_repository = ConversationSessionRepository(session)
+                if active_conversation_session_id is not None:
+                    conversation_session = session.get(ConversationSession, active_conversation_session_id)
+                    if conversation_session is None:
+                        conversation_session = session_repository.create_or_get_active(
+                            user_id=user_id,
+                            reference_at=current_time,
+                        )
+                else:
                     conversation_session = session_repository.create_or_get_active(
                         user_id=user_id,
                         reference_at=current_time,
                     )
-            else:
-                conversation_session = session_repository.create_or_get_active(
+                conversation_session_id = conversation_session.id
+                recent_turns = ConversationMessageRepository(session).list_recent_for_session(
+                    session_id=conversation_session_id,
+                    limit=6,
+                )
+                factual_context = NutritionCoachContextBuilder(session).build(
                     user_id=user_id,
+                    timezone_name=user.timezone,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                     reference_at=current_time,
                 )
-            conversation_session_id = conversation_session.id
-            recent_turns = ConversationMessageRepository(session).list_recent_for_session(
-                session_id=conversation_session_id,
-                limit=6,
-            )
-            factual_context = NutritionCoachContextBuilder(session).build(
-                user_id=user_id,
-                timezone_name=user.timezone,
-                nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-                reference_at=current_time,
-            )
-            conversation_reply = conversation_service.reply(
-                user_message=extraction_request.text or "",
-                factual_context=factual_context,
-                session_summary=conversation_session.summary_text,
-                recent_turns=[turn for turn in recent_turns],
-                images=extraction_request.images,
-            )
-        sent_message = await message.answer(
-            build_conversation_response(conversation_reply.text),
-            reply_markup=build_main_keyboard(),
-            parse_mode=None,
-            **build_reply_kwargs(message),
-        )
-        with session_scope(session_factory) as session:
-            ConversationMessageRepository(session).create(
-                session_id=conversation_session_id,
-                role=ConversationMessageRole.USER,
-                content=extraction_request.text or "",
-                created_at=current_time,
-            )
-            ConversationMessageRepository(session).create(
-                session_id=conversation_session_id,
-                role=ConversationMessageRole.ASSISTANT,
-                content=conversation_reply.text,
-                created_at=current_time,
-                telegram_chat_id=getattr(getattr(sent_message, "chat", None), "id", None),
-                telegram_message_id=getattr(sent_message, "message_id", None),
-            )
-            ConversationSessionRepository(session).update_summary_and_touch(
-                session_id=conversation_session_id,
-                summary_text=conversation_reply.updated_session_summary,
-                last_message_at=current_time,
-            )
-        return
-
-    if routing_decision.route == AMBIGUOUS:
-        await message.answer(
-            build_ambiguous_message_response(),
-            reply_markup=build_main_keyboard(),
-            **build_reply_kwargs(message),
-        )
-        return
-
-    extraction_result = extraction_service.extract(extraction_request)
-
-    if isinstance(extraction_result, InvalidExtractionPayload):
-        await message.answer(
-            extraction_result.message,
-            reply_markup=build_main_keyboard(),
-        )
-        return
-
-    if extraction_result is None:
-        await message.answer(
-            "Текущий extraction provider не смог обработать сообщение с едой.",
-            reply_markup=build_main_keyboard(),
-        )
-        return
-
-    nutrition_result: SuccessfulNutritionEstimation | None = None
-    confirmation_text: str | None = None
-    try:
-        with session_scope(session_factory) as session:
-            _, user_id = ensure_user_registered(message, session)
-            user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
-            if user is None:
-                raise RuntimeError("User profile was not found after registration")
-            summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
-
-            saved_food_entries: list = []
-            saved_items = build_saved_items_from_payload(extraction_result.payload)
-            occurred_at_values: list[datetime] = []
-            for extracted_entry in extraction_result.payload.entries:
-                occurred_at = extracted_entry.occurred_at or datetime.now(timezone.utc)
-                saved_entry = EntryRepository(session).create(
-                    user_id=user_id,
-                    entry_type=extracted_entry.type,
-                    occurred_at=occurred_at,
-                    source_text=None,
-                    extraction_provider=extraction_result.extraction_provider,
-                    extraction_model=extraction_result.extraction_model,
-                    extraction_raw_payload=extraction_result.raw_payload,
-                    items=[
-                        EntryItemCreate(
-                            name=item.name,
-                            quantity=item.quantity,
-                            unit=item.unit,
-                            source_type="extraction_payload",
-                        )
-                        for item in extracted_entry.items
-                    ],
+                conversation_reply = await asyncio.to_thread(
+                    conversation_service.reply,
+                    user_message=extraction_request.text or "",
+                    factual_context=factual_context,
+                    session_summary=conversation_session.summary_text,
+                    recent_turns=[turn for turn in recent_turns],
+                    images=extraction_request.images,
                 )
-                occurred_at_values.append(occurred_at)
-                if extracted_entry.type is EntryType.FOOD:
-                    saved_food_entries.append(saved_entry)
-
-            if saved_food_entries:
-                nutrition_flow_result = StoredEntryNutritionEstimationUseCase(
-                    session,
-                    nutrition_service,
-                ).run(entry_ids=[entry.id for entry in saved_food_entries])
-                if isinstance(nutrition_flow_result, FailedNutritionEstimation):
-                    raise FoodWriteFlowError(nutrition_flow_result.message)
-                if isinstance(nutrition_flow_result, SkippedNutritionEstimation):
-                    raise FoodWriteFlowError(nutrition_flow_result.reason)
-                nutrition_result = nutrition_flow_result
-
-            summary_dates = resolve_summary_dates_for_occurred_at_values(
-                occurred_at_values=occurred_at_values,
-                timezone_name=user.timezone,
-                nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+            sent_message = await message.answer(
+                build_conversation_response(conversation_reply.text),
+                reply_markup=build_main_keyboard(),
+                parse_mode=None,
+                **build_reply_kwargs(message),
             )
-            if len(summary_dates) == 1:
-                summary_date = next(iter(summary_dates))
-                metric_deltas = resolve_metric_deltas(
-                    saved_items=saved_items,
-                    nutrition_result=nutrition_result,
+            with session_scope(session_factory) as session:
+                ConversationMessageRepository(session).create(
+                    session_id=conversation_session_id,
+                    role=ConversationMessageRole.USER,
+                    content=extraction_request.text or "",
+                    created_at=current_time,
                 )
-                coach_comment: str | None = None
-                if saved_food_entries:
-                    factual_context = NutritionCoachContextBuilder(session).build(
+                ConversationMessageRepository(session).create(
+                    session_id=conversation_session_id,
+                    role=ConversationMessageRole.ASSISTANT,
+                    content=conversation_reply.text,
+                    created_at=current_time,
+                    telegram_chat_id=getattr(getattr(sent_message, "chat", None), "id", None),
+                    telegram_message_id=getattr(sent_message, "message_id", None),
+                )
+                ConversationSessionRepository(session).update_summary_and_touch(
+                    session_id=conversation_session_id,
+                    summary_text=conversation_reply.updated_session_summary,
+                    last_message_at=current_time,
+                )
+            return
+
+        if routing_decision.route == AMBIGUOUS:
+            await message.answer(
+                build_ambiguous_message_response(),
+                reply_markup=build_main_keyboard(),
+                **build_reply_kwargs(message),
+            )
+            return
+
+        extraction_result = await asyncio.to_thread(extraction_service.extract, extraction_request)
+
+        if isinstance(extraction_result, InvalidExtractionPayload):
+            await message.answer(
+                extraction_result.message,
+                reply_markup=build_main_keyboard(),
+            )
+            return
+
+        if extraction_result is None:
+            await message.answer(
+                "Текущий extraction provider не смог обработать сообщение с едой.",
+                reply_markup=build_main_keyboard(),
+            )
+            return
+
+        nutrition_result: SuccessfulNutritionEstimation | None = None
+        confirmation_text: str | None = None
+        try:
+            with session_scope(session_factory) as session:
+                _, user_id = ensure_user_registered(message, session)
+                user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
+                if user is None:
+                    raise RuntimeError("User profile was not found after registration")
+                summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+
+                saved_food_entries: list = []
+                saved_items = build_saved_items_from_payload(extraction_result.payload)
+                occurred_at_values: list[datetime] = []
+                for extracted_entry in extraction_result.payload.entries:
+                    occurred_at = extracted_entry.occurred_at or datetime.now(timezone.utc)
+                    saved_entry = EntryRepository(session).create(
                         user_id=user_id,
-                        timezone_name=user.timezone,
-                        nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-                        reference_at=max(occurred_at_values),
+                        entry_type=extracted_entry.type,
+                        occurred_at=occurred_at,
+                        source_text=None,
+                        extraction_provider=extraction_result.extraction_provider,
+                        extraction_model=extraction_result.extraction_model,
+                        extraction_raw_payload=extraction_result.raw_payload,
+                        items=[
+                            EntryItemCreate(
+                                name=item.name,
+                                quantity=item.quantity,
+                                unit=item.unit,
+                                source_type="extraction_payload",
+                            )
+                            for item in extracted_entry.items
+                        ],
                     )
-                    try:
-                        coach_comment = conversation_service.comment_on_food_write(
-                            saved_items=[
-                                format_saved_item_line(item.name, item.quantity, item.unit).removeprefix("- ")
-                                for item in saved_items
-                            ],
-                            factual_context=factual_context,
-                            metric_deltas=metric_deltas,
-                        )
-                    except Exception:
-                        logger.exception("Nutrition coach post-entry comment failed inside food write flow")
-                        coach_comment = None
-                    if coach_comment:
-                        for saved_food_entry in saved_food_entries:
-                            saved_food_entry.llm_comment = coach_comment
-                confirmation_text = build_write_confirmation_response(
-                    saved_items,
-                    build_daily_report_for_summary_date(
-                        session=session,
-                        user_id=user_id,
-                        timezone_name=user.timezone,
-                        summary_date=summary_date,
-                        summary_preference=summary_preference,
-                        metric_deltas=metric_deltas,
-                    ),
-                    coach_comment=coach_comment,
-                )
-            else:
-                confirmation_text = build_write_confirmation_response(saved_items)
-    except FoodWriteFlowError as exc:
-        await message.answer(str(exc), reply_markup=build_main_keyboard())
-        return
+                    occurred_at_values.append(occurred_at)
+                    if extracted_entry.type is EntryType.FOOD:
+                        saved_food_entries.append(saved_entry)
 
-    await message.answer(
-        confirmation_text,
-        reply_markup=build_main_keyboard(),
-    )
+                if saved_food_entries:
+                    nutrition_flow_result = StoredEntryNutritionEstimationUseCase(
+                        session,
+                        nutrition_service,
+                    ).run(entry_ids=[entry.id for entry in saved_food_entries])
+                    if isinstance(nutrition_flow_result, FailedNutritionEstimation):
+                        raise FoodWriteFlowError(nutrition_flow_result.message)
+                    if isinstance(nutrition_flow_result, SkippedNutritionEstimation):
+                        raise FoodWriteFlowError(nutrition_flow_result.reason)
+                    nutrition_result = nutrition_flow_result
+
+                summary_dates = resolve_summary_dates_for_occurred_at_values(
+                    occurred_at_values=occurred_at_values,
+                    timezone_name=user.timezone,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                )
+                if len(summary_dates) == 1:
+                    summary_date = next(iter(summary_dates))
+                    metric_deltas = resolve_metric_deltas(
+                        saved_items=saved_items,
+                        nutrition_result=nutrition_result,
+                    )
+                    coach_comment: str | None = None
+                    if saved_food_entries:
+                        factual_context = NutritionCoachContextBuilder(session).build(
+                            user_id=user_id,
+                            timezone_name=user.timezone,
+                            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                            reference_at=max(occurred_at_values),
+                        )
+                        try:
+                            coach_comment = await asyncio.to_thread(
+                                conversation_service.comment_on_food_write,
+                                saved_items=[
+                                    format_saved_item_line(item.name, item.quantity, item.unit).removeprefix("- ")
+                                    for item in saved_items
+                                ],
+                                factual_context=factual_context,
+                                metric_deltas=metric_deltas,
+                            )
+                        except Exception:
+                            logger.exception("Nutrition coach post-entry comment failed inside food write flow")
+                            coach_comment = None
+                        if coach_comment:
+                            for saved_food_entry in saved_food_entries:
+                                saved_food_entry.llm_comment = coach_comment
+                    confirmation_text = build_write_confirmation_response(
+                        saved_items,
+                        build_daily_report_for_summary_date(
+                            session=session,
+                            user_id=user_id,
+                            timezone_name=user.timezone,
+                            summary_date=summary_date,
+                            summary_preference=summary_preference,
+                            metric_deltas=metric_deltas,
+                        ),
+                        coach_comment=coach_comment,
+                    )
+                else:
+                    confirmation_text = build_write_confirmation_response(saved_items)
+        except FoodWriteFlowError as exc:
+            await message.answer(str(exc), reply_markup=build_main_keyboard())
+            return
+
+        await message.answer(
+            confirmation_text,
+            reply_markup=build_main_keyboard(),
+        )
+    finally:
+        if typing_task is not None:
+            typing_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await typing_task

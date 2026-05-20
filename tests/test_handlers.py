@@ -2116,6 +2116,7 @@ async def test_handle_message_routes_conversation_text_without_creating_entries(
         message_id=321,
         chat=SimpleNamespace(id=98765),
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="conversation_user"),
+        bot=SimpleNamespace(send_chat_action=AsyncMock()),
         answer=AsyncMock(return_value=SimpleNamespace(message_id=654321, chat=SimpleNamespace(id=98765))),
     )
 
@@ -2150,6 +2151,7 @@ async def test_handle_message_routes_conversation_text_without_creating_entries(
         ("assistant", "Ответ на: Как добрать белок без лишних калорий?", 98765, 654321),
     ]
     message.answer.assert_awaited_once()
+    message.bot.send_chat_action.assert_awaited_once_with(chat_id=98765, action="typing")
     assert message.answer.await_args.args == ("Ответ на: Как добрать белок без лишних калорий?",)
     assert message.answer.await_args.kwargs["parse_mode"] is None
     assert message.answer.await_args.kwargs["reply_to_message_id"] == 321
