@@ -22,6 +22,7 @@ services:
       context: .
     container_name: food_registry_bot
     restart: unless-stopped
+    mem_limit: 200m
     depends_on:
       postgres:
         condition: service_healthy
