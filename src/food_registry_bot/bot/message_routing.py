@@ -75,12 +75,22 @@ class MessageRoutingDecision:
 
 
 class MessageRoutingService(Protocol):
-    def route(self, request: JournalExtractionRequest) -> MessageRoutingDecision:
+    def route(
+        self,
+        request: JournalExtractionRequest,
+        *,
+        has_active_conversation_session: bool = False,
+    ) -> MessageRoutingDecision:
         """Choose journal, conversation, or ambiguous route."""
 
 
 class RuleBasedMessageRoutingService:
-    def route(self, request: JournalExtractionRequest) -> MessageRoutingDecision:
+    def route(
+        self,
+        request: JournalExtractionRequest,
+        *,
+        has_active_conversation_session: bool = False,
+    ) -> MessageRoutingDecision:
         if request.images:
             return MessageRoutingDecision(route=JOURNAL, reason="photo_message")
 
@@ -101,6 +111,9 @@ class RuleBasedMessageRoutingService:
 
         if self._looks_like_journal(lowered_text):
             return MessageRoutingDecision(route=JOURNAL, reason="journal_cue")
+
+        if has_active_conversation_session:
+            return MessageRoutingDecision(route=CONVERSATION, reason="active_conversation_session")
 
         if self._word_count(lowered_text) <= 6:
             return MessageRoutingDecision(route=JOURNAL, reason="short_fact_like_text")

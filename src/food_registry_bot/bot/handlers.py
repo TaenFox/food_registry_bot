@@ -29,9 +29,11 @@ from food_registry_bot.conversation import (
     DisabledConversationService,
     NutritionCoachContextBuilder,
 )
-from food_registry_bot.db.models import EntryType
+from food_registry_bot.db.models import ConversationMessageRole, EntryType
 from food_registry_bot.db.session import session_scope
 from food_registry_bot.db.repositories import (
+    ConversationMessageRepository,
+    ConversationSessionRepository,
     EntryItemCreate,
     EntryRepository,
     UserGoalPreferenceRepository,
@@ -1307,6 +1309,17 @@ async def handle_message(
     if not await require_user_access(message, session_factory, admin_user_ids):
         return
 
+    active_conversation_session_exists = False
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        active_conversation_session_exists = (
+            ConversationSessionRepository(session).get_active_for_user(
+                user_id=user_id,
+                reference_at=datetime.now(timezone.utc),
+            )
+            is not None
+        )
+
     extraction_request = await build_extraction_request(message)
     if extraction_request is None:
         await message.answer(
@@ -1315,7 +1328,10 @@ async def handle_message(
         )
         return
 
-    routing_decision = message_routing_service.route(extraction_request)
+    routing_decision = message_routing_service.route(
+        extraction_request,
+        has_active_conversation_session=active_conversation_session_exists,
+    )
     if routing_decision.route == CONVERSATION:
         with session_scope(session_factory) as session:
             _, user_id = ensure_user_registered(message, session)
@@ -1323,15 +1339,45 @@ async def handle_message(
             if user is None:
                 raise RuntimeError("User profile was not found after registration")
             summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+            current_time = datetime.now(timezone.utc)
+            conversation_session = ConversationSessionRepository(session).create_or_get_active(
+                user_id=user_id,
+                reference_at=current_time,
+            )
+            recent_turns = ConversationMessageRepository(session).list_recent_for_session(
+                session_id=conversation_session.id,
+                limit=6,
+            )
             factual_context = NutritionCoachContextBuilder(session).build(
                 user_id=user_id,
                 timezone_name=user.timezone,
                 nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-                reference_at=datetime.now(timezone.utc),
+                reference_at=current_time,
             )
             conversation_reply = conversation_service.reply(
                 user_message=extraction_request.text or "",
                 factual_context=factual_context,
+                session_summary=conversation_session.summary_text,
+                recent_turns=[
+                    turn for turn in recent_turns
+                ],
+            )
+            ConversationMessageRepository(session).create(
+                session_id=conversation_session.id,
+                role=ConversationMessageRole.USER,
+                content=extraction_request.text or "",
+                created_at=current_time,
+            )
+            ConversationMessageRepository(session).create(
+                session_id=conversation_session.id,
+                role=ConversationMessageRole.ASSISTANT,
+                content=conversation_reply.text,
+                created_at=current_time,
+            )
+            ConversationSessionRepository(session).update_summary_and_touch(
+                session_id=conversation_session.id,
+                summary_text=conversation_reply.updated_session_summary,
+                last_message_at=current_time,
             )
         await message.answer(
             build_conversation_response(conversation_reply.text),

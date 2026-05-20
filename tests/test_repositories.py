@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.db.base import Base
 from food_registry_bot.db.models import (
+    ConversationMessageRole,
     DailyGoalSnapshot,
     EntryItem,
     EntryItemMetric,
@@ -16,6 +17,8 @@ from food_registry_bot.db.models import (
     UserSummaryPreference,
 )
 from food_registry_bot.db.repositories import (
+    ConversationMessageRepository,
+    ConversationSessionRepository,
     EntryItemCreate,
     EntryItemMetricRepository,
     EntryItemMetricValue,
@@ -289,6 +292,56 @@ def test_daily_nutrition_goal_snapshot_use_case_freezes_existing_day_snapshot() 
     assert next_day_snapshot.water_goal == 2000
     assert next_day_snapshot.timezone == "UTC"
     assert next_day_snapshot.nutrition_day_start_hour == 6
+
+
+def test_conversation_session_repository_returns_active_session_within_ttl() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7010, username="coach_session_user")
+    repository = ConversationSessionRepository(session)
+    started_at = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
+
+    created_session = repository.create(user_id=user.id, started_at=started_at, summary_text="initial")
+    active_session = repository.get_active_for_user(
+        user_id=user.id,
+        reference_at=datetime(2026, 5, 20, 12, 30, tzinfo=timezone.utc),
+    )
+    expired_session = repository.get_active_for_user(
+        user_id=user.id,
+        reference_at=datetime(2026, 5, 20, 13, 1, tzinfo=timezone.utc),
+    )
+
+    assert active_session is not None
+    assert active_session.id == created_session.id
+    assert expired_session is None
+
+
+def test_conversation_message_repository_lists_recent_turns_in_chronological_order() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7011, username="coach_turns_user")
+    conversation_session = ConversationSessionRepository(session).create(
+        user_id=user.id,
+        started_at=datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc),
+    )
+    message_repository = ConversationMessageRepository(session)
+    message_repository.create(
+        session_id=conversation_session.id,
+        role=ConversationMessageRole.USER,
+        content="что поужинать",
+        created_at=datetime(2026, 5, 20, 10, 1, tzinfo=timezone.utc),
+    )
+    message_repository.create(
+        session_id=conversation_session.id,
+        role=ConversationMessageRole.ASSISTANT,
+        content="смотри на белок",
+        created_at=datetime(2026, 5, 20, 10, 2, tzinfo=timezone.utc),
+    )
+
+    turns = message_repository.list_recent_for_session(session_id=conversation_session.id, limit=6)
+
+    assert [(turn.role, turn.content) for turn in turns] == [
+        ("user", "что поужинать"),
+        ("assistant", "смотри на белок"),
+    ]
 
 
 def test_entry_repository_creates_entry_for_user() -> None:

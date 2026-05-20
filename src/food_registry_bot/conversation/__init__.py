@@ -1,4 +1,5 @@
 from food_registry_bot.conversation.context import (
+    NutritionCoachConversationTurn,
     NutritionCoachContextBuilder,
     NutritionCoachFactualContext,
     NutritionCoachMetricProgress,
@@ -24,6 +25,7 @@ __all__ = [
     "LLMConversationClient",
     "LLMConversationClientError",
     "LLMConversationService",
+    "NutritionCoachConversationTurn",
     "NutritionCoachContextBuilder",
     "NutritionCoachFactualContext",
     "NutritionCoachMetricProgress",

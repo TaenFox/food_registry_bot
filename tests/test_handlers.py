@@ -33,6 +33,9 @@ from food_registry_bot.bot.payloads import SummarySettingsCallback
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT
 from food_registry_bot.db.base import Base
 from food_registry_bot.db.models import (
+    ConversationMessageRole,
+    ConversationMessage,
+    ConversationSession,
     DailyGoalSnapshot,
     Entry,
     EntryItem,
@@ -1976,10 +1979,12 @@ async def test_handle_message_routes_conversation_text_without_creating_entries(
     extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
     captured_reply_args = {}
 
-    def reply_stub(*, user_message, factual_context):
+    def reply_stub(*, user_message, factual_context, session_summary, recent_turns):
         captured_reply_args["user_message"] = user_message
         captured_reply_args["factual_context"] = factual_context
-        return SimpleNamespace(text=f"Ответ на: {user_message}")
+        captured_reply_args["session_summary"] = session_summary
+        captured_reply_args["recent_turns"] = recent_turns
+        return SimpleNamespace(text=f"Ответ на: {user_message}", updated_session_summary="обновлённый summary")
 
     conversation_service = SimpleNamespace(
         reply=reply_stub
@@ -2001,13 +2006,22 @@ async def test_handle_message_routes_conversation_text_without_creating_entries(
 
     with session_factory() as session:
         assert session.query(Entry).count() == 0
+        saved_session = session.query(ConversationSession).one()
+        saved_messages = session.query(ConversationMessage).order_by(ConversationMessage.id.asc()).all()
 
     assert captured_reply_args["user_message"] == "Как добрать белок без лишних калорий?"
     factual_context = captured_reply_args["factual_context"]
+    assert captured_reply_args["session_summary"] is None
+    assert captured_reply_args["recent_turns"] == []
     assert factual_context.summary_date.isoformat() == "2026-05-20"
     assert factual_context.day_totals["water"] == 0.0
     assert factual_context.goal_progress["calories"].goal_value == 1800
     assert factual_context.recent_entries == []
+    assert saved_session.summary_text == "обновлённый summary"
+    assert [(message.role.value, message.content) for message in saved_messages] == [
+        ("user", "Как добрать белок без лишних калорий?"),
+        ("assistant", "Ответ на: Как добрать белок без лишних калорий?"),
+    ]
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == ("Ответ на: Как добрать белок без лишних калорий?",)
     assert message.answer.await_args.kwargs["parse_mode"] is None
@@ -2019,8 +2033,9 @@ async def test_handle_message_sends_conversation_reply_as_plain_text() -> None:
     allow_user(session_factory, ALLOWED_USER_ID, "conversation_html_user")
     extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
     conversation_service = SimpleNamespace(
-        reply=lambda *, user_message, factual_context: SimpleNamespace(
-            text="Перед тренировкой лучше держать жиры <30 г и не переедать."
+        reply=lambda *, user_message, factual_context, session_summary, recent_turns: SimpleNamespace(
+            text="Перед тренировкой лучше держать жиры <30 г и не переедать.",
+            updated_session_summary="summary",
         )
     )
     message = SimpleNamespace(
@@ -2049,7 +2064,7 @@ async def test_handle_message_returns_ambiguous_reply_without_creating_entries()
     allow_user(session_factory, ALLOWED_USER_ID, "ambiguous_user")
     extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
     message_routing_service = SimpleNamespace(
-        route=lambda _request: MessageRoutingDecision(route="ambiguous", reason="test_ambiguous")
+        route=lambda _request, **_kwargs: MessageRoutingDecision(route="ambiguous", reason="test_ambiguous")
     )
     message = SimpleNamespace(
         text="Сегодня как-то странно с едой и режимом",
@@ -2098,6 +2113,96 @@ async def test_handle_message_does_not_route_slash_like_text_to_journal() -> Non
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (build_ambiguous_message_response(),)
     assert message.answer.await_args.kwargs["reply_to_message_id"] == 777
+
+
+async def test_handle_message_routes_follow_up_to_conversation_when_active_session_exists() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "followup_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="followup_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        coach_session = ConversationSession(
+            user_id=user.id,
+            summary_text="говорили про питание перед тренировкой",
+            started_at=datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc),
+            last_message_at=datetime(2026, 5, 20, 10, 30, tzinfo=timezone.utc),
+        )
+        session.add(coach_session)
+        session.flush()
+        session.add_all(
+            [
+                ConversationMessage(
+                    session_id=coach_session.id,
+                    role=ConversationMessageRole.USER,
+                    content="что лучше съесть перед вечерней тренировкой?",
+                    created_at=datetime(2026, 5, 20, 10, 29, tzinfo=timezone.utc),
+                ),
+                ConversationMessage(
+                    session_id=coach_session.id,
+                    role=ConversationMessageRole.ASSISTANT,
+                    content="дам два сценария",
+                    created_at=datetime(2026, 5, 20, 10, 30, tzinfo=timezone.utc),
+                ),
+            ]
+        )
+        session.commit()
+
+    extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
+    captured_reply_args = {}
+
+    def reply_stub(*, user_message, factual_context, session_summary, recent_turns):
+        captured_reply_args["user_message"] = user_message
+        captured_reply_args["session_summary"] = session_summary
+        captured_reply_args["recent_turns"] = recent_turns
+        return SimpleNamespace(text="уточняю сценарий А", updated_session_summary="обновлённый followup summary")
+
+    message = SimpleNamespace(
+        text="это будет сценарий А",
+        message_id=888,
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="followup_user"),
+        answer=AsyncMock(),
+    )
+
+    original_datetime = handle_message.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 20, 10, 40, tzinfo=timezone.utc)
+
+    handle_message.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_message(
+            message,
+            session_factory,
+            extraction_service=extraction_service,
+            conversation_service=SimpleNamespace(reply=reply_stub),
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_message.__globals__["datetime"] = original_datetime
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 0
+        saved_session = session.query(ConversationSession).one()
+        saved_messages = session.query(ConversationMessage).order_by(ConversationMessage.id.asc()).all()
+
+    assert captured_reply_args["user_message"] == "это будет сценарий А"
+    assert captured_reply_args["session_summary"] == "говорили про питание перед тренировкой"
+    assert [(turn.role, turn.content) for turn in captured_reply_args["recent_turns"]] == [
+        ("user", "что лучше съесть перед вечерней тренировкой?"),
+        ("assistant", "дам два сценария"),
+    ]
+    assert saved_session.summary_text == "обновлённый followup summary"
+    assert [(saved_message.role.value, saved_message.content) for saved_message in saved_messages] == [
+        ("user", "что лучше съесть перед вечерней тренировкой?"),
+        ("assistant", "дам два сценария"),
+        ("user", "это будет сценарий А"),
+        ("assistant", "уточняю сценарий А"),
+    ]
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("уточняю сценарий А",)
 
 
 async def test_handle_message_routes_clear_journal_text_to_extraction_flow() -> None:

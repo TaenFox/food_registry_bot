@@ -272,7 +272,7 @@
 
 Статус:
 
-- `[ ]` после завершения Этапа 1
+- `[x]` выполнен
 
 Цель:
 
@@ -296,6 +296,10 @@
 
 - агент держит несколько follow-up сообщений без потери краткого контекста;
 - память ограничена по времени и не смешивается с factual data.
+
+Связанный ADR:
+
+- [ADR-024](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/adr/ADR-024-nutrition-coach-session-memory.md:1)
 
 ### Этап 3. Post-entry nutrition comment
 
@@ -387,11 +391,11 @@
 
 Если продолжать развитие прямо сейчас, следующий шаг:
 
-- Этап 2: `session memory на 1 час`
+- Этап 3: `post-entry nutrition comment`
 
 Почему именно он:
 
-- coach boundary и factual context уже выделены;
-- следующий полезный инкремент - удерживать несколько follow-up сообщений;
-- это можно добавить отдельно, не меняя factual logging contract;
-- photo coaching и post-entry comment по-прежнему лучше оставить следующими шагами.
+- factual-aware coach и краткая memory уже работают вместе;
+- следующий полезный мост между logging и coaching - короткий комментарий после записи еды;
+- это можно строить поверх уже существующих delta и day-progress данных;
+- photo coaching по-прежнему лучше оставить отдельным следующим шагом после этого.

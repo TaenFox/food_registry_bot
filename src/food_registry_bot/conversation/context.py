@@ -33,6 +33,14 @@ class NutritionCoachRecentEntry(BaseModel):
     rendered_items: list[str] = Field(default_factory=list)
 
 
+class NutritionCoachConversationTurn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: str = Field(min_length=1, max_length=32)
+    content: str = Field(min_length=1)
+    created_at: datetime
+
+
 class NutritionCoachFactualContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
