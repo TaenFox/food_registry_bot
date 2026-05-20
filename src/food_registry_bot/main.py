@@ -20,6 +20,7 @@ async def run() -> None:
         nutrition_service=create_nutrition_service(settings),
         conversation_service=create_conversation_service(settings),
         admin_user_ids=settings.admin_user_ids,
+        app_version=settings.app_version,
     )
     await dispatcher.start_polling(bot)
 

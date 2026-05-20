@@ -285,12 +285,19 @@ async def test_admin_returns_system_overview_and_commands() -> None:
         answer=AsyncMock(),
     )
 
-    await handle_admin(message, session_factory, backfill_tracker=AdminBackfillTracker(), admin_user_ids=(ADMIN_ID,))
+    await handle_admin(
+        message,
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
+    )
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         (
             "Панель администратора:\n"
+            "- версия бота: v1\n"
             f"- текущий админ: {ADMIN_ID}\n"
             "- админов в конфиге: 1\n"
             "- известных пользователей: 2\n"
@@ -322,12 +329,19 @@ async def test_admin_overview_excludes_admin_from_user_counters() -> None:
         answer=AsyncMock(),
     )
 
-    await handle_admin(message, session_factory, backfill_tracker=AdminBackfillTracker(), admin_user_ids=(ADMIN_ID,))
+    await handle_admin(
+        message,
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
+    )
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         (
             "Панель администратора:\n"
+            "- версия бота: v1\n"
             f"- текущий админ: {ADMIN_ID}\n"
             "- админов в конфиге: 1\n"
             "- известных пользователей: 1\n"
