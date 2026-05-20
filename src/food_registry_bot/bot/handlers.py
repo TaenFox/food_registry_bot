@@ -34,7 +34,6 @@ from food_registry_bot.extraction import (
     JournalExtractionService,
     JournalExtractionRequest,
     StructuredPayloadExtractionService,
-    ValidExtractionPayload,
 )
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
@@ -48,7 +47,6 @@ from food_registry_bot.nutrition import (
     DailyNutritionSummaryUseCase,
     FailedNutritionEstimation,
     NutritionBackfillCompleted,
-    NutritionBackfillProgress,
     NutritionEstimationService,
     resolve_local_summary_date,
     SUPPORTED_NUTRITION_METRIC_CODES,
