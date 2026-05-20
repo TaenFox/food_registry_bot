@@ -305,7 +305,7 @@
 
 Статус:
 
-- `[ ]` после Этапа 2
+- `[x]` выполнен
 
 Цель:
 
@@ -326,6 +326,10 @@
 Критерий завершения:
 
 - после сохранения еды бот умеет дать лаконичный nutrition-aware комментарий, не ломая existing confirmation flow.
+
+Связанный ADR:
+
+- [ADR-025](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/adr/ADR-025-post-entry-nutrition-comment.md:1)
 
 ### Этап 4. Multimodal coaching input
 

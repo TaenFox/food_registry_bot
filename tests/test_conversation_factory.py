@@ -32,6 +32,9 @@ def test_create_conversation_service_uses_injected_llm_client() -> None:
             f"reply:{kwargs['user_message']}:{kwargs['factual_context'].summary_date}",
             "updated-summary",
         ),
+        generate_post_entry_comment=lambda **kwargs: (
+            f"comment:{kwargs['saved_items'][0]}:{kwargs['factual_context'].summary_date}"
+        ),
     )
 
     service = create_conversation_service(settings, llm_client=client)
@@ -64,6 +67,23 @@ def test_create_conversation_service_uses_injected_llm_client() -> None:
     assert reply.provider == "test_provider"
     assert reply.model == "test-model"
     assert reply.updated_session_summary == "updated-summary"
+    comment = service.comment_on_food_write(
+        saved_items=["яблоко: 180 г"],
+        factual_context=NutritionCoachFactualContext(
+            summary_date="2026-05-20",
+            timezone="Europe/Moscow",
+            nutrition_day_start_hour=4,
+            day_totals={"calories": 0.0, "protein": 0.0, "fat": 0.0, "carbs": 0.0, "fiber": 0.0, "water": 0.0},
+            goal_progress={},
+            recent_entries=[],
+            nutrition_summary_is_complete=True,
+            excluded_food_entry_count=0,
+            water_summary_is_complete=True,
+            excluded_water_entry_count=0,
+        ),
+        metric_deltas={"calories": 220.0},
+    )
+    assert comment == "comment:яблоко: 180 г:2026-05-20"
 
 
 def test_openai_conversation_client_falls_back_to_plain_text_reply_when_json_is_invalid() -> None:
@@ -191,6 +211,76 @@ def test_openai_conversation_client_serializes_recent_turns_from_dataclass_objec
     assert '"content": "что лучше съесть перед вечерней тренировкой?"' in serialized_payload
     assert reply_text == "Ок, уточняю ответ."
     assert updated_summary == "новый summary"
+
+
+def test_openai_conversation_client_returns_post_entry_comment_from_json_payload() -> None:
+    sdk_client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=lambda **_kwargs: SimpleNamespace(
+                output_text='{"comment_text":"После этой записи белок немного вырос, но до цели по белку ещё заметный запас."}'
+            )
+        )
+    )
+    client = OpenAIResponsesConversationClient(
+        api_key="test-key",
+        model="gpt-5-mini",
+        client=sdk_client,
+    )
+
+    comment = client.generate_post_entry_comment(
+        saved_items=["яблоко: 180 г"],
+        factual_context=NutritionCoachFactualContext(
+            summary_date="2026-05-20",
+            timezone="Europe/Moscow",
+            nutrition_day_start_hour=4,
+            day_totals={"calories": 220.0, "protein": 7.6, "fat": 2.2, "carbs": 42.8, "fiber": 5.1, "water": 0.0},
+            goal_progress={},
+            recent_entries=[],
+            nutrition_summary_is_complete=True,
+            excluded_food_entry_count=0,
+            water_summary_is_complete=True,
+            excluded_water_entry_count=0,
+        ),
+        metric_deltas={"calories": 220.0, "protein": 7.6},
+    )
+
+    assert comment == "После этой записи белок немного вырос, но до цели по белку ещё заметный запас."
+
+
+def test_llm_conversation_service_swallows_post_entry_comment_error() -> None:
+    settings = Settings.model_construct(
+        openai_api_key=None,
+        conversation_model="gpt-5-mini",
+    )
+    client = SimpleNamespace(
+        provider_name="test_provider",
+        model_name="test-model",
+        generate_reply=lambda **_kwargs: ("ok", "summary"),
+        generate_post_entry_comment=lambda **_kwargs: (_ for _ in ()).throw(
+            LLMConversationClientError("comment failure")
+        ),
+    )
+
+    service = create_conversation_service(settings, llm_client=client)
+
+    comment = service.comment_on_food_write(
+        saved_items=["яблоко: 180 г"],
+        factual_context=NutritionCoachFactualContext(
+            summary_date="2026-05-20",
+            timezone="Europe/Moscow",
+            nutrition_day_start_hour=4,
+            day_totals={"calories": 220.0, "protein": 7.6, "fat": 2.2, "carbs": 42.8, "fiber": 5.1, "water": 0.0},
+            goal_progress={},
+            recent_entries=[],
+            nutrition_summary_is_complete=True,
+            excluded_food_entry_count=0,
+            water_summary_is_complete=True,
+            excluded_water_entry_count=0,
+        ),
+        metric_deltas={"calories": 220.0, "protein": 7.6},
+    )
+
+    assert comment is None
 
 
 def test_llm_conversation_service_includes_error_reason_in_fallback_reply() -> None:

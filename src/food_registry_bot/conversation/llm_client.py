@@ -30,3 +30,12 @@ class LLMConversationClient(Protocol):
         recent_turns: list[NutritionCoachConversationTurn],
     ) -> tuple[str, str | None]:
         """Return a plain-text conversational reply and updated session summary."""
+
+    def generate_post_entry_comment(
+        self,
+        *,
+        saved_items: list[str],
+        factual_context: NutritionCoachFactualContext,
+        metric_deltas: dict[str, float],
+    ) -> str | None:
+        """Return a short nutrition-aware post-entry comment, or None."""

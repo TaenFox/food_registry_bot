@@ -35,6 +35,15 @@ class ConversationService(Protocol):
     ) -> ConversationReply:
         """Return a conversational reply."""
 
+    def comment_on_food_write(
+        self,
+        *,
+        saved_items: list[str],
+        factual_context: NutritionCoachFactualContext,
+        metric_deltas: dict[str, float],
+    ) -> str | None:
+        """Return a short optional post-entry comment."""
+
 
 class DisabledConversationService:
     def reply(
@@ -58,6 +67,18 @@ class DisabledConversationService:
             model=None,
             updated_session_summary=session_summary,
         )
+
+    def comment_on_food_write(
+        self,
+        *,
+        saved_items: list[str],
+        factual_context: NutritionCoachFactualContext,
+        metric_deltas: dict[str, float],
+    ) -> str | None:
+        _ = saved_items
+        _ = factual_context
+        _ = metric_deltas
+        return None
 
 
 class LLMConversationService:
@@ -94,3 +115,20 @@ class LLMConversationService:
             model=self._client.model_name,
             updated_session_summary=updated_session_summary,
         )
+
+    def comment_on_food_write(
+        self,
+        *,
+        saved_items: list[str],
+        factual_context: NutritionCoachFactualContext,
+        metric_deltas: dict[str, float],
+    ) -> str | None:
+        try:
+            return self._client.generate_post_entry_comment(
+                saved_items=saved_items,
+                factual_context=factual_context,
+                metric_deltas=metric_deltas,
+            )
+        except LLMConversationClientError as exc:
+            logger.exception("Nutrition coach post-entry comment failed: %s", exc)
+            return None

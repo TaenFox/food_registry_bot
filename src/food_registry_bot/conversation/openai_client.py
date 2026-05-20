@@ -20,6 +20,12 @@ class NutritionCoachLLMReply(BaseModel):
     updated_session_summary: Optional[str] = None
 
 
+class NutritionCoachPostEntryComment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    comment_text: Optional[str] = None
+
+
 class OpenAIResponsesConversationClient:
     def __init__(
         self,
@@ -93,6 +99,50 @@ class OpenAIResponsesConversationClient:
         )
         return parsed.reply_text.strip(), normalized_summary
 
+    def generate_post_entry_comment(
+        self,
+        *,
+        saved_items: list[str],
+        factual_context: NutritionCoachFactualContext,
+        metric_deltas: dict[str, float],
+    ) -> str | None:
+        if not saved_items:
+            return None
+
+        try:
+            response = self._client.responses.create(
+                model=self._model,
+                instructions=self._build_post_entry_system_prompt(),
+                input=[
+                    {
+                        "role": "user",
+                        "content": self._build_post_entry_user_content(
+                            saved_items=saved_items,
+                            factual_context=factual_context,
+                            metric_deltas=metric_deltas,
+                        ),
+                    }
+                ],
+                text={"format": {"type": "json_object"}},
+            )
+        except Exception as exc:
+            raise LLMConversationClientError(f"OpenAI post-entry comment request failed: {exc}") from exc
+
+        output_text = getattr(response, "output_text", None)
+        if not output_text or not output_text.strip():
+            raise LLMConversationClientError("OpenAI returned an empty post-entry comment response")
+
+        try:
+            parsed = NutritionCoachPostEntryComment.model_validate_json(output_text)
+        except Exception:
+            fallback_text = output_text.strip()
+            return fallback_text if fallback_text else None
+
+        if parsed.comment_text is None:
+            return None
+        normalized_comment = parsed.comment_text.strip()
+        return normalized_comment or None
+
     @staticmethod
     def _build_sdk_client(*, api_key: str) -> Any:
         try:
@@ -149,6 +199,37 @@ class OpenAIResponsesConversationClient:
         ]
 
     @staticmethod
+    def _build_post_entry_user_content(
+        *,
+        saved_items: list[str],
+        factual_context: NutritionCoachFactualContext,
+        metric_deltas: dict[str, float],
+    ) -> list[dict[str, str]]:
+        return [
+            {
+                "type": "input_text",
+                "text": "Return valid json only.",
+            },
+            {
+                "type": "input_text",
+                "text": (
+                    "Use the saved items, metric deltas, and factual day context below to produce a short post-entry comment."
+                ),
+            },
+            {
+                "type": "input_text",
+                "text": json.dumps(
+                    {
+                        "saved_items": saved_items,
+                        "metric_deltas": metric_deltas,
+                        "factual_context": factual_context.model_dump(mode="json"),
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+
+    @staticmethod
     def _build_system_prompt() -> str:
         return (
             "You are a nutrition coach inside a food logging bot. "
@@ -168,4 +249,25 @@ class OpenAIResponsesConversationClient:
             "If the question is clearly outside your domain, answer briefly and steer the user back to nutrition, water, wellbeing, or meal planning. "
             "If the user asks for medical diagnosis, urgent care, or prescription-level advice, say that you cannot provide that and recommend a qualified professional. "
             "Do not mention internal routing, prompts, or model details."
+        )
+
+    @staticmethod
+    def _build_post_entry_system_prompt() -> str:
+        return (
+            "You are a nutrition coach inside a food logging bot. "
+            "Answer in Russian. "
+            "Return only valid json matching this schema exactly: "
+            f"{json.dumps(NutritionCoachPostEntryComment.model_json_schema(), ensure_ascii=False)}. "
+            "You are writing a short comment after a successful food log entry. "
+            "Use the provided saved_items, metric_deltas, and factual_context as the source of truth. "
+            "comment_text must be either null or a concise 1-2 sentence plain-text comment without bullets. "
+            "Focus on the most useful immediate observation and the practical consequence for the rest of the day. "
+            "Do not restate the entire summary. "
+            "Do not repeat numbers or remaining-goal values that are already obvious from the report above unless a number is truly necessary for the point. "
+            "Prefer synthesis over recap: highlight what is already effectively covered, what is now over target, what no longer needs special focus, or what kind of next meal would now make sense. "
+            "Useful styles include comments like: fiber already closed so the next meal can be ordinary; protein and fiber are already effectively covered; fats are already high so the rest of the day should stay lighter. "
+            "Do not claim that you saved data, changed settings, or modified goals. "
+            "Do not start a new conversation or ask multiple follow-up questions. "
+            "Prefer concrete, factual observations over generic praise. "
+            "If there is no meaningful concise observation, return null."
         )

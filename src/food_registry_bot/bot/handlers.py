@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import html
 from io import BytesIO
 from datetime import date, datetime, timezone
@@ -70,10 +71,12 @@ from food_registry_bot.nutrition import (
 )
 
 router = Router()
+logger = logging.getLogger(__name__)
 default_extraction_service = StructuredPayloadExtractionService()
 default_nutrition_service = StaticNutritionEstimationService(raw_payload="")
 default_conversation_service = DisabledConversationService()
 default_message_routing_service = RuleBasedMessageRoutingService()
+NUTRITION_COACH_DISPLAY_NAME = "Нутрициолог"
 SUMMARY_METRIC_LINES = (
     ("calories", "К", "ккал"),
     ("protein", "Б", "г"),
@@ -428,8 +431,8 @@ def format_saved_item_line(name: str, quantity: int | None, unit: str | None) ->
     if quantity is None:
         return f"- {presented_name}"
     if presented_unit is None:
-        return f"- {presented_name}: {quantity}"
-    return f"- {presented_name}: {quantity} {presented_unit}"
+        return f"- {presented_name} ({quantity})"
+    return f"- {presented_name} ({quantity} {presented_unit})"
 
 
 def build_saved_items_confirmation(items: list[EntryItemCreate]) -> str:
@@ -439,11 +442,18 @@ def build_saved_items_confirmation(items: list[EntryItemCreate]) -> str:
     return "\n".join(lines)
 
 
-def build_write_confirmation_response(saved_items: list[EntryItemCreate], day_report: str | None = None) -> str:
+def build_write_confirmation_response(
+    saved_items: list[EntryItemCreate],
+    day_report: str | None = None,
+    coach_comment: str | None = None,
+) -> str:
     saved_items_confirmation = build_saved_items_confirmation(saved_items)
-    if day_report is None:
-        return saved_items_confirmation
-    return "\n\n".join([saved_items_confirmation, day_report])
+    parts = [saved_items_confirmation]
+    if day_report is not None:
+        parts.append(day_report)
+    if coach_comment:
+        parts.append(f"{NUTRITION_COACH_DISPLAY_NAME}: {coach_comment}")
+    return "\n\n".join(parts)
 
 
 def build_recent_entries_response(entries: list) -> str:
@@ -1444,7 +1454,7 @@ async def handle_message(
                 raise RuntimeError("User profile was not found after registration")
             summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
 
-            food_entry_ids: list[int] = []
+            saved_food_entries: list = []
             saved_items = build_saved_items_from_payload(extraction_result.payload)
             occurred_at_values: list[datetime] = []
             for extracted_entry in extraction_result.payload.entries:
@@ -1469,13 +1479,13 @@ async def handle_message(
                 )
                 occurred_at_values.append(occurred_at)
                 if extracted_entry.type is EntryType.FOOD:
-                    food_entry_ids.append(saved_entry.id)
+                    saved_food_entries.append(saved_entry)
 
-            if food_entry_ids:
+            if saved_food_entries:
                 nutrition_flow_result = StoredEntryNutritionEstimationUseCase(
                     session,
                     nutrition_service,
-                ).run(entry_ids=food_entry_ids)
+                ).run(entry_ids=[entry.id for entry in saved_food_entries])
                 if isinstance(nutrition_flow_result, FailedNutritionEstimation):
                     raise FoodWriteFlowError(nutrition_flow_result.message)
                 if isinstance(nutrition_flow_result, SkippedNutritionEstimation):
@@ -1489,6 +1499,33 @@ async def handle_message(
             )
             if len(summary_dates) == 1:
                 summary_date = next(iter(summary_dates))
+                metric_deltas = resolve_metric_deltas(
+                    saved_items=saved_items,
+                    nutrition_result=nutrition_result,
+                )
+                coach_comment: str | None = None
+                if saved_food_entries:
+                    factual_context = NutritionCoachContextBuilder(session).build(
+                        user_id=user_id,
+                        timezone_name=user.timezone,
+                        nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                        reference_at=max(occurred_at_values),
+                    )
+                    try:
+                        coach_comment = conversation_service.comment_on_food_write(
+                            saved_items=[
+                                format_saved_item_line(item.name, item.quantity, item.unit).removeprefix("- ")
+                                for item in saved_items
+                            ],
+                            factual_context=factual_context,
+                            metric_deltas=metric_deltas,
+                        )
+                    except Exception:
+                        logger.exception("Nutrition coach post-entry comment failed inside food write flow")
+                        coach_comment = None
+                    if coach_comment:
+                        for saved_food_entry in saved_food_entries:
+                            saved_food_entry.llm_comment = coach_comment
                 confirmation_text = build_write_confirmation_response(
                     saved_items,
                     build_daily_report_for_summary_date(
@@ -1497,11 +1534,9 @@ async def handle_message(
                         timezone_name=user.timezone,
                         summary_date=summary_date,
                         summary_preference=summary_preference,
-                        metric_deltas=resolve_metric_deltas(
-                            saved_items=saved_items,
-                            nutrition_result=nutrition_result,
-                        ),
+                        metric_deltas=metric_deltas,
                     ),
+                    coach_comment=coach_comment,
                 )
             else:
                 confirmation_text = build_write_confirmation_response(saved_items)

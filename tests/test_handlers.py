@@ -630,7 +630,7 @@ async def test_regular_message_saves_metrics_for_allowed_user() -> None:
     assert metric_count == 5
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сохранил:\n- яблоко: 180 г\n\n"
+        "Сохранил:\n- яблоко (180 г)\n\n"
         "<pre>"
         "К: 220.0 / 1800 ккал (+220.0 ккал)\n"
         "Б: 7.6 / 90 г (+7.6 г)\n"
@@ -691,7 +691,7 @@ async def test_recent_returns_latest_entries_for_allowed_user() -> None:
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Последние записи:\n- вода: 250 мл\n- яблоко",
+        "Последние записи:\n- вода (250 мл)\n- яблоко",
     )
 
 
@@ -1742,7 +1742,7 @@ async def test_water_button_creates_water_entry_for_allowed_user() -> None:
     assert saved_item.name == "water"
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сохранил:\n- вода: 250 мл\n\n"
+        "Сохранил:\n- вода (250 мл)\n\n"
         "<pre>"
         "К: 0.0 / 1800 ккал\n"
         "Б: 0.0 / 90 г\n"
@@ -1793,7 +1793,7 @@ async def test_water_button_shows_delta_bar_report_in_bars_mode() -> None:
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сохранил:\n- вода: 250 мл\n\n<pre>В      [██▓░░░░░░░] 37.5% 750.0/2000 мл (+250.0 мл)</pre>",
+        "Сохранил:\n- вода (250 мл)\n\n<pre>В      [██▓░░░░░░░] 37.5% 750.0/2000 мл (+250.0 мл)</pre>",
     )
 
 
@@ -1852,13 +1852,134 @@ async def test_confirmation_hides_delta_suffix_when_setting_is_disabled() -> Non
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сохранил:\n- яблоко: 180 г\n\n"
+        "Сохранил:\n- яблоко (180 г)\n\n"
         "<pre>"
         "К: 220.0 / 1800 ккал\n"
         "Б: 7.6 / 90 г\n"
         "Ж: 2.2 / 60 г\n"
         "У: 42.8 / 210 г\n"
         "Кл: 5.1 / 25 г\n"
+        "В: 0.0 / 2000 мл"
+        "</pre>",
+    )
+
+
+async def test_food_confirmation_appends_post_entry_nutrition_comment() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "post_entry_comment_user")
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.FOOD,
+                        items=[ExtractedJournalItem(name="яблоко", quantity=180, unit="г")],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload='{"entries":[{"type":"food","items":[{"name":"яблоко","quantity":180,"unit":"г"}]}]}',
+        )
+    )
+    nutrition_service = StaticNutritionEstimationService(
+        raw_payload=build_metric_payload(["entry-1:item-0"])
+    )
+    conversation_service = SimpleNamespace(
+        comment_on_food_write=lambda **kwargs: (
+            "После этой записи углеводы и клетчатка подросли, но по белку у тебя ещё заметный запас."
+            if kwargs["saved_items"] == ["яблоко (180 г)"]
+            else None
+        )
+    )
+    message = SimpleNamespace(
+        text="яблоко",
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="post_entry_comment_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        nutrition_service=nutrition_service,
+        conversation_service=conversation_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_entry = session.query(Entry).one()
+
+    assert saved_entry.llm_comment == (
+        "После этой записи углеводы и клетчатка подросли, но по белку у тебя ещё заметный запас."
+    )
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Сохранил:\n- яблоко (180 г)\n\n"
+        "<pre>"
+        "К: 220.0 / 1800 ккал (+220.0 ккал)\n"
+        "Б: 7.6 / 90 г (+7.6 г)\n"
+        "Ж: 2.2 / 60 г (+2.2 г)\n"
+        "У: 42.8 / 210 г (+42.8 г)\n"
+        "Кл: 5.1 / 25 г (+5.1 г)\n"
+        "В: 0.0 / 2000 мл"
+        "</pre>\n\n"
+        "Нутрициолог: После этой записи углеводы и клетчатка подросли, но по белку у тебя ещё заметный запас.",
+    )
+
+
+async def test_food_confirmation_still_succeeds_when_post_entry_comment_fails() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "post_entry_comment_error_user")
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.FOOD,
+                        items=[ExtractedJournalItem(name="яблоко", quantity=180, unit="г")],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload='{"entries":[{"type":"food","items":[{"name":"яблоко","quantity":180,"unit":"г"}]}]}',
+        )
+    )
+    nutrition_service = StaticNutritionEstimationService(
+        raw_payload=build_metric_payload(["entry-1:item-0"])
+    )
+    conversation_service = SimpleNamespace(
+        comment_on_food_write=lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("comment failed"))
+    )
+    message = SimpleNamespace(
+        text="яблоко",
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="post_entry_comment_error_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        nutrition_service=nutrition_service,
+        conversation_service=conversation_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_entry = session.query(Entry).one()
+
+    assert saved_entry.llm_comment is None
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Сохранил:\n- яблоко (180 г)\n\n"
+        "<pre>"
+        "К: 220.0 / 1800 ккал (+220.0 ккал)\n"
+        "Б: 7.6 / 90 г (+7.6 г)\n"
+        "Ж: 2.2 / 60 г (+2.2 г)\n"
+        "У: 42.8 / 210 г (+42.8 г)\n"
+        "Кл: 5.1 / 25 г (+5.1 г)\n"
         "В: 0.0 / 2000 мл"
         "</pre>",
     )
