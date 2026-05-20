@@ -56,6 +56,18 @@ class ExtractedJournalEntry(BaseModel):
     items: List[ExtractedJournalItem] = Field(min_length=1)
 
     @model_validator(mode="after")
+    def normalize_water_items(self) -> "ExtractedJournalEntry":
+        if self.type is not EntryType.WATER:
+            return self
+
+        for item in self.items:
+            normalized_name = item.name.strip().lower()
+            if normalized_name == "water" or "вод" in normalized_name:
+                item.name = "water"
+
+        return self
+
+    @model_validator(mode="after")
     def validate_units_for_entry_type(self) -> "ExtractedJournalEntry":
         allowed_units_by_type = {
             EntryType.FOOD: {"g", "ml", None},

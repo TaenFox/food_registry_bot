@@ -48,6 +48,24 @@ def test_structured_payload_service_parses_multiple_entries() -> None:
     assert result.payload.entries[1].items[0].unit == "ml"
 
 
+def test_structured_payload_service_normalizes_water_alias_name_inside_water_entry() -> None:
+    service = StructuredPayloadExtractionService()
+
+    result = service.extract(
+        JournalExtractionRequest(
+            text=(
+                '{"entries": ['
+                '{"type": "water", "items": [{"name": "стакан воды", "quantity": 250, "unit": "мл"}]}'
+                "]}"
+            )
+        )
+    )
+
+    assert isinstance(result, ValidExtractionPayload)
+    assert result.payload.entries[0].items[0].name == "water"
+    assert result.payload.entries[0].items[0].unit == "ml"
+
+
 def test_structured_payload_service_rejects_unit_without_quantity() -> None:
     service = StructuredPayloadExtractionService()
 
@@ -270,6 +288,8 @@ def test_openai_client_builds_multimodal_input() -> None:
     content = calls[0]["input"][0]["content"]
     assert calls[0]["instructions"]
     assert "Return item names in Russian" in calls[0]["instructions"]
+    assert "For water entries, always set item.name to exactly 'water'" in calls[0]["instructions"]
+    assert "If water quantity is present, use unit 'ml'" in calls[0]["instructions"]
     assert "save it as one item and do not decompose it into guessed ingredients" in calls[0]["instructions"]
     assert "prefer grams for food and milliliters for water or drinks" in calls[0]["instructions"]
     assert "for liquid food items like dipping sauces, milliliters are also allowed" in calls[0]["instructions"]

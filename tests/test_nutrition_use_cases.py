@@ -27,6 +27,7 @@ def create_test_session() -> Session:
             SupportedMetric(code="protein", name="Protein", unit="g"),
             SupportedMetric(code="fat", name="Fat", unit="g"),
             SupportedMetric(code="carbs", name="Carbs", unit="g"),
+            SupportedMetric(code="fiber", name="Fiber", unit="g"),
         ]
     )
     session.commit()
@@ -46,6 +47,7 @@ def build_metric_payload(item_ids: list[str], *, confidence: str = "medium") -> 
                     {"code": "protein", "value": 7.6 + index, "confidence": confidence},
                     {"code": "fat", "value": 2.2 + index, "confidence": confidence},
                     {"code": "carbs", "value": 42.8 + index, "confidence": confidence},
+                    {"code": "fiber", "value": 5.1 + index, "confidence": confidence},
                 ],
             }
         )
@@ -76,14 +78,15 @@ def test_use_case_saves_metrics_for_supported_saved_items() -> None:
     assert isinstance(result, SuccessfulNutritionEstimation)
     assert result.entry_ids == [entry.id]
     assert result.estimated_item_count == 2
-    assert result.saved_metric_count == 8
+    assert result.saved_metric_count == 10
     assert result.metric_totals == {
         "calories": 441.0,
         "protein": 16.2,
         "fat": 5.4,
         "carbs": 86.6,
+        "fiber": 11.2,
     }
-    assert session.query(EntryItemMetric).count() == 8
+    assert session.query(EntryItemMetric).count() == 10
 
 
 def test_use_case_skips_when_entries_not_found() -> None:
@@ -117,7 +120,7 @@ def test_use_case_estimates_item_without_quantity() -> None:
     result = use_case.run(entry_ids=[entry.id])
 
     assert isinstance(result, SuccessfulNutritionEstimation)
-    assert result.saved_metric_count == 4
+    assert result.saved_metric_count == 5
 
 
 def test_use_case_returns_failed_when_nutrition_payload_is_invalid() -> None:
@@ -161,13 +164,14 @@ def test_backfill_use_case_recomputes_only_incomplete_entries() -> None:
 
     complete_item = complete_entry.items[0]
     session.add_all(
-        [
-            EntryItemMetric(entry_item_id=complete_item.id, metric_id=1, value=100.0, confidence="medium"),
-            EntryItemMetric(entry_item_id=complete_item.id, metric_id=2, value=5.0, confidence="medium"),
-            EntryItemMetric(entry_item_id=complete_item.id, metric_id=3, value=4.0, confidence="medium"),
-            EntryItemMetric(entry_item_id=complete_item.id, metric_id=4, value=10.0, confidence="medium"),
-        ]
-    )
+            [
+                EntryItemMetric(entry_item_id=complete_item.id, metric_id=1, value=100.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=complete_item.id, metric_id=2, value=5.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=complete_item.id, metric_id=3, value=4.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=complete_item.id, metric_id=4, value=10.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=complete_item.id, metric_id=5, value=3.0, confidence="medium"),
+            ]
+        )
     session.commit()
 
     use_case = BackfillNutritionEstimationUseCase(
@@ -184,4 +188,4 @@ def test_backfill_use_case_recomputes_only_incomplete_entries() -> None:
     assert result.processed_entry_ids == [incomplete_entry.id]
     assert result.skipped_entry_ids == []
     assert result.failed_entries == []
-    assert result.saved_metric_count == 4
+    assert result.saved_metric_count == 5

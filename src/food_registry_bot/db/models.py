@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint, func
@@ -51,6 +51,15 @@ class User(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    goal_preferences: Mapped[Optional["UserGoalPreference"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    daily_goal_snapshots: Mapped[list["DailyGoalSnapshot"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 
 class UserAccess(Base):
@@ -80,6 +89,10 @@ class UserSummaryPreference(Base):
     show_protein: Mapped[bool] = mapped_column(default=True)
     show_fat: Mapped[bool] = mapped_column(default=True)
     show_carbs: Mapped[bool] = mapped_column(default=True)
+    show_fiber: Mapped[bool] = mapped_column(default=True)
+    show_water: Mapped[bool] = mapped_column(default=True)
+    show_post_entry_delta_suffix: Mapped[bool] = mapped_column(default=True)
+    summary_display_mode: Mapped[str] = mapped_column(String(16), default="text")
     nutrition_day_start_hour: Mapped[int] = mapped_column(default=4)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -92,6 +105,60 @@ class UserSummaryPreference(Base):
     )
 
     user: Mapped["User"] = relationship(back_populates="summary_preferences")
+
+
+class UserGoalPreference(Base):
+    __tablename__ = "user_goal_preferences"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+    calorie_goal: Mapped[int] = mapped_column(Integer)
+    protein_goal: Mapped[int] = mapped_column(Integer)
+    fat_goal: Mapped[int] = mapped_column(Integer)
+    carbs_goal: Mapped[int] = mapped_column(Integer)
+    fiber_goal: Mapped[int] = mapped_column(Integer)
+    water_goal: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    user: Mapped["User"] = relationship(back_populates="goal_preferences")
+
+
+class DailyGoalSnapshot(Base):
+    __tablename__ = "daily_goal_snapshots"
+    __table_args__ = (
+        UniqueConstraint("user_id", "summary_date", name="uq_daily_goal_snapshots_user_id_summary_date"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    summary_date: Mapped[date]
+    timezone: Mapped[str] = mapped_column(String(64))
+    nutrition_day_start_hour: Mapped[int] = mapped_column(Integer)
+    calorie_goal: Mapped[int] = mapped_column(Integer)
+    protein_goal: Mapped[int] = mapped_column(Integer)
+    fat_goal: Mapped[int] = mapped_column(Integer)
+    carbs_goal: Mapped[int] = mapped_column(Integer)
+    fiber_goal: Mapped[int] = mapped_column(Integer)
+    water_goal: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    user: Mapped["User"] = relationship(back_populates="daily_goal_snapshots")
 
 
 class Entry(Base):

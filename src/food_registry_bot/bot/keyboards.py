@@ -3,6 +3,10 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 from food_registry_bot.bot.payloads import SummarySettingsCallback
 
 WATER_250_ML_BUTTON_TEXT = "Вода 250 мл"
+SUMMARY_DISPLAY_MODE_BUTTON_LABELS = {
+    "text": "текст",
+    "bars": "бары",
+}
 
 
 def build_main_keyboard() -> ReplyKeyboardMarkup:
@@ -21,6 +25,10 @@ def build_summary_settings_keyboard(
     show_protein: bool,
     show_fat: bool,
     show_carbs: bool,
+    show_fiber: bool,
+    show_water: bool,
+    show_post_entry_delta_suffix: bool,
+    summary_display_mode: str,
     nutrition_day_start_hour: int,
 ) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -47,6 +55,30 @@ def build_summary_settings_keyboard(
                 InlineKeyboardButton(
                     text=f"Углеводы: {'on' if show_carbs else 'off'}",
                     callback_data=SummarySettingsCallback(action="toggle_carbs").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Клетчатка: {'on' if show_fiber else 'off'}",
+                    callback_data=SummarySettingsCallback(action="toggle_fiber").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Вода: {'on' if show_water else 'off'}",
+                    callback_data=SummarySettingsCallback(action="toggle_water").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Дельта записи: {'on' if show_post_entry_delta_suffix else 'off'}",
+                    callback_data=SummarySettingsCallback(action="toggle_post_entry_delta_suffix").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Отображение: {SUMMARY_DISPLAY_MODE_BUTTON_LABELS[summary_display_mode]}",
+                    callback_data=SummarySettingsCallback(action="cycle_summary_display_mode").pack(),
                 )
             ],
             [

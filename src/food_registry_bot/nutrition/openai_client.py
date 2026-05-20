@@ -85,7 +85,7 @@ class OpenAIResponsesNutritionClient:
             f"{json.dumps(schema, ensure_ascii=False)}. "
             "Each response item must keep the same client_item_id as in the request. "
             "Return one result for every request item and do not omit or invent client_item_id values. "
-            "Return the metrics calories, protein, fat, and carbs for every item. "
+            "Return the metrics calories, protein, fat, carbs, and fiber for every item. "
             "Calories must be in kcal as a non-negative number and the other metrics must be non-negative numbers in grams. "
             "Return confidence for every metric using only low, medium, or high. "
             "Use the provided quantity and unit as the basis for the estimate when they are present. "

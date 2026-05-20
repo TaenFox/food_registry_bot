@@ -103,6 +103,8 @@ class OpenAIResponsesExtractionClient:
             "Return only valid json matching this schema exactly: "
             f"{json.dumps(schema, ensure_ascii=False)}. "
             "Use 'food' or 'water' for entry type and keep separate entries when one message contains both food and water. "
+            "For water entries, always set item.name to exactly 'water'. "
+            "If water quantity is present, use unit 'ml'. "
             "Return item names in Russian unless a fixed brand or label should stay unchanged. "
             "For food photos, if one complete dish is shown, save it as one item and do not decompose it into guessed ingredients. "
             "Split into multiple items only when separate foods are clearly shown separately or explicitly listed by the user. "

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
@@ -14,14 +14,26 @@ from food_registry_bot.db.models import (
     EntryType,
     MealType,
     SupportedMetric,
+    DailyGoalSnapshot,
     User,
     UserAccess,
+    UserGoalPreference,
     UserSummaryPreference,
 )
 if TYPE_CHECKING:
     from food_registry_bot.nutrition.journal_adapter import PreparedNutritionRequest, ResolvedNutritionEstimate
 
 SUPPORTED_NUTRITION_DAY_START_HOURS = (0, 2, 4, 6)
+SUPPORTED_SUMMARY_DISPLAY_MODES = ("text", "bars")
+SUPPORTED_GOAL_METRIC_CODES = ("calories", "protein", "fat", "carbs", "fiber", "water")
+DEFAULT_DAILY_GOALS = {
+    "calories": 1800,
+    "protein": 90,
+    "fat": 60,
+    "carbs": 210,
+    "fiber": 25,
+    "water": 2000,
+}
 
 
 @dataclass(frozen=True)
@@ -174,6 +186,10 @@ class UserSummaryPreferenceRepository:
             show_protein=True,
             show_fat=True,
             show_carbs=True,
+            show_fiber=True,
+            show_water=True,
+            show_post_entry_delta_suffix=True,
+            summary_display_mode="text",
             nutrition_day_start_hour=4,
         )
         self._session.add(preference)
@@ -212,6 +228,20 @@ class UserSummaryPreferenceRepository:
         self._session.flush()
         return preference
 
+    def cycle_summary_display_mode(self, *, user_id: int) -> UserSummaryPreference:
+        preference, _created = self.get_or_create(user_id=user_id)
+        current_index = SUPPORTED_SUMMARY_DISPLAY_MODES.index(preference.summary_display_mode)
+        next_index = (current_index + 1) % len(SUPPORTED_SUMMARY_DISPLAY_MODES)
+        preference.summary_display_mode = SUPPORTED_SUMMARY_DISPLAY_MODES[next_index]
+        self._session.flush()
+        return preference
+
+    def toggle_post_entry_delta_suffix(self, *, user_id: int) -> UserSummaryPreference:
+        preference, _created = self.get_or_create(user_id=user_id)
+        preference.show_post_entry_delta_suffix = not preference.show_post_entry_delta_suffix
+        self._session.flush()
+        return preference
+
     @staticmethod
     def _resolve_metric_attribute(metric_code: str) -> str:
         metric_attributes = {
@@ -219,11 +249,117 @@ class UserSummaryPreferenceRepository:
             "protein": "show_protein",
             "fat": "show_fat",
             "carbs": "show_carbs",
+            "fiber": "show_fiber",
+            "water": "show_water",
         }
         try:
             return metric_attributes[metric_code]
         except KeyError as exc:
             raise ValueError(f"Unsupported summary preference metric code: {metric_code}") from exc
+
+
+class UserGoalPreferenceRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_by_user_id(self, user_id: int) -> Optional[UserGoalPreference]:
+        statement = select(UserGoalPreference).where(UserGoalPreference.user_id == user_id)
+        return self._session.scalar(statement)
+
+    def get_or_create(self, *, user_id: int) -> tuple[UserGoalPreference, bool]:
+        preference = self.get_by_user_id(user_id)
+        if preference is not None:
+            return preference, False
+
+        preference = UserGoalPreference(
+            user_id=user_id,
+            calorie_goal=DEFAULT_DAILY_GOALS["calories"],
+            protein_goal=DEFAULT_DAILY_GOALS["protein"],
+            fat_goal=DEFAULT_DAILY_GOALS["fat"],
+            carbs_goal=DEFAULT_DAILY_GOALS["carbs"],
+            fiber_goal=DEFAULT_DAILY_GOALS["fiber"],
+            water_goal=DEFAULT_DAILY_GOALS["water"],
+        )
+        self._session.add(preference)
+        self._session.flush()
+        return preference, True
+
+    def set_goal(
+        self,
+        *,
+        user_id: int,
+        metric_code: str,
+        goal_value: int,
+    ) -> UserGoalPreference:
+        if goal_value <= 0:
+            raise ValueError("goal_value must be positive")
+
+        preference, _created = self.get_or_create(user_id=user_id)
+        setattr(preference, self._resolve_goal_attribute(metric_code), goal_value)
+        self._session.flush()
+        return preference
+
+    @staticmethod
+    def _resolve_goal_attribute(metric_code: str) -> str:
+        attribute_names = {
+            "calories": "calorie_goal",
+            "protein": "protein_goal",
+            "fat": "fat_goal",
+            "carbs": "carbs_goal",
+            "fiber": "fiber_goal",
+            "water": "water_goal",
+        }
+        try:
+            return attribute_names[metric_code]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported goal metric code: {metric_code}") from exc
+
+
+class DailyGoalSnapshotRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_by_user_id_and_date(
+        self,
+        *,
+        user_id: int,
+        summary_date: date,
+    ) -> Optional[DailyGoalSnapshot]:
+        statement = select(DailyGoalSnapshot).where(
+            DailyGoalSnapshot.user_id == user_id,
+            DailyGoalSnapshot.summary_date == summary_date,
+        )
+        return self._session.scalar(statement)
+
+    def create(
+        self,
+        *,
+        user_id: int,
+        summary_date: date,
+        timezone_name: str,
+        nutrition_day_start_hour: int,
+        calorie_goal: int,
+        protein_goal: int,
+        fat_goal: int,
+        carbs_goal: int,
+        fiber_goal: int,
+        water_goal: int,
+    ) -> DailyGoalSnapshot:
+        snapshot = DailyGoalSnapshot(
+            user_id=user_id,
+            summary_date=summary_date,
+            timezone=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
+            calorie_goal=calorie_goal,
+            protein_goal=protein_goal,
+            fat_goal=fat_goal,
+            carbs_goal=carbs_goal,
+            fiber_goal=fiber_goal,
+            water_goal=water_goal,
+        )
+        self._session.add(snapshot)
+        self._session.flush()
+        return snapshot
 
 
 class EntryRepository:
@@ -316,6 +452,26 @@ class EntryRepository:
                 .selectinload(EntryItem.metrics)
                 .selectinload(EntryItemMetric.metric)
             )
+            .order_by(Entry.occurred_at.asc(), Entry.id.asc())
+        )
+        return list(self._session.scalars(statement))
+
+    def list_water_for_user_between(
+        self,
+        *,
+        user_id: int,
+        occurred_at_from: datetime,
+        occurred_at_to: datetime,
+    ) -> list[Entry]:
+        statement = (
+            select(Entry)
+            .where(
+                Entry.user_id == user_id,
+                Entry.entry_type == EntryType.WATER,
+                Entry.occurred_at >= occurred_at_from,
+                Entry.occurred_at < occurred_at_to,
+            )
+            .options(selectinload(Entry.items))
             .order_by(Entry.occurred_at.asc(), Entry.id.asc())
         )
         return list(self._session.scalars(statement))

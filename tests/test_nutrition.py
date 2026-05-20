@@ -59,6 +59,7 @@ def build_metric_payload(item_ids: list[str], *, confidence: str = "medium") -> 
                     {"code": "protein", "value": 7.6 + index, "confidence": confidence},
                     {"code": "fat", "value": 2.2 + index, "confidence": confidence},
                     {"code": "carbs", "value": 42.8 + index, "confidence": confidence},
+                    {"code": "fiber", "value": 5.1 + index, "confidence": confidence},
                 ],
             }
         )

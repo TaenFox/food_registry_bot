@@ -17,7 +17,7 @@ class NutritionConfidence(str, Enum):
     HIGH = "high"
 
 
-SUPPORTED_NUTRITION_METRIC_CODES = ("calories", "protein", "fat", "carbs")
+SUPPORTED_NUTRITION_METRIC_CODES = ("calories", "protein", "fat", "carbs", "fiber")
 
 
 def _ensure_unique_values(values: list[str], *, error_message: str) -> None:
@@ -98,7 +98,7 @@ class NutritionEstimationItemResult(BaseModel):
         metric_codes = [metric.code for metric in self.metrics]
         _ensure_unique_values(metric_codes, error_message="metric code values must be unique within item")
         if set(metric_codes) != set(SUPPORTED_NUTRITION_METRIC_CODES):
-            raise ValueError("each item must contain exactly calories, protein, fat, carbs metrics")
+            raise ValueError("each item must contain exactly calories, protein, fat, carbs, fiber metrics")
         return self
 
 

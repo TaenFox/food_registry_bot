@@ -19,14 +19,15 @@ def create_test_session() -> Session:
             SupportedMetric(code="protein", name="Protein", unit="g"),
             SupportedMetric(code="fat", name="Fat", unit="g"),
             SupportedMetric(code="carbs", name="Carbs", unit="g"),
+            SupportedMetric(code="fiber", name="Fiber", unit="g"),
         ]
     )
     session.commit()
     return session
 
 
-def save_metrics(entry, *, values: tuple[float, float, float, float]) -> None:
-    calories, protein, fat, carbs = values
+def save_metrics(entry, *, values: tuple[float, float, float, float, float]) -> None:
+    calories, protein, fat, carbs, fiber = values
     item = entry.items[0]
     item.metrics.extend(
         [
@@ -34,6 +35,7 @@ def save_metrics(entry, *, values: tuple[float, float, float, float]) -> None:
             EntryItemMetric(entry_item_id=item.id, metric_id=2, value=protein, confidence="medium"),
             EntryItemMetric(entry_item_id=item.id, metric_id=3, value=fat, confidence="medium"),
             EntryItemMetric(entry_item_id=item.id, metric_id=4, value=carbs, confidence="medium"),
+            EntryItemMetric(entry_item_id=item.id, metric_id=5, value=fiber, confidence="medium"),
         ]
     )
 
@@ -64,9 +66,9 @@ def test_daily_summary_uses_local_day_boundaries() -> None:
         occurred_at=datetime(2026, 5, 20, 1, 0, tzinfo=timezone.utc),
         items=[EntryItemCreate(name="поздний ужин")],
     )
-    save_metrics(previous_local_day_entry, values=(100.0, 10.0, 5.0, 7.0))
-    save_metrics(today_entry, values=(200.0, 20.0, 8.0, 15.0))
-    save_metrics(next_local_day_entry, values=(300.0, 30.0, 9.0, 18.0))
+    save_metrics(previous_local_day_entry, values=(100.0, 10.0, 5.0, 7.0, 3.0))
+    save_metrics(today_entry, values=(200.0, 20.0, 8.0, 15.0, 6.0))
+    save_metrics(next_local_day_entry, values=(300.0, 30.0, 9.0, 18.0, 8.0))
     session.commit()
 
     summary_date = resolve_local_summary_date(
@@ -89,6 +91,7 @@ def test_daily_summary_uses_local_day_boundaries() -> None:
     assert summary.totals.protein == 20.0
     assert summary.totals.fat == 8.0
     assert summary.totals.carbs == 15.0
+    assert summary.totals.fiber == 6.0
 
 
 def test_local_time_before_four_am_belongs_to_previous_nutrition_day() -> None:
@@ -111,8 +114,8 @@ def test_local_time_before_four_am_belongs_to_previous_nutrition_day() -> None:
         occurred_at=datetime(2026, 5, 19, 2, 0, tzinfo=timezone.utc),
         items=[EntryItemCreate(name="завтрак")],
     )
-    save_metrics(night_entry, values=(450.0, 25.0, 20.0, 35.0))
-    save_metrics(morning_entry, values=(300.0, 18.0, 12.0, 22.0))
+    save_metrics(night_entry, values=(450.0, 25.0, 20.0, 35.0, 9.0))
+    save_metrics(morning_entry, values=(300.0, 18.0, 12.0, 22.0, 5.0))
     session.commit()
 
     previous_day_summary = DailyNutritionSummaryUseCase(session).run(
@@ -164,7 +167,7 @@ def test_daily_summary_excludes_incomplete_food_entries() -> None:
         occurred_at=datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
         items=[EntryItemCreate(name="тост")],
     )
-    save_metrics(complete_entry, values=(250.0, 18.0, 14.0, 12.0))
+    save_metrics(complete_entry, values=(250.0, 18.0, 14.0, 12.0, 4.0))
     incomplete_entry.items[0].metrics.extend(
         [
             EntryItemMetric(entry_item_id=incomplete_entry.items[0].id, metric_id=1, value=120.0, confidence="medium"),
@@ -191,6 +194,7 @@ def test_daily_summary_excludes_incomplete_food_entries() -> None:
     assert summary.totals.protein == 18.0
     assert summary.totals.fat == 14.0
     assert summary.totals.carbs == 12.0
+    assert summary.totals.fiber == 4.0
 
 
 def test_daily_summary_uses_custom_nutrition_day_start_hour() -> None:
@@ -213,8 +217,8 @@ def test_daily_summary_uses_custom_nutrition_day_start_hour() -> None:
         occurred_at=datetime(2026, 5, 19, 3, 30, tzinfo=timezone.utc),
         items=[EntryItemCreate(name="поздний завтрак")],
     )
-    save_metrics(early_entry, values=(150.0, 10.0, 5.0, 12.0))
-    save_metrics(later_entry, values=(300.0, 20.0, 8.0, 25.0))
+    save_metrics(early_entry, values=(150.0, 10.0, 5.0, 12.0, 3.0))
+    save_metrics(later_entry, values=(300.0, 20.0, 8.0, 25.0, 7.0))
     session.commit()
 
     summary = DailyNutritionSummaryUseCase(session).run(
@@ -231,3 +235,4 @@ def test_daily_summary_uses_custom_nutrition_day_start_hour() -> None:
     assert summary.summary_date.isoformat() == "2026-05-19"
     assert [entry.entry_id for entry in summary.entries] == [later_entry.id]
     assert summary.totals.calories == 300.0
+    assert summary.totals.fiber == 7.0

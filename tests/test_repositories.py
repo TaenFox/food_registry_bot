@@ -6,14 +6,17 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.db.base import Base
 from food_registry_bot.db.models import (
+    DailyGoalSnapshot,
     EntryItem,
     EntryItemMetric,
     EntryType,
     SupportedMetric,
     UserAccess,
+    UserGoalPreference,
     UserSummaryPreference,
 )
 from food_registry_bot.db.repositories import (
+    DailyGoalSnapshotRepository,
     EntryItemCreate,
     EntryItemMetricRepository,
     EntryItemMetricValue,
@@ -21,11 +24,13 @@ from food_registry_bot.db.repositories import (
     NutritionEstimatePersistenceService,
     SupportedMetricRepository,
     UserAccessRepository,
+    UserGoalPreferenceRepository,
     UserSummaryPreferenceRepository,
     UserRepository,
 )
 from food_registry_bot.extraction import ExtractedJournalEntry, ExtractedJournalItem, ExtractedJournalPayload
 from food_registry_bot.nutrition import (
+    DailyNutritionGoalSnapshotUseCase,
     StaticNutritionEstimationService,
     ValidNutritionPayload,
     prepare_nutrition_request_from_entries,
@@ -44,6 +49,7 @@ def create_test_session() -> Session:
             SupportedMetric(code="protein", name="Protein", unit="g"),
             SupportedMetric(code="fat", name="Fat", unit="g"),
             SupportedMetric(code="carbs", name="Carbs", unit="g"),
+            SupportedMetric(code="fiber", name="Fiber", unit="g"),
         ]
     )
     session.commit()
@@ -63,6 +69,7 @@ def build_metric_payload(item_ids: list[str], *, confidence: str = "medium") -> 
                     {"code": "protein", "value": 7.6 + index, "confidence": confidence},
                     {"code": "fat", "value": 2.2 + index, "confidence": confidence},
                     {"code": "carbs", "value": 42.8 + index, "confidence": confidence},
+                    {"code": "fiber", "value": 5.1 + index, "confidence": confidence},
                 ],
             }
         )
@@ -152,6 +159,9 @@ def test_user_summary_preference_repository_creates_default_preferences_once() -
     assert preference.show_protein is True
     assert preference.show_fat is True
     assert preference.show_carbs is True
+    assert preference.show_water is True
+    assert preference.show_post_entry_delta_suffix is True
+    assert preference.summary_display_mode == "text"
     assert preference.nutrition_day_start_hour == 4
 
 
@@ -178,6 +188,108 @@ def test_user_summary_preference_repository_cycles_nutrition_day_start_hour() ->
 
     assert first_hour == 6
     assert second_hour == 0
+
+
+def test_user_summary_preference_repository_cycles_summary_display_mode() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7007, username="prefs_mode_user")
+    repository = UserSummaryPreferenceRepository(session)
+
+    first_mode = repository.cycle_summary_display_mode(user_id=user.id).summary_display_mode
+    second_mode = repository.cycle_summary_display_mode(user_id=user.id).summary_display_mode
+
+    assert first_mode == "bars"
+    assert second_mode == "text"
+
+
+def test_user_goal_preference_repository_creates_defaults_and_updates_metric_goal() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7007, username="goal_user")
+    repository = UserGoalPreferenceRepository(session)
+
+    created_preference, created = repository.get_or_create(user_id=user.id)
+
+    assert created is True
+    assert created_preference.calorie_goal == 1800
+    assert created_preference.protein_goal == 90
+    assert created_preference.fat_goal == 60
+    assert created_preference.carbs_goal == 210
+    assert created_preference.water_goal == 2000
+
+    updated_preference = repository.set_goal(user_id=user.id, metric_code="protein", goal_value=110)
+
+    assert updated_preference.id == created_preference.id
+    assert updated_preference.protein_goal == 110
+    saved_preference = session.query(UserGoalPreference).filter_by(user_id=user.id).one()
+    assert saved_preference.protein_goal == 110
+
+
+def test_daily_nutrition_goal_snapshot_use_case_creates_default_snapshot() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7008, username="goalless_user")
+
+    snapshot = DailyNutritionGoalSnapshotUseCase(session).get_or_create(
+        user_id=user.id,
+        summary_date=datetime(2026, 5, 19, tzinfo=timezone.utc).date(),
+        timezone_name=user.timezone,
+        nutrition_day_start_hour=4,
+    )
+
+    assert snapshot.calorie_goal == 1800
+    assert snapshot.protein_goal == 90
+    assert snapshot.fat_goal == 60
+    assert snapshot.carbs_goal == 210
+    assert snapshot.water_goal == 2000
+    assert session.query(DailyGoalSnapshot).count() == 1
+
+
+def test_daily_nutrition_goal_snapshot_use_case_freezes_existing_day_snapshot() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7009, username="frozen_goal_user")
+    UserGoalPreferenceRepository(session).set_goal(user_id=user.id, metric_code="calories", goal_value=1800)
+    UserGoalPreferenceRepository(session).set_goal(user_id=user.id, metric_code="protein", goal_value=90)
+    use_case = DailyNutritionGoalSnapshotUseCase(session)
+
+    first_snapshot = use_case.get_or_create(
+        user_id=user.id,
+        summary_date=datetime(2026, 5, 19, tzinfo=timezone.utc).date(),
+        timezone_name=user.timezone,
+        nutrition_day_start_hour=4,
+    )
+    UserGoalPreferenceRepository(session).set_goal(user_id=user.id, metric_code="calories", goal_value=2000)
+    UserGoalPreferenceRepository(session).set_goal(user_id=user.id, metric_code="protein", goal_value=120)
+    same_day_snapshot = use_case.get_or_create(
+        user_id=user.id,
+        summary_date=datetime(2026, 5, 19, tzinfo=timezone.utc).date(),
+        timezone_name="UTC",
+        nutrition_day_start_hour=6,
+    )
+    next_day_snapshot = use_case.get_or_create(
+        user_id=user.id,
+        summary_date=datetime(2026, 5, 20, tzinfo=timezone.utc).date(),
+        timezone_name="UTC",
+        nutrition_day_start_hour=6,
+    )
+
+    assert first_snapshot is not None
+    assert first_snapshot.calorie_goal == 1800
+    assert first_snapshot.protein_goal == 90
+    assert first_snapshot.water_goal == 2000
+    assert first_snapshot.timezone == "Europe/Moscow"
+    assert first_snapshot.nutrition_day_start_hour == 4
+    assert same_day_snapshot is not None
+    assert same_day_snapshot.id == first_snapshot.id
+    assert same_day_snapshot.calorie_goal == 1800
+    assert same_day_snapshot.protein_goal == 90
+    assert same_day_snapshot.water_goal == 2000
+    assert same_day_snapshot.timezone == "Europe/Moscow"
+    assert same_day_snapshot.nutrition_day_start_hour == 4
+    assert next_day_snapshot is not None
+    assert next_day_snapshot.calorie_goal == 2000
+    assert next_day_snapshot.protein_goal == 120
+    assert next_day_snapshot.water_goal == 2000
+    assert next_day_snapshot.timezone == "UTC"
+    assert next_day_snapshot.nutrition_day_start_hour == 6
 
 
 def test_entry_repository_creates_entry_for_user() -> None:
@@ -290,11 +402,12 @@ def test_entry_repository_lists_incomplete_food_entry_ids() -> None:
             EntryItemMetricValue(code="protein", value=2.0, confidence="medium"),
             EntryItemMetricValue(code="fat", value=1.0, confidence="medium"),
             EntryItemMetricValue(code="carbs", value=20.0, confidence="medium"),
+            EntryItemMetricValue(code="fiber", value=3.0, confidence="medium"),
         ],
     )
 
     incomplete_ids = repository.list_incomplete_food_entry_ids(
-        required_metric_codes=["calories", "protein", "fat", "carbs"],
+        required_metric_codes=["calories", "protein", "fat", "carbs", "fiber"],
         limit=10,
     )
 
@@ -306,7 +419,7 @@ def test_supported_metric_repository_lists_seeded_metrics() -> None:
 
     metrics = SupportedMetricRepository(session).list_all()
 
-    assert [metric.code for metric in metrics] == ["calories", "protein", "fat", "carbs"]
+    assert [metric.code for metric in metrics] == ["calories", "protein", "fat", "carbs", "fiber"]
 
 
 def test_entry_item_metric_repository_upserts_metric_values() -> None:
@@ -381,14 +494,14 @@ def test_nutrition_persistence_service_saves_metrics_for_saved_entries() -> None
         resolved_estimates=resolved_estimates,
     )
 
-    assert len(saved_metrics) == 8
+    assert len(saved_metrics) == 10
     persisted_metrics = (
         session.query(EntryItemMetric)
         .join(SupportedMetric, SupportedMetric.id == EntryItemMetric.metric_id)
         .order_by(EntryItemMetric.entry_item_id.asc(), SupportedMetric.code.asc())
         .all()
     )
-    assert len(persisted_metrics) == 8
+    assert len(persisted_metrics) == 10
     assert [
         (metric.entry_item.position, metric.metric.code, metric.value, metric.confidence)
         for metric in persisted_metrics
@@ -396,10 +509,12 @@ def test_nutrition_persistence_service_saves_metrics_for_saved_entries() -> None
         (0, "calories", 220.0, "medium"),
         (0, "carbs", 42.8, "medium"),
         (0, "fat", 2.2, "medium"),
+        (0, "fiber", 5.1, "medium"),
         (0, "protein", 7.6, "medium"),
         (1, "calories", 221.0, "medium"),
         (1, "carbs", 43.8, "medium"),
         (1, "fat", 3.2, "medium"),
+        (1, "fiber", 6.1, "medium"),
         (1, "protein", 8.6, "medium"),
     ]
 
