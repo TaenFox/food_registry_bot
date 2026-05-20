@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
@@ -15,6 +15,9 @@ from food_registry_bot.db.models import (
     MealType,
     SupportedMetric,
     DailyGoalSnapshot,
+    ConversationMessage,
+    ConversationMessageRole,
+    ConversationSession,
     User,
     UserAccess,
     UserGoalPreference,
@@ -58,6 +61,13 @@ class KnownUserAccessView:
     username: str | None
     has_profile: bool
     is_allowed: bool
+
+
+@dataclass(frozen=True)
+class ConversationTurn:
+    role: str
+    content: str
+    created_at: datetime
 
 
 class UserRepository:
@@ -546,6 +556,150 @@ class EntryRepository:
                     break
 
         return count
+
+
+class ConversationSessionRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_active_for_user(
+        self,
+        *,
+        user_id: int,
+        reference_at: datetime,
+        ttl_minutes: int = 60,
+    ) -> Optional[ConversationSession]:
+        normalized_reference_at = (
+            reference_at if reference_at.tzinfo is not None else reference_at.replace(tzinfo=timezone.utc)
+        )
+        cutoff = normalized_reference_at - timedelta(minutes=ttl_minutes)
+        statement = (
+            select(ConversationSession)
+            .where(
+                ConversationSession.user_id == user_id,
+                ConversationSession.last_message_at >= cutoff,
+            )
+            .order_by(ConversationSession.last_message_at.desc(), ConversationSession.id.desc())
+            .limit(1)
+        )
+        return self._session.scalar(statement)
+
+    def create(
+        self,
+        *,
+        user_id: int,
+        started_at: datetime,
+        summary_text: str | None = None,
+    ) -> ConversationSession:
+        conversation_session = ConversationSession(
+            user_id=user_id,
+            summary_text=summary_text,
+            started_at=started_at,
+            last_message_at=started_at,
+        )
+        self._session.add(conversation_session)
+        self._session.flush()
+        return conversation_session
+
+    def create_or_get_active(
+        self,
+        *,
+        user_id: int,
+        reference_at: datetime,
+        ttl_minutes: int = 60,
+    ) -> ConversationSession:
+        active_session = self.get_active_for_user(
+            user_id=user_id,
+            reference_at=reference_at,
+            ttl_minutes=ttl_minutes,
+        )
+        if active_session is not None:
+            return active_session
+        return self.create(user_id=user_id, started_at=reference_at)
+
+    def update_summary_and_touch(
+        self,
+        *,
+        session_id: int,
+        summary_text: str | None,
+        last_message_at: datetime,
+    ) -> ConversationSession:
+        conversation_session = self._session.get(ConversationSession, session_id)
+        if conversation_session is None:
+            raise ValueError(f"Conversation session {session_id} was not found")
+        conversation_session.summary_text = summary_text
+        conversation_session.last_message_at = last_message_at
+        self._session.flush()
+        return conversation_session
+
+
+class ConversationMessageRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(
+        self,
+        *,
+        session_id: int,
+        role: ConversationMessageRole,
+        content: str,
+        created_at: datetime,
+        telegram_chat_id: int | None = None,
+        telegram_message_id: int | None = None,
+    ) -> ConversationMessage:
+        message = ConversationMessage(
+            session_id=session_id,
+            role=role,
+            content=content,
+            telegram_chat_id=telegram_chat_id,
+            telegram_message_id=telegram_message_id,
+            created_at=created_at,
+        )
+        self._session.add(message)
+        self._session.flush()
+        return message
+
+    def get_session_by_assistant_message(
+        self,
+        *,
+        telegram_chat_id: int,
+        telegram_message_id: int,
+    ) -> ConversationSession | None:
+        statement = (
+            select(ConversationSession)
+            .join(ConversationMessage, ConversationMessage.session_id == ConversationSession.id)
+            .where(
+                ConversationMessage.role == ConversationMessageRole.ASSISTANT,
+                ConversationMessage.telegram_chat_id == telegram_chat_id,
+                ConversationMessage.telegram_message_id == telegram_message_id,
+            )
+            .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+            .limit(1)
+        )
+        return self._session.scalar(statement)
+
+    def list_recent_for_session(
+        self,
+        *,
+        session_id: int,
+        limit: int = 6,
+    ) -> list[ConversationTurn]:
+        statement = (
+            select(ConversationMessage)
+            .where(ConversationMessage.session_id == session_id)
+            .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+            .limit(limit)
+        )
+        rows = list(self._session.scalars(statement))
+        rows.reverse()
+        return [
+            ConversationTurn(
+                role=row.role.value,
+                content=row.content,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ]
 
 
 class SupportedMetricRepository:

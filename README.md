@@ -1,8 +1,8 @@
 # food_registry_bot
 
-`food_registry_bot` - Telegram-бот для ведения дневника питания, воды и тренировок.
+`food_registry_bot` - Telegram-бот для ведения дневника питания, воды и тренировок, с отдельным factual-aware conversational слоем `nutrition coach`.
 
-Пользователь отправляет боту текстовое сообщение или фото еды. Система с помощью LLM извлекает структуру записи, оценивает КБЖУ и дополнительные метрики, сохраняет результат в базе данных и возвращает краткий текстовый отчёт по записи и текущему дню.
+Пользователь отправляет боту текстовое сообщение или фото еды. Система сначала отделяет команды, journal-сообщения и conversational-сообщения. Journal flow с помощью LLM извлекает структуру записи, оценивает КБЖУ и дополнительные метрики, сохраняет результат в базе данных и возвращает краткий текстовый отчёт по записи и текущему дню. После успешной записи еды бот может добавить короткий nutrition-aware комментарий поверх тех же factual данных. Conversational flow работает как `nutrition coach`: отвечает на свободные вопросы отдельно, не сохраняет их как factual entries, всегда опирается на актуальные метрики и recent entries текущего дня, держит короткую session memory около одного часа и поддерживает первый безопасный мультимодальный сценарий для фото продуктов или холодильника с явным coaching-caption.
 
 Проект делается в первую очередь для личного использования, но архитектура должна позволять без существенных изменений дать доступ нескольким знакомым пользователям.
 
@@ -67,6 +67,24 @@
 ### Telegram layer
 
 Отвечает за приём сообщений, фото и команд, а также за отправку пользователю итогового ответа.
+
+### Message routing layer
+
+Отвечает за безопасную границу между:
+
+- command messages;
+- journal messages;
+- conversational messages;
+- ambiguous messages, которые лучше отклонить без записи, чем сохранить неверный факт.
+
+### Nutrition coach layer
+
+Использует factual context дня пользователя и короткую session memory, чтобы:
+
+- отвечать на nutrition / hydration / meal-planning вопросы и общие health topics;
+- принимать фото холодильника или доступных продуктов как conversational input, если caption явно просит совет;
+- добавлять короткий post-entry nutrition comment после успешной записи еды;
+- не вмешиваться в routing и factual contract самого logging flow.
 
 ### AI parsing layer
 
@@ -198,7 +216,8 @@ LLM в проекте не сводится только к классифика
 
 1. извлечение структуры сообщения;
 2. оценка нутриентных и дополнительных метрик;
-3. генерация краткого ответа пользователю.
+3. ответа `nutrition coach` поверх factual context;
+4. генерация краткого factual-ответа пользователю.
 
 При этом система должна хранить разумные допущения, уровень уверенности и источник оценки, особенно в случаях с фото, сложными блюдами и неоднозначным описанием.
 
@@ -235,6 +254,25 @@ ADMIN_USER_IDS=123456789
 
 Если админов несколько, перечисли их через запятую.
 
+Минимальный шаблон локального `.env` на текущем этапе выглядит так:
+
+```env
+APP_ENV=local
+BOT_TOKEN=
+ADMIN_USER_IDS=
+EXTRACTION_PROVIDER=structured_payload
+LLM_MODEL=gpt-5-mini
+NUTRITION_MODEL=gpt-5-mini
+CONVERSATION_MODEL=gpt-5-mini
+OPENAI_API_KEY=
+
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=food_registry
+POSTGRES_USER=food_registry
+POSTGRES_PASSWORD=food_registry
+```
+
 Для extraction layer на текущем этапе поддерживаются два режима:
 
 - `EXTRACTION_PROVIDER=structured_payload` - дев-режим, где бот принимает уже нормализованный structured payload;
@@ -247,6 +285,19 @@ ADMIN_USER_IDS=123456789
 - text-only сообщения;
 - одно фото еды с опциональным caption;
 - тот же `entries` extraction contract на выходе, что и для structured payload режима.
+
+Для conversational `nutrition coach` на текущем этапе отдельный provider-флаг не нужен:
+
+- если `OPENAI_API_KEY` не задан, conversational routing остаётся доступным, но вместо LLM-ответа бот явно сообщает, что `nutrition coach` не настроен;
+- если `OPENAI_API_KEY` задан, бот использует OpenAI Responses API для factual-aware coach reply.
+
+Модели на текущем этапе разделены так:
+
+- `LLM_MODEL` - модель extraction layer;
+- `NUTRITION_MODEL` - модель nutrition estimation layer;
+- `CONVERSATION_MODEL` - модель `nutrition coach`.
+
+Если не нужен отдельный тюнинг, все три можно оставить одинаковыми.
 
 ## Документация
 

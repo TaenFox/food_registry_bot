@@ -13,4 +13,6 @@ def test_core_tables_registered() -> None:
         "entry_items",
         "supported_metrics",
         "entry_item_metrics",
+        "conversation_sessions",
+        "conversation_messages",
     }

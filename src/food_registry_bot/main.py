@@ -1,6 +1,7 @@
 import asyncio
 
 from food_registry_bot.bot.factory import create_bot, create_dispatcher
+from food_registry_bot.conversation.factory import create_conversation_service
 from food_registry_bot.config import get_settings
 from food_registry_bot.db.session import create_session_factory
 from food_registry_bot.extraction.factory import create_extraction_service
@@ -17,6 +18,7 @@ async def run() -> None:
         create_session_factory(),
         extraction_service=create_extraction_service(settings),
         nutrition_service=create_nutrition_service(settings),
+        conversation_service=create_conversation_service(settings),
         admin_user_ids=settings.admin_user_ids,
     )
     await dispatcher.start_polling(bot)

@@ -28,6 +28,11 @@ class MealType(str, enum.Enum):
     DRINK = "drink"
 
 
+class ConversationMessageRole(str, enum.Enum):
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -57,6 +62,10 @@ class User(Base):
         uselist=False,
     )
     daily_goal_snapshots: Mapped[list["DailyGoalSnapshot"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    conversation_sessions: Mapped[list["ConversationSession"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
     )
@@ -263,3 +272,44 @@ class EntryItemMetric(Base):
 
     entry_item: Mapped["EntryItem"] = relationship(back_populates="metrics")
     metric: Mapped["SupportedMetric"] = relationship(back_populates="entry_item_metrics")
+
+
+class ConversationSession(Base):
+    __tablename__ = "conversation_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    summary_text: Mapped[Optional[str]] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    last_message_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    user: Mapped["User"] = relationship(back_populates="conversation_sessions")
+    messages: Mapped[list["ConversationMessage"]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
+
+
+class ConversationMessage(Base):
+    __tablename__ = "conversation_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("conversation_sessions.id"), index=True)
+    role: Mapped[ConversationMessageRole] = mapped_column(
+        Enum(ConversationMessageRole, name="conversation_message_role", values_callable=enum_values)
+    )
+    content: Mapped[str] = mapped_column(Text)
+    telegram_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, index=True)
+    telegram_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+    session: Mapped["ConversationSession"] = relationship(back_populates="messages")

@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.handlers import (
+    build_ambiguous_message_response,
     handle_admin,
     handle_admin_allow,
     handle_admin_backfill_nutrition,
@@ -27,10 +28,14 @@ from food_registry_bot.bot.handlers import (
     handle_toggle_summary_metric,
     handle_water_250_ml,
 )
+from food_registry_bot.bot.message_routing import MessageRoutingDecision
 from food_registry_bot.bot.payloads import SummarySettingsCallback
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT
 from food_registry_bot.db.base import Base
 from food_registry_bot.db.models import (
+    ConversationMessageRole,
+    ConversationMessage,
+    ConversationSession,
     DailyGoalSnapshot,
     Entry,
     EntryItem,
@@ -625,7 +630,7 @@ async def test_regular_message_saves_metrics_for_allowed_user() -> None:
     assert metric_count == 5
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сохранил:\n- яблоко: 180 г\n\n"
+        "Сохранил:\n- яблоко (180 г)\n\n"
         "<pre>"
         "К: 220.0 / 1800 ккал (+220.0 ккал)\n"
         "Б: 7.6 / 90 г (+7.6 г)\n"
@@ -686,7 +691,7 @@ async def test_recent_returns_latest_entries_for_allowed_user() -> None:
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Последние записи:\n- вода: 250 мл\n- яблоко",
+        "Последние записи:\n- вода (250 мл)\n- яблоко",
     )
 
 
@@ -1737,7 +1742,7 @@ async def test_water_button_creates_water_entry_for_allowed_user() -> None:
     assert saved_item.name == "water"
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сохранил:\n- вода: 250 мл\n\n"
+        "Сохранил:\n- вода (250 мл)\n\n"
         "<pre>"
         "К: 0.0 / 1800 ккал\n"
         "Б: 0.0 / 90 г\n"
@@ -1788,7 +1793,7 @@ async def test_water_button_shows_delta_bar_report_in_bars_mode() -> None:
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сохранил:\n- вода: 250 мл\n\n<pre>В      [██▓░░░░░░░] 37.5% 750.0/2000 мл (+250.0 мл)</pre>",
+        "Сохранил:\n- вода (250 мл)\n\n<pre>В      [██▓░░░░░░░] 37.5% 750.0/2000 мл (+250.0 мл)</pre>",
     )
 
 
@@ -1847,13 +1852,134 @@ async def test_confirmation_hides_delta_suffix_when_setting_is_disabled() -> Non
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сохранил:\n- яблоко: 180 г\n\n"
+        "Сохранил:\n- яблоко (180 г)\n\n"
         "<pre>"
         "К: 220.0 / 1800 ккал\n"
         "Б: 7.6 / 90 г\n"
         "Ж: 2.2 / 60 г\n"
         "У: 42.8 / 210 г\n"
         "Кл: 5.1 / 25 г\n"
+        "В: 0.0 / 2000 мл"
+        "</pre>",
+    )
+
+
+async def test_food_confirmation_appends_post_entry_nutrition_comment() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "post_entry_comment_user")
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.FOOD,
+                        items=[ExtractedJournalItem(name="яблоко", quantity=180, unit="г")],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload='{"entries":[{"type":"food","items":[{"name":"яблоко","quantity":180,"unit":"г"}]}]}',
+        )
+    )
+    nutrition_service = StaticNutritionEstimationService(
+        raw_payload=build_metric_payload(["entry-1:item-0"])
+    )
+    conversation_service = SimpleNamespace(
+        comment_on_food_write=lambda **kwargs: (
+            "После этой записи углеводы и клетчатка подросли, но по белку у тебя ещё заметный запас."
+            if kwargs["saved_items"] == ["яблоко (180 г)"]
+            else None
+        )
+    )
+    message = SimpleNamespace(
+        text="яблоко",
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="post_entry_comment_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        nutrition_service=nutrition_service,
+        conversation_service=conversation_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_entry = session.query(Entry).one()
+
+    assert saved_entry.llm_comment == (
+        "После этой записи углеводы и клетчатка подросли, но по белку у тебя ещё заметный запас."
+    )
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Сохранил:\n- яблоко (180 г)\n\n"
+        "<pre>"
+        "К: 220.0 / 1800 ккал (+220.0 ккал)\n"
+        "Б: 7.6 / 90 г (+7.6 г)\n"
+        "Ж: 2.2 / 60 г (+2.2 г)\n"
+        "У: 42.8 / 210 г (+42.8 г)\n"
+        "Кл: 5.1 / 25 г (+5.1 г)\n"
+        "В: 0.0 / 2000 мл"
+        "</pre>\n\n"
+        "Нутрициолог: После этой записи углеводы и клетчатка подросли, но по белку у тебя ещё заметный запас.",
+    )
+
+
+async def test_food_confirmation_still_succeeds_when_post_entry_comment_fails() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "post_entry_comment_error_user")
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.FOOD,
+                        items=[ExtractedJournalItem(name="яблоко", quantity=180, unit="г")],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload='{"entries":[{"type":"food","items":[{"name":"яблоко","quantity":180,"unit":"г"}]}]}',
+        )
+    )
+    nutrition_service = StaticNutritionEstimationService(
+        raw_payload=build_metric_payload(["entry-1:item-0"])
+    )
+    conversation_service = SimpleNamespace(
+        comment_on_food_write=lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("comment failed"))
+    )
+    message = SimpleNamespace(
+        text="яблоко",
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="post_entry_comment_error_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        nutrition_service=nutrition_service,
+        conversation_service=conversation_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_entry = session.query(Entry).one()
+
+    assert saved_entry.llm_comment is None
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Сохранил:\n- яблоко (180 г)\n\n"
+        "<pre>"
+        "К: 220.0 / 1800 ккал (+220.0 ккал)\n"
+        "Б: 7.6 / 90 г (+7.6 г)\n"
+        "Ж: 2.2 / 60 г (+2.2 г)\n"
+        "У: 42.8 / 210 г (+42.8 г)\n"
+        "Кл: 5.1 / 25 г (+5.1 г)\n"
         "В: 0.0 / 2000 мл"
         "</pre>",
     )
@@ -1966,3 +2092,514 @@ async def test_handler_rolls_back_food_write_when_nutrition_payload_is_invalid()
 
     message.answer.assert_awaited_once()
     assert "невалидный structured payload" in message.answer.await_args.args[0]
+
+
+async def test_handle_message_routes_conversation_text_without_creating_entries() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "conversation_user")
+    extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
+    captured_reply_args = {}
+
+    def reply_stub(*, user_message, factual_context, session_summary, recent_turns, images=()):
+        captured_reply_args["user_message"] = user_message
+        captured_reply_args["factual_context"] = factual_context
+        captured_reply_args["session_summary"] = session_summary
+        captured_reply_args["recent_turns"] = recent_turns
+        captured_reply_args["images"] = images
+        return SimpleNamespace(text=f"Ответ на: {user_message}", updated_session_summary="обновлённый summary")
+
+    conversation_service = SimpleNamespace(
+        reply=reply_stub
+    )
+    message = SimpleNamespace(
+        text="Как добрать белок без лишних калорий?",
+        message_id=321,
+        chat=SimpleNamespace(id=98765),
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="conversation_user"),
+        bot=SimpleNamespace(send_chat_action=AsyncMock()),
+        answer=AsyncMock(return_value=SimpleNamespace(message_id=654321, chat=SimpleNamespace(id=98765))),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        conversation_service=conversation_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 0
+        saved_session = session.query(ConversationSession).one()
+        saved_messages = session.query(ConversationMessage).order_by(ConversationMessage.id.asc()).all()
+
+    assert captured_reply_args["user_message"] == "Как добрать белок без лишних калорий?"
+    factual_context = captured_reply_args["factual_context"]
+    assert captured_reply_args["session_summary"] is None
+    assert captured_reply_args["recent_turns"] == []
+    assert captured_reply_args["images"] == ()
+    assert factual_context.summary_date.isoformat() == "2026-05-20"
+    assert factual_context.day_totals["water"] == 0.0
+    assert factual_context.goal_progress["calories"].goal_value == 1800
+    assert factual_context.recent_entries == []
+    assert saved_session.summary_text == "обновлённый summary"
+    assert [
+        (saved_message.role.value, saved_message.content, saved_message.telegram_chat_id, saved_message.telegram_message_id)
+        for saved_message in saved_messages
+    ] == [
+        ("user", "Как добрать белок без лишних калорий?", None, None),
+        ("assistant", "Ответ на: Как добрать белок без лишних калорий?", 98765, 654321),
+    ]
+    message.answer.assert_awaited_once()
+    message.bot.send_chat_action.assert_awaited_once_with(chat_id=98765, action="typing")
+    assert message.answer.await_args.args == ("Ответ на: Как добрать белок без лишних калорий?",)
+    assert message.answer.await_args.kwargs["parse_mode"] is None
+    assert message.answer.await_args.kwargs["reply_to_message_id"] == 321
+
+
+async def test_handle_message_sends_conversation_reply_as_plain_text() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "conversation_html_user")
+    extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
+    conversation_service = SimpleNamespace(
+        reply=lambda *, user_message, factual_context, session_summary, recent_turns, images=(): SimpleNamespace(
+            text="Перед тренировкой лучше держать жиры <30 г и не переедать.",
+            updated_session_summary="summary",
+        )
+    )
+    message = SimpleNamespace(
+        text="что лучше съесть перед вечерней тренировкой?",
+        message_id=322,
+        chat=SimpleNamespace(id=98766),
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="conversation_html_user"),
+        answer=AsyncMock(return_value=SimpleNamespace(message_id=654322, chat=SimpleNamespace(id=98766))),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        conversation_service=conversation_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("Перед тренировкой лучше держать жиры <30 г и не переедать.",)
+    assert message.answer.await_args.kwargs["parse_mode"] is None
+    assert message.answer.await_args.kwargs["reply_to_message_id"] == 322
+
+
+async def test_handle_message_returns_ambiguous_reply_without_creating_entries() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "ambiguous_user")
+    extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
+    message_routing_service = SimpleNamespace(
+        route=lambda _request, **_kwargs: MessageRoutingDecision(route="ambiguous", reason="test_ambiguous")
+    )
+    message = SimpleNamespace(
+        text="Сегодня как-то странно с едой и режимом",
+        message_id=654,
+        chat=SimpleNamespace(id=98767),
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="ambiguous_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        message_routing_service=message_routing_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 0
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (build_ambiguous_message_response(),)
+    assert message.answer.await_args.kwargs["reply_to_message_id"] == 654
+
+
+async def test_handle_message_does_not_route_slash_like_text_to_journal() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "slash_user")
+    extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
+    message = SimpleNamespace(
+        text="/админ",
+        message_id=777,
+        chat=SimpleNamespace(id=98768),
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="slash_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 0
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (build_ambiguous_message_response(),)
+    assert message.answer.await_args.kwargs["reply_to_message_id"] == 777
+
+
+async def test_handle_message_routes_follow_up_to_conversation_when_active_session_exists() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "followup_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="followup_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        coach_session = ConversationSession(
+            user_id=user.id,
+            summary_text="говорили про питание перед тренировкой",
+            started_at=datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc),
+            last_message_at=datetime(2026, 5, 20, 10, 30, tzinfo=timezone.utc),
+        )
+        session.add(coach_session)
+        session.flush()
+        session.add_all(
+            [
+                ConversationMessage(
+                    session_id=coach_session.id,
+                    role=ConversationMessageRole.USER,
+                    content="что лучше съесть перед вечерней тренировкой?",
+                    created_at=datetime(2026, 5, 20, 10, 29, tzinfo=timezone.utc),
+                ),
+                ConversationMessage(
+                    session_id=coach_session.id,
+                    role=ConversationMessageRole.ASSISTANT,
+                    content="дам два сценария",
+                    created_at=datetime(2026, 5, 20, 10, 30, tzinfo=timezone.utc),
+                ),
+            ]
+        )
+        session.commit()
+
+    extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
+    captured_reply_args = {}
+
+    def reply_stub(*, user_message, factual_context, session_summary, recent_turns, images=()):
+        captured_reply_args["user_message"] = user_message
+        captured_reply_args["session_summary"] = session_summary
+        captured_reply_args["recent_turns"] = recent_turns
+        captured_reply_args["images"] = images
+        return SimpleNamespace(text="уточняю сценарий А", updated_session_summary="обновлённый followup summary")
+
+    message = SimpleNamespace(
+        text="это будет сценарий А",
+        message_id=888,
+        chat=SimpleNamespace(id=98769),
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="followup_user"),
+        answer=AsyncMock(return_value=SimpleNamespace(message_id=654888, chat=SimpleNamespace(id=98769))),
+    )
+
+    original_datetime = handle_message.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 20, 10, 40, tzinfo=timezone.utc)
+
+    handle_message.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_message(
+            message,
+            session_factory,
+            extraction_service=extraction_service,
+            conversation_service=SimpleNamespace(reply=reply_stub),
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_message.__globals__["datetime"] = original_datetime
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 0
+        saved_session = session.query(ConversationSession).one()
+        saved_messages = session.query(ConversationMessage).order_by(ConversationMessage.id.asc()).all()
+
+    assert captured_reply_args["user_message"] == "это будет сценарий А"
+    assert captured_reply_args["session_summary"] == "говорили про питание перед тренировкой"
+    assert captured_reply_args["images"] == ()
+    assert [(turn.role, turn.content) for turn in captured_reply_args["recent_turns"]] == [
+        ("user", "что лучше съесть перед вечерней тренировкой?"),
+        ("assistant", "дам два сценария"),
+    ]
+    assert saved_session.summary_text == "обновлённый followup summary"
+    assert [(saved_message.role.value, saved_message.content) for saved_message in saved_messages] == [
+        ("user", "что лучше съесть перед вечерней тренировкой?"),
+        ("assistant", "дам два сценария"),
+        ("user", "это будет сценарий А"),
+        ("assistant", "уточняю сценарий А"),
+    ]
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("уточняю сценарий А",)
+
+
+async def test_handle_message_routes_reply_to_coach_message_into_same_session_even_after_ttl() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "reply_followup_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="reply_followup_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        coach_session = ConversationSession(
+            user_id=user.id,
+            summary_text="говорили про предтренировочный перекус",
+            started_at=datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc),
+            last_message_at=datetime(2026, 5, 20, 10, 30, tzinfo=timezone.utc),
+        )
+        session.add(coach_session)
+        session.flush()
+        session.add_all(
+            [
+                ConversationMessage(
+                    session_id=coach_session.id,
+                    role=ConversationMessageRole.USER,
+                    content="что лучше съесть перед вечерней тренировкой?",
+                    created_at=datetime(2026, 5, 20, 10, 29, tzinfo=timezone.utc),
+                ),
+                ConversationMessage(
+                    session_id=coach_session.id,
+                    role=ConversationMessageRole.ASSISTANT,
+                    content="если через 10 минут, бери лёгкий быстрый перекус",
+                    telegram_chat_id=321123,
+                    telegram_message_id=654987,
+                    created_at=datetime(2026, 5, 20, 10, 30, tzinfo=timezone.utc),
+                ),
+            ]
+        )
+        session.commit()
+
+    extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
+    captured_reply_args = {}
+
+    def reply_stub(*, user_message, factual_context, session_summary, recent_turns, images=()):
+        captured_reply_args["user_message"] = user_message
+        captured_reply_args["session_summary"] = session_summary
+        captured_reply_args["recent_turns"] = recent_turns
+        captured_reply_args["images"] = images
+        return SimpleNamespace(text="тогда бери только быстрые углеводы", updated_session_summary="уточнили быстрый перекус")
+
+    message = SimpleNamespace(
+        text="а если она через 10 минут?",
+        message_id=889,
+        chat=SimpleNamespace(id=321123),
+        reply_to_message=SimpleNamespace(message_id=654987),
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="reply_followup_user"),
+        answer=AsyncMock(return_value=SimpleNamespace(message_id=654889, chat=SimpleNamespace(id=321123))),
+    )
+
+    original_datetime = handle_message.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 20, 12, 45, tzinfo=timezone.utc)
+
+    handle_message.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_message(
+            message,
+            session_factory,
+            extraction_service=extraction_service,
+            conversation_service=SimpleNamespace(reply=reply_stub),
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_message.__globals__["datetime"] = original_datetime
+
+    with session_factory() as session:
+        saved_session = session.query(ConversationSession).one()
+        saved_messages = session.query(ConversationMessage).order_by(ConversationMessage.id.asc()).all()
+
+    assert captured_reply_args["user_message"] == "а если она через 10 минут?"
+    assert captured_reply_args["session_summary"] == "говорили про предтренировочный перекус"
+    assert captured_reply_args["images"] == ()
+    assert [(turn.role, turn.content) for turn in captured_reply_args["recent_turns"]] == [
+        ("user", "что лучше съесть перед вечерней тренировкой?"),
+        ("assistant", "если через 10 минут, бери лёгкий быстрый перекус"),
+    ]
+    assert saved_session.summary_text == "уточнили быстрый перекус"
+    assert [(saved_message.role.value, saved_message.content) for saved_message in saved_messages] == [
+        ("user", "что лучше съесть перед вечерней тренировкой?"),
+        ("assistant", "если через 10 минут, бери лёгкий быстрый перекус"),
+        ("user", "а если она через 10 минут?"),
+        ("assistant", "тогда бери только быстрые углеводы"),
+    ]
+    assert saved_messages[-1].telegram_chat_id == 321123
+    assert saved_messages[-1].telegram_message_id == 654889
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("тогда бери только быстрые углеводы",)
+
+
+async def test_photo_message_with_explicit_coaching_caption_routes_to_conversation() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "photo_conversation_user")
+    extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
+    captured_reply_args = {}
+
+    def reply_stub(*, user_message, factual_context, session_summary, recent_turns, images=()):
+        captured_reply_args["user_message"] = user_message
+        captured_reply_args["images"] = images
+        return SimpleNamespace(text="Из этого можно сделать лёгкий ужин с упором на овощи и обычный белок.", updated_session_summary="обсуждали продукты по фото")
+
+    async def download_stub(_photo, destination):
+        destination.write(b"fridge-image-bytes")
+
+    message = SimpleNamespace(
+        text=None,
+        caption="что лучше приготовить из этого?",
+        message_id=990,
+        chat=SimpleNamespace(id=98770),
+        photo=[SimpleNamespace(file_id="small"), SimpleNamespace(file_id="large")],
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="photo_conversation_user"),
+        bot=SimpleNamespace(download=AsyncMock(side_effect=download_stub)),
+        answer=AsyncMock(return_value=SimpleNamespace(message_id=654990, chat=SimpleNamespace(id=98770))),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        conversation_service=SimpleNamespace(reply=reply_stub),
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 0
+        saved_session = session.query(ConversationSession).one()
+
+    assert captured_reply_args["user_message"] == "что лучше приготовить из этого?"
+    assert len(captured_reply_args["images"]) == 1
+    assert captured_reply_args["images"][0].data == b"fridge-image-bytes"
+    assert saved_session.summary_text == "обсуждали продукты по фото"
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("Из этого можно сделать лёгкий ужин с упором на овощи и обычный белок.",)
+    assert message.answer.await_args.kwargs["reply_to_message_id"] == 990
+
+
+async def test_photo_message_with_journal_caption_stays_journal_even_with_active_conversation_session() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "photo_journal_active_session_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="photo_journal_active_session_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        coach_session = ConversationSession(
+            user_id=user.id,
+            summary_text="говорили про ужин",
+            started_at=datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc),
+            last_message_at=datetime(2026, 5, 20, 12, 30, tzinfo=timezone.utc),
+        )
+        session.add(coach_session)
+        session.commit()
+
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.FOOD,
+                        items=[ExtractedJournalItem(name="курица"), ExtractedJournalItem(name="кускус")],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload='{"entries":[{"type":"food","items":[{"name":"курица"},{"name":"кускус"}]}]}',
+        )
+    )
+    nutrition_service = StaticNutritionEstimationService(
+        raw_payload=build_metric_payload(["entry-1:item-0", "entry-1:item-1"])
+    )
+
+    async def download_stub(_photo, destination):
+        destination.write(b"meal-image-bytes")
+
+    message = SimpleNamespace(
+        text=None,
+        caption="Запиши в обед",
+        message_id=991,
+        chat=SimpleNamespace(id=98771),
+        photo=[SimpleNamespace(file_id="small"), SimpleNamespace(file_id="large")],
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="photo_journal_active_session_user"),
+        bot=SimpleNamespace(download=AsyncMock(side_effect=download_stub), send_chat_action=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    original_datetime = handle_message.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 20, 12, 40, tzinfo=timezone.utc)
+
+    handle_message.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_message(
+            message,
+            session_factory,
+            extraction_service=extraction_service,
+            nutrition_service=nutrition_service,
+            conversation_service=SimpleNamespace(reply=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("reply must not be called"))),
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_message.__globals__["datetime"] = original_datetime
+
+    with session_factory() as session:
+        saved_entries = session.query(Entry).all()
+        saved_messages = session.query(ConversationMessage).all()
+
+    assert len(saved_entries) == 1
+    assert saved_entries[0].entry_type == EntryType.FOOD
+    assert saved_messages == []
+    message.answer.assert_awaited_once()
+    assert "Сохранил:" in message.answer.await_args.args[0]
+
+
+async def test_handle_message_routes_clear_journal_text_to_extraction_flow() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "journal_route_user")
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.FOOD,
+                        items=[ExtractedJournalItem(name="гречка"), ExtractedJournalItem(name="курица")],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload='{"entries":[{"type":"food","items":[{"name":"гречка"},{"name":"курица"}]}]}',
+        )
+    )
+    nutrition_service = StaticNutritionEstimationService(
+        raw_payload=build_metric_payload(["entry-1:item-0", "entry-1:item-1"])
+    )
+    message = SimpleNamespace(
+        text="съел гречку с курицей",
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="journal_route_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        nutrition_service=nutrition_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 1
+        assert session.query(EntryItem).count() == 2
+
+    message.answer.assert_awaited_once()

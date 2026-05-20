@@ -18,6 +18,8 @@ BOT_TOKEN=
 ADMIN_USER_IDS=
 EXTRACTION_PROVIDER=structured_payload
 LLM_MODEL=gpt-5-mini
+NUTRITION_MODEL=gpt-5-mini
+CONVERSATION_MODEL=gpt-5-mini
 OPENAI_API_KEY=
 
 POSTGRES_HOST=localhost
@@ -38,6 +40,7 @@ cat > "${README_FILE}" <<EOF
 - Скрипты и код проекта ожидают секреты по пути \`../${PROJECT_NAME}_local/.env\` относительно корня репозитория
 - Для admin-команд укажи список Telegram user id в \`ADMIN_USER_IDS\` через запятую
 - Для direct LLM extraction укажи \`EXTRACTION_PROVIDER=llm\` и заполни \`OPENAI_API_KEY\`
+- \`NUTRITION_MODEL\` и \`CONVERSATION_MODEL\` можно оставить по умолчанию или переопределить отдельно
 EOF
 
 echo "Secrets template is ready: ${ENV_FILE}"
