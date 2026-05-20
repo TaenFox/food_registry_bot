@@ -1,0 +1,33 @@
+name: Release On Tag
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate tag format
+        run: |
+          if ! printf '%s' "${GITHUB_REF_NAME}" | grep -Eq '^v[0-9]+$'; then
+            echo "Unsupported tag format: ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+
+      - name: Deploy on server over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: 22
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.DEPLOY_PROJECT_DIR }}"
+            git fetch --tags origin
+            git checkout "${GITHUB_REF_NAME}"
+            ./scripts/release.sh
