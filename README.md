@@ -337,6 +337,8 @@ git pull
 
 `/.github/workflows/release-on-tag.yml`
 
+Workflow также можно запустить вручную через `Run workflow` и передать `git_ref`, например `main`.
+
 Что делает workflow:
 
 - подключается к серверу по SSH;
@@ -360,7 +362,8 @@ git pull
 2. Подготовить на сервере `../food_registry_bot_local/.env`.
 3. Убедиться, что `./scripts/release.sh` работает на сервере вручную.
 4. Добавить GitHub secrets.
-5. Запушить тег, например:
+5. Запустить workflow вручную с `git_ref=main` и убедиться, что деплой проходит.
+6. После успешной ручной проверки запушить тег, например:
 
 ```bash
 git tag v1
