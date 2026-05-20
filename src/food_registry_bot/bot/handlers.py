@@ -263,7 +263,7 @@ def build_admin_users_response(
             lines.append(f"- {known_user.telegram_user_id}{username_suffix} [admin]")
             continue
 
-        status = "allowed" if known_user.is_allowed else "denied"
+        status = "доступ разрешён" if known_user.is_allowed else "доступ запрещён"
         lines.append(f"- {known_user.telegram_user_id}{username_suffix} [{status}]")
         next_command = (
             f"/admin_deny {known_user.telegram_user_id}"
@@ -282,21 +282,21 @@ def build_admin_users_response(
 
 def build_admin_backfill_response(result: NutritionBackfillCompleted, limit: int) -> str:
     if not result.selected_entry_ids:
-        return f"Backfill nutrition: неполных food entries не найдено. Лимит {limit}."
+        return f"Дозаполнение nutrition metrics: неполных записей еды не найдено. Лимит {limit}."
 
     lines = [
-        "Backfill nutrition завершён.",
-        f"Выбрано entries: {len(result.selected_entry_ids)}",
-        f"Обработано entries: {len(result.processed_entry_ids)}",
+        "Дозаполнение nutrition metrics завершено.",
+        f"Выбрано записей: {len(result.selected_entry_ids)}",
+        f"Обработано записей: {len(result.processed_entry_ids)}",
         f"Сохранено метрик: {result.saved_metric_count}",
     ]
 
     if result.skipped_entry_ids:
-        lines.append(f"Пропущено entries: {', '.join(str(entry_id) for entry_id in result.skipped_entry_ids)}")
+        lines.append(f"Пропущено записей: {', '.join(str(entry_id) for entry_id in result.skipped_entry_ids)}")
 
     if result.failed_entries:
         failed_ids = ", ".join(str(failure.entry_id) for failure in result.failed_entries)
-        lines.append(f"Ошибки entries: {failed_ids}")
+        lines.append(f"Ошибки по записям: {failed_ids}")
 
     return "\n".join(lines)
 
@@ -361,7 +361,7 @@ def build_admin_overview_response(
 
     return "\n".join(
         [
-            "Admin dashboard:",
+            "Панель администратора:",
             f"- текущий админ: {admin_user_id}",
             f"- админов в конфиге: {len(admin_user_ids)}",
             f"- известных пользователей: {len(regular_known_users)}",
@@ -369,7 +369,7 @@ def build_admin_overview_response(
             f"- запрещённых пользователей: {denied_count}",
             f"- пользователей с профилем: {profile_count}",
             f"- food entries без полного набора метрик: {incomplete_food_entry_count}",
-            f"- backfill nutrition: {backfill_status_line}",
+            f"- дозаполнение nutrition metrics: {backfill_status_line}",
             "",
             "Доступные команды:",
             "- /admin",
@@ -411,7 +411,7 @@ async def run_admin_backfill_task(
         tracker.mark_completed(message=summary)
         await message_bot.send_message(chat_id, summary)
     except Exception as exc:
-        error_message = f"Backfill nutrition завершился с ошибкой: {exc}"
+        error_message = f"Дозаполнение nutrition metrics завершилось с ошибкой: {exc}"
         tracker.mark_failed(message=error_message)
         await message_bot.send_message(chat_id, error_message)
 
@@ -1055,10 +1055,10 @@ async def handle_admin_backfill_nutrition(
         limit = parsed_limit
 
     if backfill_tracker.is_running():
-        await message.answer("Backfill nutrition уже выполняется.")
+        await message.answer("Дозаполнение nutrition metrics уже выполняется.")
         return
 
-    await message.answer(f"Запускаю backfill nutrition. Лимит: {limit}.")
+    await message.answer(f"Запускаю дозаполнение nutrition metrics. Лимит: {limit}.")
 
     task = asyncio.create_task(
         run_admin_backfill_task(
@@ -1091,13 +1091,13 @@ async def handle_start(
 
     if created:
         await message.answer(
-            "Привет. Профиль создан, бот готов принимать записи.",
+            "Профиль создан. Можешь отправить запись еды, фото блюда или нажать кнопку воды.",
             reply_markup=build_main_keyboard(),
         )
         return
 
     await message.answer(
-        "Привет. Профиль уже существует, бот готов принимать записи.",
+        "Профиль уже есть. Можешь отправить запись еды, фото блюда или нажать кнопку воды.",
         reply_markup=build_main_keyboard(),
     )
 
@@ -1348,7 +1348,7 @@ async def handle_toggle_summary_metric(
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
             ),
         )
-    await callback.answer("Настройка обновлена.")
+    await callback.answer("Настройки обновлены.")
 
 
 @router.message(Command("today"))
@@ -1542,7 +1542,7 @@ async def handle_message(
         extraction_request = await build_extraction_request(message)
         if extraction_request is None:
             await message.answer(
-                "Пока поддерживаются текстовые сообщения, фото еды и кнопка воды.",
+                "Сейчас поддерживаются текстовые записи, фото еды и кнопка воды.",
                 reply_markup=build_main_keyboard(),
             )
             return
@@ -1638,7 +1638,7 @@ async def handle_message(
 
         if extraction_result is None:
             await message.answer(
-                "Текущий extraction provider не смог обработать сообщение с едой.",
+                "Не удалось распознать запись. Попробуй сформулировать её короче или отправь другое фото.",
                 reply_markup=build_main_keyboard(),
             )
             return

@@ -166,7 +166,9 @@ async def test_start_creates_user_for_allowed_user() -> None:
 
     assert saved_user.username == "allowed_user"
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Привет. Профиль создан, бот готов принимать записи.",)
+    assert message.answer.await_args.args == (
+        "Профиль создан. Можешь отправить запись еды, фото блюда или нажать кнопку воды.",
+    )
 
 
 async def test_health_denies_unallowed_user() -> None:
@@ -276,7 +278,7 @@ async def test_admin_returns_system_overview_and_commands() -> None:
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         (
-            "Admin dashboard:\n"
+            "Панель администратора:\n"
             f"- текущий админ: {ADMIN_ID}\n"
             "- админов в конфиге: 1\n"
             "- известных пользователей: 2\n"
@@ -284,7 +286,7 @@ async def test_admin_returns_system_overview_and_commands() -> None:
             "- запрещённых пользователей: 1\n"
             "- пользователей с профилем: 1\n"
             "- food entries без полного набора метрик: 1\n"
-            "- backfill nutrition: idle\n"
+            "- дозаполнение nutrition metrics: idle\n"
             "\n"
             "Доступные команды:\n"
             "- /admin\n"
@@ -313,7 +315,7 @@ async def test_admin_overview_excludes_admin_from_user_counters() -> None:
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         (
-            "Admin dashboard:\n"
+            "Панель администратора:\n"
             f"- текущий админ: {ADMIN_ID}\n"
             "- админов в конфиге: 1\n"
             "- известных пользователей: 1\n"
@@ -321,7 +323,7 @@ async def test_admin_overview_excludes_admin_from_user_counters() -> None:
             "- запрещённых пользователей: 1\n"
             "- пользователей с профилем: 0\n"
             "- food entries без полного набора метрик: 0\n"
-            "- backfill nutrition: idle\n"
+            "- дозаполнение nutrition metrics: idle\n"
             "\n"
             "Доступные команды:\n"
             "- /admin\n"
@@ -388,9 +390,9 @@ async def test_admin_users_returns_known_users_with_status_and_commands() -> Non
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         "Пользователи:\n"
-        f"- {ALLOWED_USER_ID} @allowed_user [allowed]\n"
+        f"- {ALLOWED_USER_ID} @allowed_user [доступ разрешён]\n"
         f"<code>/admin_deny {ALLOWED_USER_ID}</code>\n"
-        f"- {DENIED_USER_ID} @denied_user [denied]\n"
+        f"- {DENIED_USER_ID} @denied_user [доступ запрещён]\n"
         f"<code>/admin_allow {DENIED_USER_ID}</code>\n"
         f"- {ADMIN_ID} [admin]",
     )
@@ -415,7 +417,7 @@ async def test_admin_users_shows_new_denied_user_after_first_contact() -> None:
     admin_message.answer.assert_awaited_once()
     assert admin_message.answer.await_args.args == (
         "Пользователи:\n"
-        f"- {LARGE_DENIED_USER_ID} @new_user [denied]\n"
+        f"- {LARGE_DENIED_USER_ID} @new_user [доступ запрещён]\n"
         f"<code>/admin_allow {LARGE_DENIED_USER_ID}</code>\n"
         f"- {ADMIN_ID} [admin]",
     )
@@ -479,12 +481,12 @@ async def test_admin_backfill_nutrition_recomputes_incomplete_entries() -> None:
         assert session.query(EntryItemMetric).count() == 5
 
     assert message.answer.await_count == 1
-    assert message.answer.await_args.args == ("Запускаю backfill nutrition. Лимит: 20.",)
+    assert message.answer.await_args.args == ("Запускаю дозаполнение nutrition metrics. Лимит: 20.",)
     assert bot.send_message.await_args.args == (
         7001,
-        "Backfill nutrition завершён.\n"
-        "Выбрано entries: 1\n"
-        "Обработано entries: 1\n"
+        "Дозаполнение nutrition metrics завершено.\n"
+        "Выбрано записей: 1\n"
+        "Обработано записей: 1\n"
         "Сохранено метрик: 5",
     )
 
@@ -554,8 +556,8 @@ async def test_admin_backfill_nutrition_reports_unhandled_error() -> None:
     await backfill_tracker.task
 
     assert message.answer.await_count == 1
-    assert message.answer.await_args.args == ("Запускаю backfill nutrition. Лимит: 1.",)
-    assert bot.send_message.await_args.args == (7002, "Backfill nutrition завершился с ошибкой: boom")
+    assert message.answer.await_args.args == ("Запускаю дозаполнение nutrition metrics. Лимит: 1.",)
+    assert bot.send_message.await_args.args == (7002, "Дозаполнение nutrition metrics завершилось с ошибкой: boom")
 
 
 async def test_admin_backfill_nutrition_rejects_parallel_run() -> None:
@@ -582,7 +584,7 @@ async def test_admin_backfill_nutrition_rejects_parallel_run() -> None:
     )
 
     second_message.answer.assert_awaited_once()
-    assert second_message.answer.await_args.args == ("Backfill nutrition уже выполняется.",)
+    assert second_message.answer.await_args.args == ("Дозаполнение nutrition metrics уже выполняется.",)
     running_task.cancel()
 
 
@@ -1343,7 +1345,7 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Калории: on"
     assert reply_markup.inline_keyboard[1][0].text == "Белки: off"
-    callback.answer.assert_awaited_once_with("Настройка обновлена.")
+    callback.answer.assert_awaited_once_with("Настройки обновлены.")
 
 
 async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -> None:
@@ -1509,7 +1511,7 @@ async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[6][0].text == "Дельта записи: off"
-    callback.answer.assert_awaited_once_with("Настройка обновлена.")
+    callback.answer.assert_awaited_once_with("Настройки обновлены.")
 
 
 async def test_today_uses_preference_nutrition_day_start_hour() -> None:

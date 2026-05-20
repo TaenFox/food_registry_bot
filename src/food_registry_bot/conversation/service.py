@@ -64,8 +64,8 @@ class DisabledConversationService:
         _ = images
         return ConversationReply(
             text=(
-                "Nutrition coach пока не настроен. "
-                "Если хочешь использовать разговорный режим с учётом текущих метрик дня, добавь OPENAI_API_KEY."
+                "Режим консультации пока недоступен. "
+                "Попробуй позже или продолжай пользоваться дневником записей."
             ),
             provider="disabled",
             model=None,
@@ -109,7 +109,7 @@ class LLMConversationService:
         except LLMConversationClientError as exc:
             logger.exception("Nutrition coach request failed: %s", exc)
             return ConversationReply(
-                text=f"Не удалось получить ответ nutrition coach. Причина: {exc}",
+                text=f"Не удалось получить ответ в режиме консультации. Причина: {exc}",
                 provider=self._client.provider_name,
                 model=self._client.model_name,
                 updated_session_summary=session_summary,
