@@ -1974,8 +1974,15 @@ async def test_handle_message_routes_conversation_text_without_creating_entries(
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "conversation_user")
     extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
+    captured_reply_args = {}
+
+    def reply_stub(*, user_message, factual_context):
+        captured_reply_args["user_message"] = user_message
+        captured_reply_args["factual_context"] = factual_context
+        return SimpleNamespace(text=f"Ответ на: {user_message}")
+
     conversation_service = SimpleNamespace(
-        reply=lambda *, user_message: SimpleNamespace(text=f"Ответ на: {user_message}")
+        reply=reply_stub
     )
     message = SimpleNamespace(
         text="Как добрать белок без лишних калорий?",
@@ -1995,9 +2002,46 @@ async def test_handle_message_routes_conversation_text_without_creating_entries(
     with session_factory() as session:
         assert session.query(Entry).count() == 0
 
+    assert captured_reply_args["user_message"] == "Как добрать белок без лишних калорий?"
+    factual_context = captured_reply_args["factual_context"]
+    assert factual_context.summary_date.isoformat() == "2026-05-20"
+    assert factual_context.day_totals["water"] == 0.0
+    assert factual_context.goal_progress["calories"].goal_value == 1800
+    assert factual_context.recent_entries == []
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == ("Ответ на: Как добрать белок без лишних калорий?",)
+    assert message.answer.await_args.kwargs["parse_mode"] is None
     assert message.answer.await_args.kwargs["reply_to_message_id"] == 321
+
+
+async def test_handle_message_sends_conversation_reply_as_plain_text() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "conversation_html_user")
+    extraction_service = SimpleNamespace(extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called")))
+    conversation_service = SimpleNamespace(
+        reply=lambda *, user_message, factual_context: SimpleNamespace(
+            text="Перед тренировкой лучше держать жиры <30 г и не переедать."
+        )
+    )
+    message = SimpleNamespace(
+        text="что лучше съесть перед вечерней тренировкой?",
+        message_id=322,
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="conversation_html_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        conversation_service=conversation_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("Перед тренировкой лучше держать жиры <30 г и не переедать.",)
+    assert message.answer.await_args.kwargs["parse_mode"] is None
+    assert message.answer.await_args.kwargs["reply_to_message_id"] == 322
 
 
 async def test_handle_message_returns_ambiguous_reply_without_creating_entries() -> None:

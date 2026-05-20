@@ -1,3 +1,9 @@
+from food_registry_bot.conversation.context import (
+    NutritionCoachContextBuilder,
+    NutritionCoachFactualContext,
+    NutritionCoachMetricProgress,
+    NutritionCoachRecentEntry,
+)
 from food_registry_bot.conversation.factory import create_conversation_service
 from food_registry_bot.conversation.llm_client import (
     LLMConversationClient,
@@ -18,6 +24,10 @@ __all__ = [
     "LLMConversationClient",
     "LLMConversationClientError",
     "LLMConversationService",
+    "NutritionCoachContextBuilder",
+    "NutritionCoachFactualContext",
+    "NutritionCoachMetricProgress",
+    "NutritionCoachRecentEntry",
     "OpenAIResponsesConversationClient",
     "create_conversation_service",
 ]

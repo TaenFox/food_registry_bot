@@ -184,14 +184,11 @@
 
 - текущее пользовательское сообщение;
 - factual context дня;
-- session summary;
-- несколько последних conversational turns.
 
 Ожидаемый выход:
 
 - coach reply;
-- updated session summary;
-- данные для сохранения conversational turn в БД.
+- provider / model trace.
 
 ### 5.2. Память
 
@@ -238,7 +235,7 @@
 
 Статус:
 
-- `[ ]` следующий рекомендуемый этап
+- `[x]` выполнен
 
 Цель:
 
@@ -266,6 +263,10 @@
 
 - conversational nutrition replies строятся не “в вакууме”, а поверх factual context дня;
 - это покрыто тестами и задокументировано.
+
+Связанный ADR:
+
+- [ADR-023](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/adr/ADR-023-factual-aware-nutrition-coach.md:1)
 
 ### Этап 2. Session memory на 1 час
 
@@ -386,11 +387,11 @@
 
 Если продолжать развитие прямо сейчас, следующий шаг:
 
-- Этап 1: `text-first nutrition coach с factual context`
+- Этап 2: `session memory на 1 час`
 
 Почему именно он:
 
-- он уже даёт продуктовую пользу;
-- не требует преждевременной memory model в БД;
-- не тянет за собой photo routing complexity;
-- создаёт правильный coach boundary для следующих этапов.
+- coach boundary и factual context уже выделены;
+- следующий полезный инкремент - удерживать несколько follow-up сообщений;
+- это можно добавить отдельно, не меняя factual logging contract;
+- photo coaching и post-entry comment по-прежнему лучше оставить следующими шагами.

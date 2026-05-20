@@ -24,7 +24,11 @@ from food_registry_bot.bot.message_routing import (
     RuleBasedMessageRoutingService,
 )
 from food_registry_bot.bot.payloads import SummarySettingsCallback
-from food_registry_bot.conversation import ConversationService, DisabledConversationService
+from food_registry_bot.conversation import (
+    ConversationService,
+    DisabledConversationService,
+    NutritionCoachContextBuilder,
+)
 from food_registry_bot.db.models import EntryType
 from food_registry_bot.db.session import session_scope
 from food_registry_bot.db.repositories import (
@@ -1313,12 +1317,26 @@ async def handle_message(
 
     routing_decision = message_routing_service.route(extraction_request)
     if routing_decision.route == CONVERSATION:
-        conversation_reply = conversation_service.reply(
-            user_message=extraction_request.text or "",
-        )
+        with session_scope(session_factory) as session:
+            _, user_id = ensure_user_registered(message, session)
+            user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
+            if user is None:
+                raise RuntimeError("User profile was not found after registration")
+            summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+            factual_context = NutritionCoachContextBuilder(session).build(
+                user_id=user_id,
+                timezone_name=user.timezone,
+                nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                reference_at=datetime.now(timezone.utc),
+            )
+            conversation_reply = conversation_service.reply(
+                user_message=extraction_request.text or "",
+                factual_context=factual_context,
+            )
         await message.answer(
             build_conversation_response(conversation_reply.text),
             reply_markup=build_main_keyboard(),
+            parse_mode=None,
             **build_reply_kwargs(message),
         )
         return
