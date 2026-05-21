@@ -67,6 +67,7 @@ from food_registry_bot.nutrition import (
     FailedNutritionEstimation,
     NutritionBackfillCompleted,
     NutritionEstimationService,
+    resolve_day_bounds_utc,
     resolve_local_summary_date,
     SUPPORTED_NUTRITION_METRIC_CODES,
     SkippedNutritionEstimation,
@@ -453,6 +454,16 @@ def build_saved_items_confirmation(items: list[EntryItemCreate]) -> str:
     return "\n".join(lines)
 
 
+def build_workout_entries_report(entries: list, *, timezone_name: str) -> str | None:
+    if not entries:
+        return None
+
+    lines = ["Тренировки:"]
+    for entry in entries:
+        lines.append(f"- {format_entry_timestamp(entry, timezone_name)} — {build_recent_entry_title(entry)}")
+    return "\n".join(lines)
+
+
 def build_write_confirmation_response(
     saved_items: list[EntryItemCreate],
     day_report: str | None = None,
@@ -784,6 +795,7 @@ def build_daily_report_for_summary_date(
     user_id: int,
     timezone_name: str,
     summary_date: date,
+    workout_logging_enabled: bool,
     summary_preference,
     metric_deltas: dict[str, float] | None = None,
 ) -> str:
@@ -810,7 +822,7 @@ def build_daily_report_for_summary_date(
         water_summary=water_summary,
         snapshot=goal_snapshot,
     )
-    return build_today_summary_response_with_preferences(
+    summary_report = build_today_summary_response_with_preferences(
         summary,
         enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
         summary_display_mode=summary_preference.summary_display_mode,
@@ -819,6 +831,33 @@ def build_daily_report_for_summary_date(
         metric_deltas=metric_deltas,
         show_post_entry_delta_suffix=summary_preference.show_post_entry_delta_suffix,
     )
+    if not workout_logging_enabled:
+        return summary_report
+
+    occurred_at_from, occurred_at_to = resolve_day_bounds_utc(
+        summary_date=summary_date,
+        timezone_name=timezone_name,
+        nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+    )
+    workout_entries = EntryRepository(session).list_workout_for_user_between(
+        user_id=user_id,
+        occurred_at_from=occurred_at_from,
+        occurred_at_to=occurred_at_to,
+    )
+    workout_report = build_workout_entries_report(workout_entries, timezone_name=timezone_name)
+    if workout_report is None:
+        return summary_report
+
+    has_nutrition_or_water_entries = not (
+        summary.included_entry_count == 0
+        and summary.excluded_entry_count == 0
+        and water_summary.included_entry_count == 0
+        and water_summary.excluded_entry_count == 0
+    )
+    if not has_nutrition_or_water_entries:
+        return workout_report
+
+    return "\n\n".join([summary_report, workout_report])
 
 
 def resolve_recent_entry_for_callback(
@@ -1423,6 +1462,7 @@ async def handle_today(
             user_id=user_id,
             timezone_name=user.timezone,
             summary_date=summary_date,
+            workout_logging_enabled=user.workout_logging_enabled,
             summary_preference=preference,
         )
 
@@ -1533,6 +1573,7 @@ async def handle_water_250_ml(
             user_id=user_id,
             timezone_name=user.timezone,
             summary_date=summary_date,
+            workout_logging_enabled=user.workout_logging_enabled,
             summary_preference=preference,
             metric_deltas={"water": 250.0},
         )
@@ -1785,6 +1826,7 @@ async def handle_message(
                             user_id=user_id,
                             timezone_name=user.timezone,
                             summary_date=summary_date,
+                            workout_logging_enabled=user.workout_logging_enabled,
                             summary_preference=summary_preference,
                             metric_deltas=metric_deltas,
                         ),

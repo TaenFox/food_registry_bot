@@ -1205,6 +1205,80 @@ async def test_today_shows_water_progress_for_water_entries() -> None:
     assert message.answer.await_args.args == ("<pre>В: 500.0 / 2000 мл</pre>",)
 
 
+async def test_today_shows_workout_list_only_when_workout_logging_is_enabled() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "today_workout_user")
+    with session_factory() as session:
+        user = User(
+            telegram_user_id=ALLOWED_USER_ID,
+            username="today_workout_user",
+            timezone="Europe/Moscow",
+        )
+        user.workout_logging_enabled = True
+        session.add(user)
+        session.flush()
+        workout_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.WORKOUT,
+            occurred_at=datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add(workout_entry)
+        session.flush()
+        session.add(EntryItem(entry_id=workout_entry.id, position=0, name="бег", quantity=40, unit="min"))
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="today_workout_user"),
+        answer=AsyncMock(),
+    )
+
+    await call_handle_today_at(
+        fixed_now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("Тренировки:\n- 11:00 — бег (40 мин)",)
+
+
+async def test_today_hides_workout_list_when_workout_logging_is_disabled() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "today_workout_hidden_user")
+    with session_factory() as session:
+        user = User(
+            telegram_user_id=ALLOWED_USER_ID,
+            username="today_workout_hidden_user",
+            timezone="Europe/Moscow",
+        )
+        user.workout_logging_enabled = False
+        session.add(user)
+        session.flush()
+        workout_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.WORKOUT,
+            occurred_at=datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add(workout_entry)
+        session.flush()
+        session.add(EntryItem(entry_id=workout_entry.id, position=0, name="бег", quantity=40, unit="min"))
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="today_workout_hidden_user"),
+        answer=AsyncMock(),
+    )
+
+    await call_handle_today_at(
+        fixed_now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("За текущий день пока нет записей. Отправь еду, фото блюда или воду.",)
+
+
 async def test_today_does_not_show_calorie_goal_progress_when_calories_hidden() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "today_hidden_goal_user")
