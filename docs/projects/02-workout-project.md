@@ -144,6 +144,10 @@
 Ожидаемое поведение:
 
 - система умеет принимать screenshot как источник workout-факта;
+- при нескольких screenshots одного workout приоритет по calorie fact отдаётся фирменному приложению производителя аксессуара или тренажёра;
+- screenshots из других приложений на текущем шаге используются скорее как вспомогательный контекст для характера тренировки;
+- состав упражнений на этом шаге не сохраняется;
+- полезный новый сохраняемый metric этого этапа - factual calories тренировки, если они явно присутствуют;
 - граница с conversational и food-photo сценариями остаётся консервативной;
 - extraction contract для workout screenshot вводится отдельно и проверяемо.
 
@@ -256,10 +260,20 @@
 Входит в этап:
 
 - отдельный multimodal workout extraction contract;
+- source-priority правила между несколькими screenshots одного workout;
+- сохранение factual workout calorie metric при достаточной уверенности;
 - правила routing для screenshot input;
 - тесты на смешанные и неоднозначные сценарии.
 
-Это поздний этап. Его не стоит начинать, пока text-first слой не доказал полезность.
+Не входит в этап:
+
+- сохранение exercise-by-exercise состава тренировки;
+- OCR полного списка упражнений как самостоятельной цели;
+- derived calorie corrections между разными приложениями.
+
+Связанный ADR:
+
+- [ADR-029](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/adr/ADR-029-workout-screenshot-priority-and-calorie-metric.md:1)
 
 ## 7. Критерий хорошего следующего шага
 
