@@ -34,6 +34,8 @@ def create_session_factory() -> sessionmaker[Session]:
                 SupportedMetric(code="fat", name="Fat", unit="g"),
                 SupportedMetric(code="carbs", name="Carbs", unit="g"),
                 SupportedMetric(code="fiber", name="Fiber", unit="g"),
+                SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
+                SupportedMetric(code="workout_calorie_credit", name="Workout Calorie Credit", unit="kcal"),
             ]
         )
         session.commit()
@@ -94,6 +96,7 @@ def test_nutrition_coach_context_builder_uses_day_facts_and_recent_entries() -> 
             timezone_name=user.timezone,
             nutrition_day_start_hour=4,
             reference_at=datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc),
+            workout_logging_enabled=False,
         )
 
     assert context.summary_date.isoformat() == "2026-05-20"
@@ -111,3 +114,82 @@ def test_nutrition_coach_context_builder_uses_day_facts_and_recent_entries() -> 
     assert context.recent_entries[0].entry_type == "water"
     assert context.recent_entries[0].rendered_items == ["вода: 500 мл"]
     assert context.recent_entries[1].rendered_items == ["омлет: 250 г"]
+    assert context.workout_entries == []
+
+
+def test_nutrition_coach_context_builder_includes_workout_entries_for_day_when_enabled() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        user = User(telegram_user_id=1002, username="workout_coach_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(
+            UserGoalPreference(
+                user_id=user.id,
+                calorie_goal=2000,
+                protein_goal=120,
+                fat_goal=70,
+                carbs_goal=220,
+                fiber_goal=30,
+                water_goal=2500,
+            )
+        )
+
+        workout_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.WORKOUT,
+            source_text="сегодня была пробежка 40 минут",
+            occurred_at=datetime(2026, 5, 20, 8, 0, tzinfo=timezone.utc),
+        )
+        old_workout_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.WORKOUT,
+            source_text="вчера была силовая 50 минут",
+            occurred_at=datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add_all([workout_entry, old_workout_entry])
+        session.flush()
+        session.add_all(
+            [
+                EntryItem(entry_id=workout_entry.id, position=0, name="бег", quantity=40, unit="min"),
+                EntryItem(entry_id=old_workout_entry.id, position=0, name="силовая", quantity=50, unit="min"),
+            ]
+        )
+        session.flush()
+        current_workout_item = session.query(EntryItem).filter_by(entry_id=workout_entry.id, position=0).one()
+        session.add_all(
+            [
+                EntryItemMetric(
+                    entry_item_id=current_workout_item.id,
+                    metric_id=6,
+                    value=757.0,
+                    confidence="high",
+                ),
+                EntryItemMetric(
+                    entry_item_id=current_workout_item.id,
+                    metric_id=7,
+                    value=250.0,
+                    confidence="high",
+                ),
+            ]
+        )
+        session.commit()
+
+        context = NutritionCoachContextBuilder(session).build(
+            user_id=user.id,
+            timezone_name=user.timezone,
+            nutrition_day_start_hour=4,
+            reference_at=datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc),
+            workout_logging_enabled=True,
+        )
+
+    assert len(context.workout_entries) == 1
+    assert context.workout_entries[0].source_text == "сегодня была пробежка 40 минут"
+    assert context.goal_progress["calories"].goal_value == 2250
+    assert context.workout_entries[0].metric_values == {
+        "workout_calories": 757.0,
+        "workout_calorie_credit": 250.0,
+    }
+    assert context.workout_entries[0].items[0].name == "бег"
+    assert context.workout_entries[0].items[0].unit == "min"
+    assert context.workout_entries[0].items[0].rendered_value == "бег: 40 мин"

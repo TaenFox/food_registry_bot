@@ -41,6 +41,8 @@ from food_registry_bot.db.repositories import (
     ConversationMessageRepository,
     ConversationSessionRepository,
     EntryItemCreate,
+    EntryItemMetricRepository,
+    EntryItemMetricValue,
     EntryRepository,
     UserGoalPreferenceRepository,
     UserAccessRepository,
@@ -56,9 +58,11 @@ from food_registry_bot.extraction import (
 )
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
+    calculate_default_workout_calorie_credit,
     DailyNutritionGoalProgress,
     DailyNutritionGoalProgressUseCase,
     DailyNutritionGoalSnapshotUseCase,
+    DailyWorkoutCalorieCreditUseCase,
     DailyWaterSummary,
     DailyWaterSummaryUseCase,
     MetricGoalProgress,
@@ -67,7 +71,9 @@ from food_registry_bot.nutrition import (
     FailedNutritionEstimation,
     NutritionBackfillCompleted,
     NutritionEstimationService,
+    resolve_day_bounds_utc,
     resolve_local_summary_date,
+    resolve_workout_metric_value,
     SUPPORTED_NUTRITION_METRIC_CODES,
     SkippedNutritionEstimation,
     StaticNutritionEstimationService,
@@ -431,6 +437,8 @@ def present_unit(unit: str | None) -> str | None:
         return "мл"
     if unit == "g":
         return "г"
+    if unit == "min":
+        return "мин"
     return unit
 
 
@@ -451,12 +459,40 @@ def build_saved_items_confirmation(items: list[EntryItemCreate]) -> str:
     return "\n".join(lines)
 
 
+def build_extracted_workout_metric_lines(payload) -> list[str]:
+    lines: list[str] = []
+    for entry in payload.entries:
+        if entry.type is not EntryType.WORKOUT:
+            continue
+        for item in entry.items:
+            for metric in item.metrics:
+                if metric.code == "workout_calories":
+                    lines.append(f"- калории тренировки: {round(metric.value, 1)} ккал")
+                    lines.append(
+                        f"- к компенсации питания: {round(calculate_default_workout_calorie_credit(metric.value), 1)} ккал"
+                    )
+    return lines
+
+
+def build_workout_entries_report(entries: list, *, timezone_name: str) -> str | None:
+    if not entries:
+        return None
+
+    lines = ["Тренировки:"]
+    for entry in entries:
+        lines.append(f"- {format_entry_timestamp(entry, timezone_name)} — {build_workout_entry_title(entry)}")
+    return "\n".join(lines)
+
+
 def build_write_confirmation_response(
     saved_items: list[EntryItemCreate],
+    extra_lines: list[str] | None = None,
     day_report: str | None = None,
     coach_comment: str | None = None,
 ) -> str:
     saved_items_confirmation = build_saved_items_confirmation(saved_items)
+    if extra_lines:
+        saved_items_confirmation = "\n".join([saved_items_confirmation, *extra_lines])
     parts = [saved_items_confirmation]
     if day_report is not None:
         parts.append(day_report)
@@ -480,6 +516,22 @@ def build_recent_entry_title(entry) -> str:
     if item_texts:
         return ", ".join(item_texts)
     return "запись без позиций"
+
+
+def build_workout_entry_title(entry) -> str:
+    base_title = build_recent_entry_title(entry)
+    workout_calories = resolve_workout_metric_value(entry, "workout_calories")
+    workout_credit = resolve_workout_metric_value(entry, "workout_calorie_credit")
+    if workout_calories <= 0 and workout_credit <= 0:
+        return base_title
+    details: list[str] = []
+    if workout_calories > 0:
+        details.append(f"{round(workout_calories, 1)} ккал")
+    if workout_credit > 0:
+        details.append(f"компенсация {round(workout_credit, 1)} ккал")
+    if base_title.endswith(")"):
+        return base_title[:-1] + f", {', '.join(details)})"
+    return f"{base_title} ({', '.join(details)})"
 
 
 def truncate_button_label(value: str, *, max_length: int = 28) -> str:
@@ -552,6 +604,7 @@ def build_today_summary_response_with_preferences(
     water_summary: DailyWaterSummary | None = None,
     metric_deltas: dict[str, float] | None = None,
     show_post_entry_delta_suffix: bool = True,
+    force_render_summary: bool = False,
 ) -> str:
     if (
         summary.included_entry_count == 0
@@ -559,6 +612,7 @@ def build_today_summary_response_with_preferences(
         and (water_summary is None or (
             water_summary.included_entry_count == 0 and water_summary.excluded_entry_count == 0
         ))
+        and not force_render_summary
     ):
         return "За текущий день пока нет записей. Отправь еду, фото блюда или воду."
     if not enabled_metric_codes:
@@ -629,6 +683,7 @@ def get_enabled_summary_metric_codes(preference) -> tuple[str, ...]:
 
 def build_summary_settings_response(
     *,
+    workout_logging_enabled: bool,
     show_calories: bool,
     show_protein: bool,
     show_fat: bool,
@@ -646,6 +701,7 @@ def build_summary_settings_response(
     return "\n".join(
         [
             "Настройки summary:",
+            f"- тренировки: {statuses[workout_logging_enabled]}",
             f"- калории: {statuses[show_calories]}",
             f"- белки: {statuses[show_protein]}",
             f"- жиры: {statuses[show_fat]}",
@@ -733,6 +789,14 @@ def build_saved_items_from_payload(payload) -> list[EntryItemCreate]:
     return items
 
 
+def payload_contains_workout_entries(payload) -> bool:
+    return any(entry.type is EntryType.WORKOUT for entry in payload.entries)
+
+
+def payload_contains_food_or_water_entries(payload) -> bool:
+    return any(entry.type in {EntryType.FOOD, EntryType.WATER} for entry in payload.entries)
+
+
 def resolve_metric_deltas(
     *,
     saved_items: list[EntryItemCreate],
@@ -776,9 +840,33 @@ def build_daily_report_for_summary_date(
     user_id: int,
     timezone_name: str,
     summary_date: date,
+    workout_logging_enabled: bool,
     summary_preference,
     metric_deltas: dict[str, float] | None = None,
 ) -> str:
+    workout_entries = []
+    workout_calorie_credit_total = 0
+    if workout_logging_enabled:
+        occurred_at_from, occurred_at_to = resolve_day_bounds_utc(
+            summary_date=summary_date,
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        )
+        workout_entries = EntryRepository(session).list_workout_for_user_between(
+            user_id=user_id,
+            occurred_at_from=occurred_at_from,
+            occurred_at_to=occurred_at_to,
+        )
+        workout_calorie_credit_total = int(
+            round(
+                DailyWorkoutCalorieCreditUseCase(session).run(
+                    user_id=user_id,
+                    timezone_name=timezone_name,
+                    summary_date=summary_date,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                )
+            )
+        )
     summary = DailyNutritionSummaryUseCase(session).run(
         user_id=user_id,
         timezone_name=timezone_name,
@@ -801,8 +889,9 @@ def build_daily_report_for_summary_date(
         summary=summary,
         water_summary=water_summary,
         snapshot=goal_snapshot,
+        calorie_goal_adjustment=workout_calorie_credit_total,
     )
-    return build_today_summary_response_with_preferences(
+    summary_report = build_today_summary_response_with_preferences(
         summary,
         enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
         summary_display_mode=summary_preference.summary_display_mode,
@@ -810,7 +899,34 @@ def build_daily_report_for_summary_date(
         water_summary=water_summary,
         metric_deltas=metric_deltas,
         show_post_entry_delta_suffix=summary_preference.show_post_entry_delta_suffix,
+        force_render_summary=workout_calorie_credit_total > 0,
     )
+    if not workout_logging_enabled:
+        return summary_report
+    workout_report = build_workout_entries_report(workout_entries, timezone_name=timezone_name)
+    if workout_report is None:
+        return summary_report
+
+    has_nutrition_or_water_entries = not (
+        summary.included_entry_count == 0
+        and summary.excluded_entry_count == 0
+        and water_summary.included_entry_count == 0
+        and water_summary.excluded_entry_count == 0
+    )
+    if not has_nutrition_or_water_entries and workout_calorie_credit_total <= 0:
+        return workout_report
+
+    return "\n\n".join([summary_report, workout_report])
+
+
+def payload_contains_credit_eligible_workout_entries(payload) -> bool:
+    for entry in payload.entries:
+        if entry.type is not EntryType.WORKOUT:
+            continue
+        for item in entry.items:
+            if any(metric.code == "workout_calories" for metric in item.metrics):
+                return True
+    return False
 
 
 def resolve_recent_entry_for_callback(
@@ -901,6 +1017,10 @@ async def build_extraction_request(message: Message) -> JournalExtractionRequest
         return JournalExtractionRequest(text=message_text)
 
     return None
+
+
+def is_photo_media_group_message(message: Message) -> bool:
+    return bool(getattr(message, "photo", None) and getattr(message, "media_group_id", None))
 
 
 async def send_typing_action(message: Message) -> None:
@@ -1101,6 +1221,7 @@ async def handle_start(
             "Что можно сделать:\n"
             "- отправить запись еды текстом или фото блюда;\n"
             "- нажать кнопку воды;\n"
+            "- при желании включить запись тренировок в /settings;\n"
             "- задать вопрос о питании;\n"
             "- посмотреть итог дня: /today;\n"
             "- посмотреть и удалить последние записи: /recent;\n"
@@ -1115,6 +1236,7 @@ async def handle_start(
         "Что можно сделать:\n"
         "- отправить запись еды текстом или фото блюда;\n"
         "- нажать кнопку воды;\n"
+        "- при желании включить запись тренировок в /settings;\n"
         "- задать вопрос о питании;\n"
         "- посмотреть итог дня: /today;\n"
         "- посмотреть и удалить последние записи: /recent;\n"
@@ -1270,10 +1392,14 @@ async def handle_settings(
 
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
+        user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
+        if user is None:
+            raise RuntimeError("User profile was not found after registration")
         preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
 
     await message.answer(
         build_summary_settings_response(
+            workout_logging_enabled=user.workout_logging_enabled,
             show_calories=preference.show_calories,
             show_protein=preference.show_protein,
             show_fat=preference.show_fat,
@@ -1285,6 +1411,7 @@ async def handle_settings(
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
         ),
         reply_markup=build_summary_settings_keyboard(
+            workout_logging_enabled=user.workout_logging_enabled,
             show_calories=preference.show_calories,
             show_protein=preference.show_protein,
             show_fat=preference.show_fat,
@@ -1336,6 +1463,9 @@ async def handle_toggle_summary_metric(
             preference = preference_repository.cycle_nutrition_day_start_hour(user_id=user.id)
         elif callback_data.action == "cycle_summary_display_mode":
             preference = preference_repository.cycle_summary_display_mode(user_id=user.id)
+        elif callback_data.action == "toggle_workout_logging":
+            user = UserRepository(session).toggle_workout_logging_enabled(user_id=user.id)
+            preference, _created = preference_repository.get_or_create(user_id=user.id)
         elif callback_data.action == "toggle_post_entry_delta_suffix":
             preference = preference_repository.toggle_post_entry_delta_suffix(user_id=user.id)
         else:
@@ -1348,6 +1478,7 @@ async def handle_toggle_summary_metric(
     if callback.message is not None:
         await callback.message.edit_text(
             build_summary_settings_response(
+                workout_logging_enabled=user.workout_logging_enabled,
                 show_calories=preference.show_calories,
                 show_protein=preference.show_protein,
                 show_fat=preference.show_fat,
@@ -1359,6 +1490,7 @@ async def handle_toggle_summary_metric(
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
             ),
             reply_markup=build_summary_settings_keyboard(
+                workout_logging_enabled=user.workout_logging_enabled,
                 show_calories=preference.show_calories,
                 show_protein=preference.show_protein,
                 show_fat=preference.show_fat,
@@ -1403,6 +1535,7 @@ async def handle_today(
             user_id=user_id,
             timezone_name=user.timezone,
             summary_date=summary_date,
+            workout_logging_enabled=user.workout_logging_enabled,
             summary_preference=preference,
         )
 
@@ -1513,12 +1646,13 @@ async def handle_water_250_ml(
             user_id=user_id,
             timezone_name=user.timezone,
             summary_date=summary_date,
+            workout_logging_enabled=user.workout_logging_enabled,
             summary_preference=preference,
             metric_deltas={"water": 250.0},
         )
 
     await message.answer(
-        build_write_confirmation_response(saved_items, day_report),
+        build_write_confirmation_response(saved_items, day_report=day_report),
         reply_markup=build_main_keyboard(),
     )
 
@@ -1569,6 +1703,13 @@ async def handle_message(
             )
             return
 
+        if is_photo_media_group_message(message):
+            await message.answer(
+                "Пока я умею разбирать только одно изображение за раз. Пришли одно основное фото или один скриншот.",
+                reply_markup=build_main_keyboard(),
+            )
+            return
+
         routing_decision = message_routing_service.route(
             extraction_request,
             has_active_conversation_session=active_conversation_session_id is not None,
@@ -1604,6 +1745,7 @@ async def handle_message(
                     timezone_name=user.timezone,
                     nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                     reference_at=current_time,
+                    workout_logging_enabled=user.workout_logging_enabled,
                 )
                 conversation_reply = await asyncio.to_thread(
                     conversation_service.reply,
@@ -1674,9 +1816,17 @@ async def handle_message(
                 if user is None:
                     raise RuntimeError("User profile was not found after registration")
                 summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+                if payload_contains_workout_entries(extraction_result.payload) and not user.workout_logging_enabled:
+                    await message.answer(
+                        "Запись тренировок сейчас выключена. Включи её в /settings, если хочешь сохранять такие сообщения.",
+                        reply_markup=build_main_keyboard(),
+                    )
+                    return
 
                 saved_food_entries: list = []
                 saved_items = build_saved_items_from_payload(extraction_result.payload)
+                extracted_workout_metric_lines = build_extracted_workout_metric_lines(extraction_result.payload)
+                saved_entry_types = {entry.type for entry in extraction_result.payload.entries}
                 occurred_at_values: list[datetime] = []
                 for extracted_entry in extraction_result.payload.entries:
                     occurred_at = extracted_entry.occurred_at or datetime.now(timezone.utc)
@@ -1684,7 +1834,7 @@ async def handle_message(
                         user_id=user_id,
                         entry_type=extracted_entry.type,
                         occurred_at=occurred_at,
-                        source_text=None,
+                        source_text=extraction_request.text if extracted_entry.type is EntryType.WORKOUT else None,
                         extraction_provider=extraction_result.extraction_provider,
                         extraction_model=extraction_result.extraction_model,
                         extraction_raw_payload=extraction_result.raw_payload,
@@ -1701,6 +1851,41 @@ async def handle_message(
                     occurred_at_values.append(occurred_at)
                     if extracted_entry.type is EntryType.FOOD:
                         saved_food_entries.append(saved_entry)
+                    if extracted_entry.type is EntryType.WORKOUT:
+                        persisted_items = sorted(saved_entry.items, key=lambda current: current.position)
+                        for persisted_item, extracted_item in zip(persisted_items, extracted_entry.items):
+                            if not extracted_item.metrics:
+                                continue
+                            EntryItemMetricRepository(session).upsert_metrics(
+                                entry_item_id=persisted_item.id,
+                                metric_values=[
+                                    EntryItemMetricValue(
+                                        code=metric.code,
+                                        value=metric.value,
+                                        confidence=metric.confidence,
+                                    )
+                                    for metric in extracted_item.metrics
+                                ],
+                            )
+                            workout_calories = next(
+                                (
+                                    metric
+                                    for metric in extracted_item.metrics
+                                    if metric.code == "workout_calories"
+                                ),
+                                None,
+                            )
+                            if workout_calories is not None:
+                                EntryItemMetricRepository(session).upsert_metrics(
+                                    entry_item_id=persisted_item.id,
+                                    metric_values=[
+                                        EntryItemMetricValue(
+                                            code="workout_calorie_credit",
+                                            value=calculate_default_workout_calorie_credit(workout_calories.value),
+                                            confidence=workout_calories.confidence,
+                                        )
+                                    ],
+                                )
 
                 if saved_food_entries:
                     nutrition_flow_result = StoredEntryNutritionEstimationUseCase(
@@ -1718,7 +1903,10 @@ async def handle_message(
                     timezone_name=user.timezone,
                     nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                 )
-                if len(summary_dates) == 1:
+                if len(summary_dates) == 1 and (
+                    payload_contains_food_or_water_entries(extraction_result.payload)
+                    or payload_contains_credit_eligible_workout_entries(extraction_result.payload)
+                ):
                     summary_date = next(iter(summary_dates))
                     metric_deltas = resolve_metric_deltas(
                         saved_items=saved_items,
@@ -1731,6 +1919,7 @@ async def handle_message(
                             timezone_name=user.timezone,
                             nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                             reference_at=max(occurred_at_values),
+                            workout_logging_enabled=user.workout_logging_enabled,
                         )
                         try:
                             coach_comment = await asyncio.to_thread(
@@ -1750,18 +1939,23 @@ async def handle_message(
                                 saved_food_entry.llm_comment = coach_comment
                     confirmation_text = build_write_confirmation_response(
                         saved_items,
-                        build_daily_report_for_summary_date(
+                        extra_lines=extracted_workout_metric_lines,
+                        day_report=build_daily_report_for_summary_date(
                             session=session,
                             user_id=user_id,
                             timezone_name=user.timezone,
                             summary_date=summary_date,
+                            workout_logging_enabled=user.workout_logging_enabled,
                             summary_preference=summary_preference,
                             metric_deltas=metric_deltas,
                         ),
                         coach_comment=coach_comment,
                     )
                 else:
-                    confirmation_text = build_write_confirmation_response(saved_items)
+                    confirmation_text = build_write_confirmation_response(
+                        saved_items,
+                        extra_lines=extracted_workout_metric_lines,
+                    )
         except FoodWriteFlowError as exc:
             await message.answer(str(exc), reply_markup=build_main_keyboard())
             return

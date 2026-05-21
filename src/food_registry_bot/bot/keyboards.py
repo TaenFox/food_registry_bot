@@ -21,6 +21,7 @@ def build_main_keyboard() -> ReplyKeyboardMarkup:
 
 def build_summary_settings_keyboard(
     *,
+    workout_logging_enabled: bool,
     show_calories: bool,
     show_protein: bool,
     show_fat: bool,
@@ -33,6 +34,12 @@ def build_summary_settings_keyboard(
 ) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"Тренировки: {'on' if workout_logging_enabled else 'off'}",
+                    callback_data=SummarySettingsCallback(action="toggle_workout_logging").pack(),
+                )
+            ],
             [
                 InlineKeyboardButton(
                     text=f"Калории: {'on' if show_calories else 'off'}",

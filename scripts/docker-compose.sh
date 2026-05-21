@@ -10,5 +10,12 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
+if [[ -z "${APP_VERSION:-}" ]]; then
+  APP_VERSION="$(git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>/dev/null || true)"
+  if [[ -n "$APP_VERSION" ]]; then
+    export APP_VERSION
+  fi
+fi
+
 cd "$PROJECT_ROOT"
 docker compose --env-file "$ENV_FILE" "$@"

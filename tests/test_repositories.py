@@ -52,6 +52,8 @@ def create_test_session() -> Session:
             SupportedMetric(code="fat", name="Fat", unit="g"),
             SupportedMetric(code="carbs", name="Carbs", unit="g"),
             SupportedMetric(code="fiber", name="Fiber", unit="g"),
+            SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
+            SupportedMetric(code="workout_calorie_credit", name="Workout Calorie Credit", unit="kcal"),
         ]
     )
     session.commit()
@@ -89,6 +91,19 @@ def test_user_repository_creates_user_once() -> None:
     assert created_again is False
     assert user.id == same_user.id
     assert user.username == "alice"
+    assert user.workout_logging_enabled is False
+
+
+def test_user_repository_toggles_workout_logging_flag() -> None:
+    session = create_test_session()
+    repository = UserRepository(session)
+    user = repository.create(telegram_user_id=102, username="workout_user")
+
+    enabled_flag = repository.toggle_workout_logging_enabled(user_id=user.id).workout_logging_enabled
+    disabled_flag = repository.toggle_workout_logging_enabled(user_id=user.id).workout_logging_enabled
+
+    assert enabled_flag is True
+    assert disabled_flag is False
 
 
 def test_user_access_repository_sets_and_updates_access() -> None:
@@ -524,7 +539,15 @@ def test_supported_metric_repository_lists_seeded_metrics() -> None:
 
     metrics = SupportedMetricRepository(session).list_all()
 
-    assert [metric.code for metric in metrics] == ["calories", "protein", "fat", "carbs", "fiber"]
+    assert [metric.code for metric in metrics] == [
+        "calories",
+        "protein",
+        "fat",
+        "carbs",
+        "fiber",
+        "workout_calories",
+        "workout_calorie_credit",
+    ]
 
 
 def test_entry_item_metric_repository_upserts_metric_values() -> None:

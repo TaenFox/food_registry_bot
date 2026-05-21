@@ -1,6 +1,7 @@
 from food_registry_bot.extraction.contract import (
     ExtractedJournalEntry,
     ExtractedJournalItem,
+    ExtractedJournalMetric,
     ExtractedJournalPayload,
 )
 from food_registry_bot.extraction.factory import create_extraction_service
@@ -18,6 +19,7 @@ from food_registry_bot.extraction.service import (
 __all__ = [
     "ExtractedJournalEntry",
     "ExtractedJournalItem",
+    "ExtractedJournalMetric",
     "ExtractedJournalPayload",
     "ExtractionImageInput",
     "InvalidExtractionPayload",

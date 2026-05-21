@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+import subprocess
 from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import enum
+
+from food_registry_bot import __version__
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SECRETS_DIR = PROJECT_ROOT.parent / f"{PROJECT_ROOT.name}_local"
@@ -23,6 +26,30 @@ def get_secrets_dir() -> Path:
 
 def get_secrets_env_file() -> Path:
     return SECRETS_ENV_FILE
+
+
+def detect_git_app_version(project_root: Path = PROJECT_ROOT) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project_root), "describe", "--tags", "--always", "--dirty"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+
+    version = result.stdout.strip()
+    if not version:
+        return None
+    return version
+
+
+def resolve_app_version() -> str:
+    git_version = detect_git_app_version()
+    if git_version is not None:
+        return git_version
+    return __version__
 
 
 class ExtractionProvider(str, enum.Enum):
@@ -43,7 +70,7 @@ class Settings(BaseSettings):
     )
 
     app_env: str = "local"
-    app_version: str = Field(default="unknown", alias="APP_VERSION")
+    app_version: str = Field(default_factory=resolve_app_version, alias="APP_VERSION")
     bot_token: Optional[str] = Field(default=None, alias="BOT_TOKEN")
     admin_user_ids_raw: str = Field(default="", alias="ADMIN_USER_IDS")
     extraction_provider: ExtractionProvider = Field(

@@ -69,7 +69,7 @@ class OpenAIResponsesExtractionClient:
             content.append(
                 {
                     "type": "input_text",
-                    "text": "Extract journal entries from this food photo.",
+                    "text": "Extract journal entries from this image.",
                 }
             )
 
@@ -102,20 +102,26 @@ class OpenAIResponsesExtractionClient:
             "Extract journal entries from a user message or food photo. "
             "Return only valid json matching this schema exactly: "
             f"{json.dumps(schema, ensure_ascii=False)}. "
-            "Use 'food' or 'water' for entry type and keep separate entries when one message contains both food and water. "
+            "Use 'food', 'water', or 'workout' for entry type and keep separate entries when one message contains mixed journal facts. "
             "For water entries, always set item.name to exactly 'water'. "
             "If water quantity is present, use unit 'ml'. "
+            "For workout entries, item.name should be the workout or activity name. "
+            "If workout duration is explicitly stated, use item.quantity with unit 'min'. "
+            "If workout calories are explicitly visible and reliable, put them into item.metrics as code 'workout_calories'. "
+            "Do not invent workout calories, pulse, or other derived metrics. "
             "Return item names in Russian unless a fixed brand or label should stay unchanged. "
             "For food photos, if one complete dish is shown, save it as one item and do not decompose it into guessed ingredients. "
             "Split into multiple items only when separate foods are clearly shown separately or explicitly listed by the user. "
             "If quantity is estimated, prefer grams for food and milliliters for water or drinks; for liquid food items like dipping sauces, milliliters are also allowed. "
             "Do not return a bare number without a unit. "
-            "For solid food use grams, for water or drinks use milliliters, and for liquid sauces use milliliters. "
+            "For solid food use grams, for water or drinks use milliliters, for liquid sauces use milliliters, and for workout duration use minutes. "
             "Avoid vague units like portion, piece, slice, spoon, or serving when grams or milliliters can be reasonably estimated. "
             "For foods made of several visible pieces of the same dish, estimate the weight of one piece first and then sum them into one total gram value. "
             "If a dipping sauce is served separately and clearly visible, save it as a separate item and estimate it in milliliters. "
             "For photo-based food estimates, if exact mass is unclear, round to a reasonable step such as 25 grams instead of pretending to know exact precision. "
             "If quantity is not clear, omit quantity and unit. "
             "If time is not clearly stated, omit occurred_at. "
+            "For workout screenshots, prefer saving one compact workout item rather than the full exercise list. "
+            "Do not save screenshot exercise-by-exercise composition on this step. "
             "Use only what is visible in the photo or clearly stated in the text/caption."
         )
