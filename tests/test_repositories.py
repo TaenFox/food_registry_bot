@@ -53,6 +53,7 @@ def create_test_session() -> Session:
             SupportedMetric(code="carbs", name="Carbs", unit="g"),
             SupportedMetric(code="fiber", name="Fiber", unit="g"),
             SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
+            SupportedMetric(code="workout_calorie_credit", name="Workout Calorie Credit", unit="kcal"),
         ]
     )
     session.commit()
@@ -545,6 +546,7 @@ def test_supported_metric_repository_lists_seeded_metrics() -> None:
         "carbs",
         "fiber",
         "workout_calories",
+        "workout_calorie_credit",
     ]
 
 

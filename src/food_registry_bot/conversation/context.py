@@ -12,6 +12,7 @@ from food_registry_bot.nutrition import (
     DailyNutritionGoalProgressUseCase,
     DailyNutritionGoalSnapshotUseCase,
     DailyNutritionSummaryUseCase,
+    DailyWorkoutCalorieCreditUseCase,
     DailyWaterSummaryUseCase,
     resolve_day_bounds_utc,
     resolve_local_summary_date,
@@ -141,6 +142,16 @@ class NutritionCoachContextBuilder:
             summary=nutrition_summary,
             water_summary=water_summary,
             snapshot=goal_snapshot,
+            calorie_goal_adjustment=int(
+                round(
+                    DailyWorkoutCalorieCreditUseCase(self._session).run(
+                        user_id=user_id,
+                        timezone_name=timezone_name,
+                        summary_date=summary_date,
+                        nutrition_day_start_hour=nutrition_day_start_hour,
+                    )
+                )
+            ),
         )
         workout_entries = []
         if workout_logging_enabled:

@@ -82,6 +82,7 @@ def create_session_factory() -> sessionmaker[Session]:
                 SupportedMetric(code="carbs", name="Carbs", unit="g"),
                 SupportedMetric(code="fiber", name="Fiber", unit="g"),
                 SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
+                SupportedMetric(code="workout_calorie_credit", name="Workout Calorie Credit", unit="kcal"),
             ]
         )
         session.commit()
@@ -874,6 +875,53 @@ async def test_recent_delete_confirm_removes_entry_and_refreshes_recent_list() -
     callback.answer.assert_awaited_once_with("Запись удалена. Список уже обновлён.")
 
 
+async def test_recent_delete_confirm_removes_workout_entry_with_metric_children() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_delete_workout_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="recent_delete_workout_user", timezone="Europe/Moscow")
+        user.workout_logging_enabled = True
+        session.add(user)
+        session.flush()
+        workout_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.WORKOUT,
+            source_text="тренировка",
+            occurred_at=datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add(workout_entry)
+        session.flush()
+        workout_item = EntryItem(entry_id=workout_entry.id, position=0, name="силовая", quantity=41, unit="min")
+        session.add(workout_item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=workout_item.id, metric_id=6, value=285.0, confidence="high"),
+                EntryItemMetric(entry_item_id=workout_item.id, metric_id=7, value=285.0, confidence="high"),
+            ]
+        )
+        session.commit()
+        workout_entry_id = workout_entry.id
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_delete_workout_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_delete_callback(
+        callback,
+        RecentEntryDeleteCallback(action="confirm", entry_id=workout_entry_id),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 0
+        assert session.query(EntryItem).count() == 0
+        assert session.query(EntryItemMetric).count() == 0
+
+
 async def test_recent_delete_returns_safe_error_for_stale_button() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "recent_delete_stale_user")
@@ -1226,7 +1274,15 @@ async def test_today_shows_workout_list_only_when_workout_logging_is_enabled() -
         )
         session.add(workout_entry)
         session.flush()
-        session.add(EntryItem(entry_id=workout_entry.id, position=0, name="бег", quantity=40, unit="min"))
+        workout_item = EntryItem(entry_id=workout_entry.id, position=0, name="бег", quantity=40, unit="min")
+        session.add(workout_item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=workout_item.id, metric_id=6, value=757.0, confidence="high"),
+                EntryItemMetric(entry_item_id=workout_item.id, metric_id=7, value=300.0, confidence="high"),
+            ]
+        )
         session.commit()
 
     message = SimpleNamespace(
@@ -1241,7 +1297,9 @@ async def test_today_shows_workout_list_only_when_workout_logging_is_enabled() -
     )
 
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Тренировки:\n- 11:00 — бег (40 мин)",)
+    assert message.answer.await_args.args == (
+        "<pre>К: 0.0 / 2100 ккал\nБ: 0.0 / 90 г\nЖ: 0.0 / 60 г\nУ: 0.0 / 210 г\nКл: 0.0 / 25 г\nВ: 0.0 / 2000 мл</pre>\n\nТренировки:\n- 11:00 — бег (40 мин, 757.0 ккал, компенсация 300.0 ккал)",
+    )
 
 
 async def test_today_hides_workout_list_when_workout_logging_is_disabled() -> None:
@@ -2712,26 +2770,42 @@ async def test_handle_message_saves_workout_calorie_metric_from_photo_extraction
         answer=AsyncMock(),
     )
 
-    await handle_message(
-        message,
-        session_factory,
-        extraction_service=extraction_service,
-        admin_user_ids=(ADMIN_ID,),
-    )
+    original_datetime = handle_message.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 19, 0, 0, tzinfo=timezone.utc)
+
+    handle_message.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_message(
+            message,
+            session_factory,
+            extraction_service=extraction_service,
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_message.__globals__["datetime"] = original_datetime
 
     with session_factory() as session:
         saved_entry = session.query(Entry).one()
         saved_item = session.query(EntryItem).one()
-        saved_metric = session.query(EntryItemMetric).one()
+        saved_metrics = session.query(EntryItemMetric).order_by(EntryItemMetric.metric_id.asc()).all()
+        saved_metric = saved_metrics[0]
         saved_metric_code = saved_metric.metric.code
+        saved_credit_code = saved_metrics[1].metric.code
+        saved_credit_value = saved_metrics[1].value
 
     assert saved_entry.entry_type == EntryType.WORKOUT
     assert saved_item.name == "тренировка"
     assert saved_metric_code == "workout_calories"
+    assert saved_credit_code == "workout_calorie_credit"
     assert saved_metric.value == 757.0
+    assert saved_credit_value == 300.0
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сохранил:\n- тренировка (90 мин)\n- калории тренировки: 757.0 ккал",
+        "Сохранил:\n- тренировка (90 мин)\n- калории тренировки: 757.0 ккал\n- к компенсации питания: 300.0 ккал\n\n<pre>К: 0.0 / 2100 ккал\nБ: 0.0 / 90 г\nЖ: 0.0 / 60 г\nУ: 0.0 / 210 г\nКл: 0.0 / 25 г\nВ: 0.0 / 2000 мл</pre>\n\nТренировки:\n- 03:00 — тренировка (90 мин, 757.0 ккал, компенсация 300.0 ккал)",
     )
 
 
@@ -3197,13 +3271,24 @@ async def test_workout_photo_with_write_caption_stays_journal_and_is_not_routed_
         answer=AsyncMock(),
     )
 
-    await handle_message(
-        message,
-        session_factory,
-        extraction_service=extraction_service,
-        conversation_service=SimpleNamespace(reply=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("reply must not be called"))),
-        admin_user_ids=(ADMIN_ID,),
-    )
+    original_datetime = handle_message.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 19, 0, 0, tzinfo=timezone.utc)
+
+    handle_message.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_message(
+            message,
+            session_factory,
+            extraction_service=extraction_service,
+            conversation_service=SimpleNamespace(reply=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("reply must not be called"))),
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_message.__globals__["datetime"] = original_datetime
 
     with session_factory() as session:
         saved_entries = session.query(Entry).all()
@@ -3214,7 +3299,7 @@ async def test_workout_photo_with_write_caption_stays_journal_and_is_not_routed_
     assert saved_messages == []
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сохранил:\n- тренировка (90 мин)\n- калории тренировки: 757.0 ккал",
+        "Сохранил:\n- тренировка (90 мин)\n- калории тренировки: 757.0 ккал\n- к компенсации питания: 300.0 ккал\n\n<pre>К: 0.0 / 2100 ккал\nБ: 0.0 / 90 г\nЖ: 0.0 / 60 г\nУ: 0.0 / 210 г\nКл: 0.0 / 25 г\nВ: 0.0 / 2000 мл</pre>\n\nТренировки:\n- 03:00 — тренировка (90 мин, 757.0 ккал, компенсация 300.0 ккал)",
     )
 
 

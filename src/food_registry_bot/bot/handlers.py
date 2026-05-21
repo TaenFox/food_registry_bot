@@ -58,9 +58,11 @@ from food_registry_bot.extraction import (
 )
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
+    calculate_default_workout_calorie_credit,
     DailyNutritionGoalProgress,
     DailyNutritionGoalProgressUseCase,
     DailyNutritionGoalSnapshotUseCase,
+    DailyWorkoutCalorieCreditUseCase,
     DailyWaterSummary,
     DailyWaterSummaryUseCase,
     MetricGoalProgress,
@@ -71,6 +73,7 @@ from food_registry_bot.nutrition import (
     NutritionEstimationService,
     resolve_day_bounds_utc,
     resolve_local_summary_date,
+    resolve_workout_metric_value,
     SUPPORTED_NUTRITION_METRIC_CODES,
     SkippedNutritionEstimation,
     StaticNutritionEstimationService,
@@ -465,6 +468,9 @@ def build_extracted_workout_metric_lines(payload) -> list[str]:
             for metric in item.metrics:
                 if metric.code == "workout_calories":
                     lines.append(f"- калории тренировки: {round(metric.value, 1)} ккал")
+                    lines.append(
+                        f"- к компенсации питания: {round(calculate_default_workout_calorie_credit(metric.value), 1)} ккал"
+                    )
     return lines
 
 
@@ -474,7 +480,7 @@ def build_workout_entries_report(entries: list, *, timezone_name: str) -> str | 
 
     lines = ["Тренировки:"]
     for entry in entries:
-        lines.append(f"- {format_entry_timestamp(entry, timezone_name)} — {build_recent_entry_title(entry)}")
+        lines.append(f"- {format_entry_timestamp(entry, timezone_name)} — {build_workout_entry_title(entry)}")
     return "\n".join(lines)
 
 
@@ -510,6 +516,22 @@ def build_recent_entry_title(entry) -> str:
     if item_texts:
         return ", ".join(item_texts)
     return "запись без позиций"
+
+
+def build_workout_entry_title(entry) -> str:
+    base_title = build_recent_entry_title(entry)
+    workout_calories = resolve_workout_metric_value(entry, "workout_calories")
+    workout_credit = resolve_workout_metric_value(entry, "workout_calorie_credit")
+    if workout_calories <= 0 and workout_credit <= 0:
+        return base_title
+    details: list[str] = []
+    if workout_calories > 0:
+        details.append(f"{round(workout_calories, 1)} ккал")
+    if workout_credit > 0:
+        details.append(f"компенсация {round(workout_credit, 1)} ккал")
+    if base_title.endswith(")"):
+        return base_title[:-1] + f", {', '.join(details)})"
+    return f"{base_title} ({', '.join(details)})"
 
 
 def truncate_button_label(value: str, *, max_length: int = 28) -> str:
@@ -582,6 +604,7 @@ def build_today_summary_response_with_preferences(
     water_summary: DailyWaterSummary | None = None,
     metric_deltas: dict[str, float] | None = None,
     show_post_entry_delta_suffix: bool = True,
+    force_render_summary: bool = False,
 ) -> str:
     if (
         summary.included_entry_count == 0
@@ -589,6 +612,7 @@ def build_today_summary_response_with_preferences(
         and (water_summary is None or (
             water_summary.included_entry_count == 0 and water_summary.excluded_entry_count == 0
         ))
+        and not force_render_summary
     ):
         return "За текущий день пока нет записей. Отправь еду, фото блюда или воду."
     if not enabled_metric_codes:
@@ -820,6 +844,29 @@ def build_daily_report_for_summary_date(
     summary_preference,
     metric_deltas: dict[str, float] | None = None,
 ) -> str:
+    workout_entries = []
+    workout_calorie_credit_total = 0
+    if workout_logging_enabled:
+        occurred_at_from, occurred_at_to = resolve_day_bounds_utc(
+            summary_date=summary_date,
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        )
+        workout_entries = EntryRepository(session).list_workout_for_user_between(
+            user_id=user_id,
+            occurred_at_from=occurred_at_from,
+            occurred_at_to=occurred_at_to,
+        )
+        workout_calorie_credit_total = int(
+            round(
+                DailyWorkoutCalorieCreditUseCase(session).run(
+                    user_id=user_id,
+                    timezone_name=timezone_name,
+                    summary_date=summary_date,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                )
+            )
+        )
     summary = DailyNutritionSummaryUseCase(session).run(
         user_id=user_id,
         timezone_name=timezone_name,
@@ -842,6 +889,7 @@ def build_daily_report_for_summary_date(
         summary=summary,
         water_summary=water_summary,
         snapshot=goal_snapshot,
+        calorie_goal_adjustment=workout_calorie_credit_total,
     )
     summary_report = build_today_summary_response_with_preferences(
         summary,
@@ -851,20 +899,10 @@ def build_daily_report_for_summary_date(
         water_summary=water_summary,
         metric_deltas=metric_deltas,
         show_post_entry_delta_suffix=summary_preference.show_post_entry_delta_suffix,
+        force_render_summary=workout_calorie_credit_total > 0,
     )
     if not workout_logging_enabled:
         return summary_report
-
-    occurred_at_from, occurred_at_to = resolve_day_bounds_utc(
-        summary_date=summary_date,
-        timezone_name=timezone_name,
-        nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-    )
-    workout_entries = EntryRepository(session).list_workout_for_user_between(
-        user_id=user_id,
-        occurred_at_from=occurred_at_from,
-        occurred_at_to=occurred_at_to,
-    )
     workout_report = build_workout_entries_report(workout_entries, timezone_name=timezone_name)
     if workout_report is None:
         return summary_report
@@ -875,10 +913,20 @@ def build_daily_report_for_summary_date(
         and water_summary.included_entry_count == 0
         and water_summary.excluded_entry_count == 0
     )
-    if not has_nutrition_or_water_entries:
+    if not has_nutrition_or_water_entries and workout_calorie_credit_total <= 0:
         return workout_report
 
     return "\n\n".join([summary_report, workout_report])
+
+
+def payload_contains_credit_eligible_workout_entries(payload) -> bool:
+    for entry in payload.entries:
+        if entry.type is not EntryType.WORKOUT:
+            continue
+        for item in entry.items:
+            if any(metric.code == "workout_calories" for metric in item.metrics):
+                return True
+    return False
 
 
 def resolve_recent_entry_for_callback(
@@ -1819,6 +1867,25 @@ async def handle_message(
                                     for metric in extracted_item.metrics
                                 ],
                             )
+                            workout_calories = next(
+                                (
+                                    metric
+                                    for metric in extracted_item.metrics
+                                    if metric.code == "workout_calories"
+                                ),
+                                None,
+                            )
+                            if workout_calories is not None:
+                                EntryItemMetricRepository(session).upsert_metrics(
+                                    entry_item_id=persisted_item.id,
+                                    metric_values=[
+                                        EntryItemMetricValue(
+                                            code="workout_calorie_credit",
+                                            value=calculate_default_workout_calorie_credit(workout_calories.value),
+                                            confidence=workout_calories.confidence,
+                                        )
+                                    ],
+                                )
 
                 if saved_food_entries:
                     nutrition_flow_result = StoredEntryNutritionEstimationUseCase(
@@ -1836,7 +1903,10 @@ async def handle_message(
                     timezone_name=user.timezone,
                     nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                 )
-                if len(summary_dates) == 1 and payload_contains_food_or_water_entries(extraction_result.payload):
+                if len(summary_dates) == 1 and (
+                    payload_contains_food_or_water_entries(extraction_result.payload)
+                    or payload_contains_credit_eligible_workout_entries(extraction_result.payload)
+                ):
                     summary_date = next(iter(summary_dates))
                     metric_deltas = resolve_metric_deltas(
                         saved_items=saved_items,

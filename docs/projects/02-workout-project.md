@@ -291,7 +291,9 @@
 
 Статус:
 
-- `[ ]` ещё не начат
+- `[x]` начат частично
+- реализован первый подэтап с отдельной metric `workout_calorie_credit`
+- отдельный пользовательский override calorie credit пока не реализован
 
 Цель:
 
@@ -300,13 +302,15 @@
 Входит в этап:
 
 - отдельный domain contract для `workout_calories` и calorie credit в питании;
-- наблюдаемое пользовательское поведение, где calorie impact тренировки не равен автоматически полным workout calories;
+- наблюдаемое пользовательское поведение, где nutrition impact тренировки считается через отдельный calorie credit;
+- фиксированное default-правило calorie credit: каждые полные `200 ккал` тренировки дают `100 ккал` compensation;
 - использование workout calorie credit в calorie summary дня;
 - аккуратное отображение workout calories и workout duration в `/today`;
 - обновление `docs/user-functions.md` и summary-related тестов.
 
 Не входит в этап:
 
+- ручной override calorie credit на уровне конкретной тренировки;
 - автоматическое изменение protein, fat, carbs и fiber goals;
 - отдельные workout goals;
 - fitness-coach логика;
