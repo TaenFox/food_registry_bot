@@ -13,3 +13,4 @@
 ## Список проектов
 
 - [Nutrition Coach Project](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/projects/01-nutrition-coach-project.md:1)
+- [Workout Project](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/projects/02-workout-project.md:1)
