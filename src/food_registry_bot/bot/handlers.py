@@ -1665,6 +1665,7 @@ async def handle_message(
                     timezone_name=user.timezone,
                     nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                     reference_at=current_time,
+                    workout_logging_enabled=user.workout_logging_enabled,
                 )
                 conversation_reply = await asyncio.to_thread(
                     conversation_service.reply,
@@ -1802,6 +1803,7 @@ async def handle_message(
                             timezone_name=user.timezone,
                             nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                             reference_at=max(occurred_at_values),
+                            workout_logging_enabled=user.workout_logging_enabled,
                         )
                         try:
                             coach_comment = await asyncio.to_thread(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
@@ -12,6 +13,7 @@ from food_registry_bot.nutrition import (
     DailyNutritionGoalSnapshotUseCase,
     DailyNutritionSummaryUseCase,
     DailyWaterSummaryUseCase,
+    resolve_day_bounds_utc,
     resolve_local_summary_date,
 )
 
@@ -41,6 +43,24 @@ class NutritionCoachConversationTurn(BaseModel):
     created_at: datetime
 
 
+class NutritionCoachWorkoutItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=255)
+    quantity: Optional[int] = Field(default=None, gt=0)
+    unit: Optional[str] = Field(default=None, max_length=32)
+    rendered_value: str = Field(min_length=1)
+
+
+class NutritionCoachWorkoutEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entry_id: int = Field(gt=0)
+    occurred_at: datetime
+    source_text: Optional[str] = None
+    items: list[NutritionCoachWorkoutItem] = Field(default_factory=list)
+
+
 class NutritionCoachFactualContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -49,6 +69,7 @@ class NutritionCoachFactualContext(BaseModel):
     nutrition_day_start_hour: int = Field(ge=0, le=23)
     day_totals: dict[str, float]
     goal_progress: dict[str, NutritionCoachMetricProgress]
+    workout_entries: list[NutritionCoachWorkoutEntry] = Field(default_factory=list)
     recent_entries: list[NutritionCoachRecentEntry] = Field(default_factory=list)
     nutrition_summary_is_complete: bool
     excluded_food_entry_count: int = Field(ge=0)
@@ -70,7 +91,7 @@ def _build_metric_progress_map(progress: DailyNutritionGoalProgress) -> dict[str
 
 def _render_recent_entry_item(name: str, quantity: int | None, unit: str | None) -> str:
     rendered_name = "вода" if name == "water" else name
-    rendered_unit = {"ml": "мл", "g": "г"}.get(unit, unit)
+    rendered_unit = {"ml": "мл", "g": "г", "min": "мин"}.get(unit, unit)
     if quantity is None:
         return rendered_name
     if rendered_unit is None:
@@ -90,6 +111,7 @@ class NutritionCoachContextBuilder:
         timezone_name: str,
         nutrition_day_start_hour: int,
         reference_at: datetime,
+        workout_logging_enabled: bool = False,
     ) -> NutritionCoachFactualContext:
         summary_date = resolve_local_summary_date(
             reference_at=reference_at,
@@ -119,6 +141,18 @@ class NutritionCoachContextBuilder:
             water_summary=water_summary,
             snapshot=goal_snapshot,
         )
+        workout_entries = []
+        if workout_logging_enabled:
+            occurred_at_from, occurred_at_to = resolve_day_bounds_utc(
+                summary_date=summary_date,
+                timezone_name=timezone_name,
+                nutrition_day_start_hour=nutrition_day_start_hour,
+            )
+            workout_entries = self._entry_repository.list_workout_for_user_between(
+                user_id=user_id,
+                occurred_at_from=occurred_at_from,
+                occurred_at_to=occurred_at_to,
+            )
         recent_entries = self._entry_repository.list_recent_for_user(user_id=user_id, limit=5)
 
         return NutritionCoachFactualContext(
@@ -134,6 +168,23 @@ class NutritionCoachContextBuilder:
                 "water": float(water_summary.total_ml),
             },
             goal_progress=_build_metric_progress_map(goal_progress),
+            workout_entries=[
+                NutritionCoachWorkoutEntry(
+                    entry_id=entry.id,
+                    occurred_at=entry.occurred_at,
+                    source_text=entry.source_text,
+                    items=[
+                        NutritionCoachWorkoutItem(
+                            name=item.name,
+                            quantity=item.quantity,
+                            unit=item.unit,
+                            rendered_value=_render_recent_entry_item(item.name, item.quantity, item.unit),
+                        )
+                        for item in sorted(entry.items, key=lambda current: current.position)
+                    ],
+                )
+                for entry in workout_entries
+            ],
             recent_entries=[
                 NutritionCoachRecentEntry(
                     entry_type=entry.entry_type.value,

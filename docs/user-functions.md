@@ -581,7 +581,10 @@ Backfill nutrition завершён.
 - для ответа всегда собирает factual context текущего пищевого дня пользователя:
   - текущие итоги по калориям, белкам, жирам, углеводам, клетчатке и воде;
   - прогресс против дневных целей;
+  - список factual workout entries текущего пищевого дня, если у пользователя включена workout-функция;
   - недавние сохранённые записи;
+- `nutrition coach` получает workout context дня всегда, а не только по эвристике релевантности вопроса;
+- `nutrition coach` может учитывать тренировку в расширенном nutrition-смысле, например для белка, углеводов, hydration и meal timing, но не должен выдавать выдуманные workout metrics;
 - если у пользователя уже есть активная conversational coach session не старше одного часа, использует её краткий контекст и несколько последних conversational turns;
 - если пользователь отвечает reply на предыдущее conversational сообщение `nutrition coach`, бот сначала пытается продолжить именно ту же coach session, даже если часовой TTL уже истёк;
 - сохраняет только conversational turns `nutrition coach` в отдельную coach session memory, не смешивая их с journal entries;
