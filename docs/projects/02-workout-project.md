@@ -253,6 +253,12 @@
 
 ### Этап 3. Workout screenshots
 
+Статус:
+
+- `[x]` выполнен частично
+- реализован узкий полезный подэтап `single-screenshot workout logging`
+- multi-image и более широкая screenshot-модель сознательно оставлены вне текущего scope
+
 Цель:
 
 - добавить безопасный и наблюдаемый screenshot-based input для тренировок.
@@ -264,9 +270,8 @@
 - правила routing для screenshot input;
 - тесты на смешанные и неоднозначные сценарии.
 
-Текущий статус этапа:
+Результат текущего подэтапа:
 
-- реализован первый узкий подэтап: `single-screenshot workout logging`;
 - бот умеет принять один screenshot тренировки и сохранить `workout entry`;
 - если на screenshot явно видны калории тренировки, они сохраняются как factual metric `workout_calories`;
 - если пользователь присылает media group или несколько изображений, сценарий отклоняется с просьбой прислать один основной screenshot;
@@ -281,6 +286,35 @@
 Связанный ADR:
 
 - [ADR-029](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/adr/ADR-029-workout-screenshot-priority-and-calorie-metric.md:1)
+
+### Этап 4. Workout calories credited to nutrition
+
+Статус:
+
+- `[ ]` ещё не начат
+
+Цель:
+
+- отделить factual calories тренировки от того, сколько из них реально учитывается в питании текущего дня.
+
+Входит в этап:
+
+- отдельный domain contract для `workout_calories` и calorie credit в питании;
+- наблюдаемое пользовательское поведение, где calorie impact тренировки не равен автоматически полным workout calories;
+- использование workout calorie credit в calorie summary дня;
+- аккуратное отображение workout calories и workout duration в `/today`;
+- обновление `docs/user-functions.md` и summary-related тестов.
+
+Не входит в этап:
+
+- автоматическое изменение protein, fat, carbs и fiber goals;
+- отдельные workout goals;
+- fitness-coach логика;
+- новые screenshot metrics вроде pulse, effort или load.
+
+Связанный ADR:
+
+- [ADR-030](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/adr/ADR-030-workout-calorie-credit-for-nutrition-goals.md:1)
 
 ## 7. Критерий хорошего следующего шага
 
