@@ -173,6 +173,7 @@ async def test_start_creates_user_for_allowed_user() -> None:
         "Что можно сделать:\n"
         "- отправить запись еды текстом или фото блюда;\n"
         "- нажать кнопку воды;\n"
+        "- при желании включить запись тренировок в /settings;\n"
         "- задать вопрос о питании;\n"
         "- посмотреть итог дня: /today;\n"
         "- посмотреть и удалить последние записи: /recent;\n"
@@ -1296,6 +1297,7 @@ async def test_settings_returns_current_summary_preferences() -> None:
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         "Настройки summary:\n"
+        "- тренировки: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -1307,15 +1309,16 @@ async def test_settings_returns_current_summary_preferences() -> None:
         "- начало дня: 04:00",
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[0][0].text == "Калории: on"
-    assert reply_markup.inline_keyboard[1][0].text == "Белки: on"
-    assert reply_markup.inline_keyboard[2][0].text == "Жиры: on"
-    assert reply_markup.inline_keyboard[3][0].text == "Углеводы: on"
-    assert reply_markup.inline_keyboard[4][0].text == "Клетчатка: on"
-    assert reply_markup.inline_keyboard[5][0].text == "Вода: on"
-    assert reply_markup.inline_keyboard[6][0].text == "Дельта записи: on"
-    assert reply_markup.inline_keyboard[7][0].text == "Отображение: текст"
-    assert reply_markup.inline_keyboard[8][0].text == "Начало дня: 04:00"
+    assert reply_markup.inline_keyboard[0][0].text == "Тренировки: off"
+    assert reply_markup.inline_keyboard[1][0].text == "Калории: on"
+    assert reply_markup.inline_keyboard[2][0].text == "Белки: on"
+    assert reply_markup.inline_keyboard[3][0].text == "Жиры: on"
+    assert reply_markup.inline_keyboard[4][0].text == "Углеводы: on"
+    assert reply_markup.inline_keyboard[5][0].text == "Клетчатка: on"
+    assert reply_markup.inline_keyboard[6][0].text == "Вода: on"
+    assert reply_markup.inline_keyboard[7][0].text == "Дельта записи: on"
+    assert reply_markup.inline_keyboard[8][0].text == "Отображение: текст"
+    assert reply_markup.inline_keyboard[9][0].text == "Начало дня: 04:00"
 
 
 async def test_toggle_summary_metric_updates_preference_and_message() -> None:
@@ -1360,6 +1363,7 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
     callback.message.edit_text.assert_awaited_once()
     assert callback.message.edit_text.await_args.args == (
         "Настройки summary:\n"
+        "- тренировки: выключено\n"
         "- калории: включено\n"
         "- белки: выключено\n"
         "- жиры: включено\n"
@@ -1371,8 +1375,8 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
         "- начало дня: 04:00",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[0][0].text == "Калории: on"
-    assert reply_markup.inline_keyboard[1][0].text == "Белки: off"
+    assert reply_markup.inline_keyboard[1][0].text == "Калории: on"
+    assert reply_markup.inline_keyboard[2][0].text == "Белки: off"
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -1417,6 +1421,7 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
     assert saved_preference.nutrition_day_start_hour == 6
     assert callback.message.edit_text.await_args.args == (
         "Настройки summary:\n"
+        "- тренировки: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -1428,7 +1433,7 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
         "- начало дня: 06:00",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[8][0].text == "Начало дня: 06:00"
+    assert reply_markup.inline_keyboard[9][0].text == "Начало дня: 06:00"
 
 
 async def test_cycle_summary_display_mode_updates_preference_and_message() -> None:
@@ -1473,6 +1478,7 @@ async def test_cycle_summary_display_mode_updates_preference_and_message() -> No
     assert saved_preference.summary_display_mode == "bars"
     assert callback.message.edit_text.await_args.args == (
         "Настройки summary:\n"
+        "- тренировки: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -1484,7 +1490,7 @@ async def test_cycle_summary_display_mode_updates_preference_and_message() -> No
         "- начало дня: 04:00",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[7][0].text == "Отображение: бары"
+    assert reply_markup.inline_keyboard[8][0].text == "Отображение: бары"
 
 
 async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -> None:
@@ -1527,6 +1533,7 @@ async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -
     assert saved_preference.show_post_entry_delta_suffix is False
     assert callback.message.edit_text.await_args.args == (
         "Настройки summary:\n"
+        "- тренировки: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -1538,7 +1545,50 @@ async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -
         "- начало дня: 04:00",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[6][0].text == "Дельта записи: off"
+    assert reply_markup.inline_keyboard[7][0].text == "Дельта записи: off"
+    callback.answer.assert_awaited_once_with("Сохранил настройки.")
+
+
+async def test_toggle_workout_logging_updates_user_and_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "settings_workout_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="settings_workout_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="settings_workout_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_toggle_summary_metric(
+        callback,
+        SummarySettingsCallback(action="toggle_workout_logging"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_user = session.query(User).one()
+
+    assert saved_user.workout_logging_enabled is True
+    assert callback.message.edit_text.await_args.args == (
+        "Настройки summary:\n"
+        "- тренировки: включено\n"
+        "- калории: включено\n"
+        "- белки: включено\n"
+        "- жиры: включено\n"
+        "- углеводы: включено\n"
+        "- клетчатка: включено\n"
+        "- вода: включено\n"
+        "- дельта записи: включено\n"
+        "- отображение: текст\n"
+        "- начало дня: 04:00",
+    )
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Тренировки: on"
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -2332,13 +2382,24 @@ async def test_handle_message_routes_conversation_text_without_creating_entries(
         answer=AsyncMock(return_value=SimpleNamespace(message_id=654321, chat=SimpleNamespace(id=98765))),
     )
 
-    await handle_message(
-        message,
-        session_factory,
-        extraction_service=extraction_service,
-        conversation_service=conversation_service,
-        admin_user_ids=(ADMIN_ID,),
-    )
+    original_datetime = handle_message.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
+
+    handle_message.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_message(
+            message,
+            session_factory,
+            extraction_service=extraction_service,
+            conversation_service=conversation_service,
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_message.__globals__["datetime"] = original_datetime
 
     with session_factory() as session:
         assert session.query(Entry).count() == 0
@@ -2430,6 +2491,100 @@ async def test_handle_message_returns_ambiguous_reply_without_creating_entries()
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (build_ambiguous_message_response(),)
     assert message.answer.await_args.kwargs["reply_to_message_id"] == 654
+
+
+async def test_handle_message_does_not_save_workout_when_feature_is_disabled() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "workout_disabled_user")
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.WORKOUT,
+                        items=[ExtractedJournalItem(name="бег", quantity=40, unit="мин")],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload='{"entries":[{"type":"workout","items":[{"name":"бег","quantity":40,"unit":"мин"}]}]}',
+        )
+    )
+    message = SimpleNamespace(
+        text="тренировка: бег 40 минут",
+        message_id=778,
+        chat=SimpleNamespace(id=987680),
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="workout_disabled_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 0
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Запись тренировок сейчас выключена. Включи её в /settings, если хочешь сохранять такие сообщения.",
+    )
+
+
+async def test_handle_message_saves_workout_when_feature_is_enabled() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "workout_enabled_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="workout_enabled_user", timezone="Europe/Moscow")
+        user.workout_logging_enabled = True
+        session.add(user)
+        session.commit()
+
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.WORKOUT,
+                        items=[ExtractedJournalItem(name="бег", quantity=40, unit="мин")],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload='{"entries":[{"type":"workout","items":[{"name":"бег","quantity":40,"unit":"мин"}]}]}',
+        )
+    )
+    message = SimpleNamespace(
+        text="тренировка: бег 40 минут",
+        message_id=779,
+        chat=SimpleNamespace(id=987681),
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="workout_enabled_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_entry = session.query(Entry).one()
+        saved_item = session.query(EntryItem).one()
+
+    assert saved_entry.entry_type == EntryType.WORKOUT
+    assert saved_entry.source_text == "тренировка: бег 40 минут"
+    assert saved_item.name == "бег"
+    assert saved_item.quantity == 40
+    assert saved_item.unit == "min"
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("Сохранил:\n- бег (40 мин)",)
 
 
 async def test_handle_message_does_not_route_slash_like_text_to_journal() -> None:

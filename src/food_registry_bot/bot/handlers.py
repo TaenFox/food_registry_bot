@@ -431,6 +431,8 @@ def present_unit(unit: str | None) -> str | None:
         return "мл"
     if unit == "g":
         return "г"
+    if unit == "min":
+        return "мин"
     return unit
 
 
@@ -629,6 +631,7 @@ def get_enabled_summary_metric_codes(preference) -> tuple[str, ...]:
 
 def build_summary_settings_response(
     *,
+    workout_logging_enabled: bool,
     show_calories: bool,
     show_protein: bool,
     show_fat: bool,
@@ -646,6 +649,7 @@ def build_summary_settings_response(
     return "\n".join(
         [
             "Настройки summary:",
+            f"- тренировки: {statuses[workout_logging_enabled]}",
             f"- калории: {statuses[show_calories]}",
             f"- белки: {statuses[show_protein]}",
             f"- жиры: {statuses[show_fat]}",
@@ -731,6 +735,10 @@ def build_saved_items_from_payload(payload) -> list[EntryItemCreate]:
                 )
             )
     return items
+
+
+def payload_contains_workout_entries(payload) -> bool:
+    return any(entry.type is EntryType.WORKOUT for entry in payload.entries)
 
 
 def resolve_metric_deltas(
@@ -1101,6 +1109,7 @@ async def handle_start(
             "Что можно сделать:\n"
             "- отправить запись еды текстом или фото блюда;\n"
             "- нажать кнопку воды;\n"
+            "- при желании включить запись тренировок в /settings;\n"
             "- задать вопрос о питании;\n"
             "- посмотреть итог дня: /today;\n"
             "- посмотреть и удалить последние записи: /recent;\n"
@@ -1115,6 +1124,7 @@ async def handle_start(
         "Что можно сделать:\n"
         "- отправить запись еды текстом или фото блюда;\n"
         "- нажать кнопку воды;\n"
+        "- при желании включить запись тренировок в /settings;\n"
         "- задать вопрос о питании;\n"
         "- посмотреть итог дня: /today;\n"
         "- посмотреть и удалить последние записи: /recent;\n"
@@ -1270,10 +1280,14 @@ async def handle_settings(
 
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
+        user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
+        if user is None:
+            raise RuntimeError("User profile was not found after registration")
         preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
 
     await message.answer(
         build_summary_settings_response(
+            workout_logging_enabled=user.workout_logging_enabled,
             show_calories=preference.show_calories,
             show_protein=preference.show_protein,
             show_fat=preference.show_fat,
@@ -1285,6 +1299,7 @@ async def handle_settings(
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
         ),
         reply_markup=build_summary_settings_keyboard(
+            workout_logging_enabled=user.workout_logging_enabled,
             show_calories=preference.show_calories,
             show_protein=preference.show_protein,
             show_fat=preference.show_fat,
@@ -1336,6 +1351,9 @@ async def handle_toggle_summary_metric(
             preference = preference_repository.cycle_nutrition_day_start_hour(user_id=user.id)
         elif callback_data.action == "cycle_summary_display_mode":
             preference = preference_repository.cycle_summary_display_mode(user_id=user.id)
+        elif callback_data.action == "toggle_workout_logging":
+            user = UserRepository(session).toggle_workout_logging_enabled(user_id=user.id)
+            preference, _created = preference_repository.get_or_create(user_id=user.id)
         elif callback_data.action == "toggle_post_entry_delta_suffix":
             preference = preference_repository.toggle_post_entry_delta_suffix(user_id=user.id)
         else:
@@ -1348,6 +1366,7 @@ async def handle_toggle_summary_metric(
     if callback.message is not None:
         await callback.message.edit_text(
             build_summary_settings_response(
+                workout_logging_enabled=user.workout_logging_enabled,
                 show_calories=preference.show_calories,
                 show_protein=preference.show_protein,
                 show_fat=preference.show_fat,
@@ -1359,6 +1378,7 @@ async def handle_toggle_summary_metric(
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
             ),
             reply_markup=build_summary_settings_keyboard(
+                workout_logging_enabled=user.workout_logging_enabled,
                 show_calories=preference.show_calories,
                 show_protein=preference.show_protein,
                 show_fat=preference.show_fat,
@@ -1674,9 +1694,16 @@ async def handle_message(
                 if user is None:
                     raise RuntimeError("User profile was not found after registration")
                 summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+                if payload_contains_workout_entries(extraction_result.payload) and not user.workout_logging_enabled:
+                    await message.answer(
+                        "Запись тренировок сейчас выключена. Включи её в /settings, если хочешь сохранять такие сообщения.",
+                        reply_markup=build_main_keyboard(),
+                    )
+                    return
 
                 saved_food_entries: list = []
                 saved_items = build_saved_items_from_payload(extraction_result.payload)
+                saved_entry_types = {entry.type for entry in extraction_result.payload.entries}
                 occurred_at_values: list[datetime] = []
                 for extracted_entry in extraction_result.payload.entries:
                     occurred_at = extracted_entry.occurred_at or datetime.now(timezone.utc)
@@ -1684,7 +1711,7 @@ async def handle_message(
                         user_id=user_id,
                         entry_type=extracted_entry.type,
                         occurred_at=occurred_at,
-                        source_text=None,
+                        source_text=extraction_request.text if extracted_entry.type is EntryType.WORKOUT else None,
                         extraction_provider=extraction_result.extraction_provider,
                         extraction_model=extraction_result.extraction_model,
                         extraction_raw_payload=extraction_result.raw_payload,
@@ -1718,7 +1745,10 @@ async def handle_message(
                     timezone_name=user.timezone,
                     nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                 )
-                if len(summary_dates) == 1:
+                if len(summary_dates) == 1 and any(
+                    entry_type in {EntryType.FOOD, EntryType.WATER}
+                    for entry_type in saved_entry_types
+                ):
                     summary_date = next(iter(summary_dates))
                     metric_deltas = resolve_metric_deltas(
                         saved_items=saved_items,

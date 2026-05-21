@@ -89,6 +89,19 @@ def test_user_repository_creates_user_once() -> None:
     assert created_again is False
     assert user.id == same_user.id
     assert user.username == "alice"
+    assert user.workout_logging_enabled is False
+
+
+def test_user_repository_toggles_workout_logging_flag() -> None:
+    session = create_test_session()
+    repository = UserRepository(session)
+    user = repository.create(telegram_user_id=102, username="workout_user")
+
+    enabled_flag = repository.toggle_workout_logging_enabled(user_id=user.id).workout_logging_enabled
+    disabled_flag = repository.toggle_workout_logging_enabled(user_id=user.id).workout_logging_enabled
+
+    assert enabled_flag is True
+    assert disabled_flag is False
 
 
 def test_user_access_repository_sets_and_updates_access() -> None:

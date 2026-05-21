@@ -202,6 +202,10 @@
 
 ### Этап 1. Text-first workout logging
 
+Статус:
+
+- `[x]` выполнен
+
 Цель:
 
 - дать пользователю возможность явно записывать тренировку текстом.
@@ -222,7 +226,9 @@
 - workout-aware coach;
 - продвинутая exercise-level модель.
 
-Перед реализацией этапа нужен отдельный ADR.
+Связанный ADR:
+
+- [ADR-027](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/adr/ADR-027-opt-in-text-workout-logging.md:1)
 
 ### Этап 2. Workout-aware factual context
 

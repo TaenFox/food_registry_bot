@@ -127,6 +127,32 @@ def test_structured_payload_service_allows_milliliters_for_liquid_food_item() ->
     assert result.payload.entries[0].items[0].unit == "ml"
 
 
+def test_structured_payload_service_allows_workout_minutes() -> None:
+    service = StructuredPayloadExtractionService()
+
+    result = service.extract(
+        JournalExtractionRequest(
+            text='{"entries": [{"type": "workout", "items": [{"name": "бег", "quantity": 40, "unit": "минут"}]}]}'
+        )
+    )
+
+    assert isinstance(result, ValidExtractionPayload)
+    assert result.payload.entries[0].type.value == "workout"
+    assert result.payload.entries[0].items[0].unit == "min"
+
+
+def test_structured_payload_service_rejects_non_minute_workout_unit() -> None:
+    service = StructuredPayloadExtractionService()
+
+    result = service.extract(
+        JournalExtractionRequest(
+            text='{"entries": [{"type": "workout", "items": [{"name": "бег", "quantity": 5, "unit": "km"}]}]}'
+        )
+    )
+
+    assert isinstance(result, InvalidExtractionPayload)
+
+
 def test_structured_payload_service_returns_none_for_photo_request() -> None:
     service = StructuredPayloadExtractionService()
 

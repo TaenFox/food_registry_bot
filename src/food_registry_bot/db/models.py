@@ -40,6 +40,7 @@ class User(Base):
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     username: Mapped[Optional[str]] = mapped_column(String(255))
     timezone: Mapped[str] = mapped_column(String(64), default="Europe/Moscow")
+    workout_logging_enabled: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

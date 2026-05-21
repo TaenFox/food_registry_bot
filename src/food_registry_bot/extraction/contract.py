@@ -36,6 +36,13 @@ class ExtractedJournalItem(BaseModel):
             "g": "g",
             "гр": "g",
             "г": "g",
+            "min": "min",
+            "minute": "min",
+            "minutes": "min",
+            "мин": "min",
+            "минута": "min",
+            "минуты": "min",
+            "минут": "min",
         }
         return unit_aliases.get(normalized_value, normalized_value)
 
@@ -72,6 +79,7 @@ class ExtractedJournalEntry(BaseModel):
         allowed_units_by_type = {
             EntryType.FOOD: {"g", "ml", None},
             EntryType.WATER: {"ml", None},
+            EntryType.WORKOUT: {"min", None},
         }
         allowed_units = allowed_units_by_type.get(self.type)
         if allowed_units is None:
