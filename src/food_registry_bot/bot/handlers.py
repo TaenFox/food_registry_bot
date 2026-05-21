@@ -41,6 +41,8 @@ from food_registry_bot.db.repositories import (
     ConversationMessageRepository,
     ConversationSessionRepository,
     EntryItemCreate,
+    EntryItemMetricRepository,
+    EntryItemMetricValue,
     EntryRepository,
     UserGoalPreferenceRepository,
     UserAccessRepository,
@@ -454,6 +456,18 @@ def build_saved_items_confirmation(items: list[EntryItemCreate]) -> str:
     return "\n".join(lines)
 
 
+def build_extracted_workout_metric_lines(payload) -> list[str]:
+    lines: list[str] = []
+    for entry in payload.entries:
+        if entry.type is not EntryType.WORKOUT:
+            continue
+        for item in entry.items:
+            for metric in item.metrics:
+                if metric.code == "workout_calories":
+                    lines.append(f"- калории тренировки: {round(metric.value, 1)} ккал")
+    return lines
+
+
 def build_workout_entries_report(entries: list, *, timezone_name: str) -> str | None:
     if not entries:
         return None
@@ -466,10 +480,13 @@ def build_workout_entries_report(entries: list, *, timezone_name: str) -> str | 
 
 def build_write_confirmation_response(
     saved_items: list[EntryItemCreate],
+    extra_lines: list[str] | None = None,
     day_report: str | None = None,
     coach_comment: str | None = None,
 ) -> str:
     saved_items_confirmation = build_saved_items_confirmation(saved_items)
+    if extra_lines:
+        saved_items_confirmation = "\n".join([saved_items_confirmation, *extra_lines])
     parts = [saved_items_confirmation]
     if day_report is not None:
         parts.append(day_report)
@@ -750,6 +767,10 @@ def build_saved_items_from_payload(payload) -> list[EntryItemCreate]:
 
 def payload_contains_workout_entries(payload) -> bool:
     return any(entry.type is EntryType.WORKOUT for entry in payload.entries)
+
+
+def payload_contains_food_or_water_entries(payload) -> bool:
+    return any(entry.type in {EntryType.FOOD, EntryType.WATER} for entry in payload.entries)
 
 
 def resolve_metric_deltas(
@@ -1579,7 +1600,7 @@ async def handle_water_250_ml(
         )
 
     await message.answer(
-        build_write_confirmation_response(saved_items, day_report),
+        build_write_confirmation_response(saved_items, day_report=day_report),
         reply_markup=build_main_keyboard(),
     )
 
@@ -1745,6 +1766,7 @@ async def handle_message(
 
                 saved_food_entries: list = []
                 saved_items = build_saved_items_from_payload(extraction_result.payload)
+                extracted_workout_metric_lines = build_extracted_workout_metric_lines(extraction_result.payload)
                 saved_entry_types = {entry.type for entry in extraction_result.payload.entries}
                 occurred_at_values: list[datetime] = []
                 for extracted_entry in extraction_result.payload.entries:
@@ -1770,6 +1792,22 @@ async def handle_message(
                     occurred_at_values.append(occurred_at)
                     if extracted_entry.type is EntryType.FOOD:
                         saved_food_entries.append(saved_entry)
+                    if extracted_entry.type is EntryType.WORKOUT:
+                        persisted_items = sorted(saved_entry.items, key=lambda current: current.position)
+                        for persisted_item, extracted_item in zip(persisted_items, extracted_entry.items):
+                            if not extracted_item.metrics:
+                                continue
+                            EntryItemMetricRepository(session).upsert_metrics(
+                                entry_item_id=persisted_item.id,
+                                metric_values=[
+                                    EntryItemMetricValue(
+                                        code=metric.code,
+                                        value=metric.value,
+                                        confidence=metric.confidence,
+                                    )
+                                    for metric in extracted_item.metrics
+                                ],
+                            )
 
                 if saved_food_entries:
                     nutrition_flow_result = StoredEntryNutritionEstimationUseCase(
@@ -1787,10 +1825,7 @@ async def handle_message(
                     timezone_name=user.timezone,
                     nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                 )
-                if len(summary_dates) == 1 and any(
-                    entry_type in {EntryType.FOOD, EntryType.WATER}
-                    for entry_type in saved_entry_types
-                ):
+                if len(summary_dates) == 1 and payload_contains_food_or_water_entries(extraction_result.payload):
                     summary_date = next(iter(summary_dates))
                     metric_deltas = resolve_metric_deltas(
                         saved_items=saved_items,
@@ -1823,7 +1858,8 @@ async def handle_message(
                                 saved_food_entry.llm_comment = coach_comment
                     confirmation_text = build_write_confirmation_response(
                         saved_items,
-                        build_daily_report_for_summary_date(
+                        extra_lines=extracted_workout_metric_lines,
+                        day_report=build_daily_report_for_summary_date(
                             session=session,
                             user_id=user_id,
                             timezone_name=user.timezone,
@@ -1835,7 +1871,10 @@ async def handle_message(
                         coach_comment=coach_comment,
                     )
                 else:
-                    confirmation_text = build_write_confirmation_response(saved_items)
+                    confirmation_text = build_write_confirmation_response(
+                        saved_items,
+                        extra_lines=extracted_workout_metric_lines,
+                    )
         except FoodWriteFlowError as exc:
             await message.answer(str(exc), reply_markup=build_main_keyboard())
             return

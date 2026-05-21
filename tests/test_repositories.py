@@ -52,6 +52,7 @@ def create_test_session() -> Session:
             SupportedMetric(code="fat", name="Fat", unit="g"),
             SupportedMetric(code="carbs", name="Carbs", unit="g"),
             SupportedMetric(code="fiber", name="Fiber", unit="g"),
+            SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
         ]
     )
     session.commit()
@@ -537,7 +538,14 @@ def test_supported_metric_repository_lists_seeded_metrics() -> None:
 
     metrics = SupportedMetricRepository(session).list_all()
 
-    assert [metric.code for metric in metrics] == ["calories", "protein", "fat", "carbs", "fiber"]
+    assert [metric.code for metric in metrics] == [
+        "calories",
+        "protein",
+        "fat",
+        "carbs",
+        "fiber",
+        "workout_calories",
+    ]
 
 
 def test_entry_item_metric_repository_upserts_metric_values() -> None:

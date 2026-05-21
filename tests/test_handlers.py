@@ -51,6 +51,7 @@ from food_registry_bot.db.models import (
 from food_registry_bot.extraction import (
     ExtractedJournalEntry,
     ExtractedJournalItem,
+    ExtractedJournalMetric,
     ExtractedJournalPayload,
     ValidExtractionPayload,
 )
@@ -80,6 +81,7 @@ def create_session_factory() -> sessionmaker[Session]:
                 SupportedMetric(code="fat", name="Fat", unit="g"),
                 SupportedMetric(code="carbs", name="Carbs", unit="g"),
                 SupportedMetric(code="fiber", name="Fiber", unit="g"),
+                SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
             ]
         )
         session.commit()
@@ -2659,6 +2661,78 @@ async def test_handle_message_saves_workout_when_feature_is_enabled() -> None:
     assert saved_item.unit == "min"
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == ("Сохранил:\n- бег (40 мин)",)
+
+
+async def test_handle_message_saves_workout_calorie_metric_from_photo_extraction() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "workout_photo_metric_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="workout_photo_metric_user", timezone="Europe/Moscow")
+        user.workout_logging_enabled = True
+        session.add(user)
+        session.commit()
+
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.WORKOUT,
+                        items=[
+                            ExtractedJournalItem(
+                                name="тренировка",
+                                quantity=90,
+                                unit="мин",
+                                metrics=[ExtractedJournalMetric(code="workout_calories", value=757.0, confidence="high")],
+                            )
+                        ],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload=(
+                '{"entries":[{"type":"workout","items":[{"name":"тренировка","quantity":90,"unit":"мин",'
+                '"metrics":[{"code":"workout_calories","value":757,"confidence":"high"}]}]}]}'
+            ),
+        )
+    )
+
+    async def download_stub(_photo, destination):
+        destination.write(b"workout-image-bytes")
+
+    message = SimpleNamespace(
+        text=None,
+        caption=None,
+        photo=[SimpleNamespace(file_id="small"), SimpleNamespace(file_id="large")],
+        message_id=780,
+        chat=SimpleNamespace(id=987682),
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="workout_photo_metric_user"),
+        bot=SimpleNamespace(download=AsyncMock(side_effect=download_stub)),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_entry = session.query(Entry).one()
+        saved_item = session.query(EntryItem).one()
+        saved_metric = session.query(EntryItemMetric).one()
+        saved_metric_code = saved_metric.metric.code
+
+    assert saved_entry.entry_type == EntryType.WORKOUT
+    assert saved_item.name == "тренировка"
+    assert saved_metric_code == "workout_calories"
+    assert saved_metric.value == 757.0
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Сохранил:\n- тренировка (90 мин)\n- калории тренировки: 757.0 ккал",
+    )
 
 
 async def test_handle_message_does_not_route_slash_like_text_to_journal() -> None:

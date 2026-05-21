@@ -5,6 +5,7 @@ import pytest
 from food_registry_bot.config import ExtractionProvider, Settings
 from food_registry_bot.extraction import (
     ExtractionImageInput,
+    ExtractedJournalMetric,
     InvalidExtractionPayload,
     JournalExtractionRequest,
     LLMExtractionClientError,
@@ -139,6 +140,41 @@ def test_structured_payload_service_allows_workout_minutes() -> None:
     assert isinstance(result, ValidExtractionPayload)
     assert result.payload.entries[0].type.value == "workout"
     assert result.payload.entries[0].items[0].unit == "min"
+
+
+def test_structured_payload_service_allows_workout_calorie_metric() -> None:
+    service = StructuredPayloadExtractionService()
+
+    result = service.extract(
+        JournalExtractionRequest(
+            text=(
+                '{"entries": [{"type": "workout", "items": ['
+                '{"name": "тренировка", "quantity": 90, "unit": "мин", '
+                '"metrics": [{"code": "workout_calories", "value": 757, "confidence": "high"}]}]}]}'
+            )
+        )
+    )
+
+    assert isinstance(result, ValidExtractionPayload)
+    metric = result.payload.entries[0].items[0].metrics[0]
+    assert isinstance(metric, ExtractedJournalMetric)
+    assert metric.code == "workout_calories"
+    assert metric.value == 757
+
+
+def test_structured_payload_service_rejects_non_workout_metric_on_workout_item() -> None:
+    service = StructuredPayloadExtractionService()
+
+    result = service.extract(
+        JournalExtractionRequest(
+            text=(
+                '{"entries": [{"type": "workout", "items": ['
+                '{"name": "тренировка", "metrics": [{"code": "calories", "value": 757}]}]}]}'
+            )
+        )
+    )
+
+    assert isinstance(result, InvalidExtractionPayload)
 
 
 def test_structured_payload_service_rejects_non_minute_workout_unit() -> None:

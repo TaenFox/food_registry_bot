@@ -265,6 +265,13 @@
 - правила routing для screenshot input;
 - тесты на смешанные и неоднозначные сценарии.
 
+Текущий статус этапа:
+
+- реализован первый узкий подэтап: `single-screenshot workout logging`;
+- бот умеет принять один screenshot тренировки и сохранить `workout entry`;
+- если на screenshot явно видны калории тренировки, они сохраняются как factual metric `workout_calories`;
+- состав упражнений и multi-image merge пока не реализованы.
+
 Не входит в этап:
 
 - сохранение exercise-by-exercise состава тренировки;

@@ -34,6 +34,7 @@ def create_session_factory() -> sessionmaker[Session]:
                 SupportedMetric(code="fat", name="Fat", unit="g"),
                 SupportedMetric(code="carbs", name="Carbs", unit="g"),
                 SupportedMetric(code="fiber", name="Fiber", unit="g"),
+                SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
             ]
         )
         session.commit()
@@ -153,6 +154,16 @@ def test_nutrition_coach_context_builder_includes_workout_entries_for_day_when_e
                 EntryItem(entry_id=old_workout_entry.id, position=0, name="силовая", quantity=50, unit="min"),
             ]
         )
+        session.flush()
+        current_workout_item = session.query(EntryItem).filter_by(entry_id=workout_entry.id, position=0).one()
+        session.add(
+            EntryItemMetric(
+                entry_item_id=current_workout_item.id,
+                metric_id=6,
+                value=757.0,
+                confidence="high",
+            )
+        )
         session.commit()
 
         context = NutritionCoachContextBuilder(session).build(
@@ -165,6 +176,7 @@ def test_nutrition_coach_context_builder_includes_workout_entries_for_day_when_e
 
     assert len(context.workout_entries) == 1
     assert context.workout_entries[0].source_text == "сегодня была пробежка 40 минут"
+    assert context.workout_entries[0].metric_values == {"workout_calories": 757.0}
     assert context.workout_entries[0].items[0].name == "бег"
     assert context.workout_entries[0].items[0].unit == "min"
     assert context.workout_entries[0].items[0].rendered_value == "бег: 40 мин"

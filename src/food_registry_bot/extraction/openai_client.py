@@ -69,7 +69,7 @@ class OpenAIResponsesExtractionClient:
             content.append(
                 {
                     "type": "input_text",
-                    "text": "Extract journal entries from this food photo.",
+                    "text": "Extract journal entries from this image.",
                 }
             )
 
@@ -107,6 +107,7 @@ class OpenAIResponsesExtractionClient:
             "If water quantity is present, use unit 'ml'. "
             "For workout entries, item.name should be the workout or activity name. "
             "If workout duration is explicitly stated, use item.quantity with unit 'min'. "
+            "If workout calories are explicitly visible and reliable, put them into item.metrics as code 'workout_calories'. "
             "Do not invent workout calories, pulse, or other derived metrics. "
             "Return item names in Russian unless a fixed brand or label should stay unchanged. "
             "For food photos, if one complete dish is shown, save it as one item and do not decompose it into guessed ingredients. "
@@ -120,5 +121,7 @@ class OpenAIResponsesExtractionClient:
             "For photo-based food estimates, if exact mass is unclear, round to a reasonable step such as 25 grams instead of pretending to know exact precision. "
             "If quantity is not clear, omit quantity and unit. "
             "If time is not clearly stated, omit occurred_at. "
+            "For workout screenshots, prefer saving one compact workout item rather than the full exercise list. "
+            "Do not save screenshot exercise-by-exercise composition on this step. "
             "Use only what is visible in the photo or clearly stated in the text/caption."
         )

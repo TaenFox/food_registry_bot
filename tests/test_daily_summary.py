@@ -20,6 +20,7 @@ def create_test_session() -> Session:
             SupportedMetric(code="fat", name="Fat", unit="g"),
             SupportedMetric(code="carbs", name="Carbs", unit="g"),
             SupportedMetric(code="fiber", name="Fiber", unit="g"),
+            SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
         ]
     )
     session.commit()

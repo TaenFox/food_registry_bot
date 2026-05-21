@@ -14,6 +14,7 @@ class ExtractedJournalItem(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     quantity: Optional[int] = Field(default=None, gt=0)
     unit: Optional[str] = Field(default=None, min_length=1, max_length=32)
+    metrics: List["ExtractedJournalMetric"] = Field(default_factory=list)
 
     @field_validator("name")
     @classmethod
@@ -88,8 +89,22 @@ class ExtractedJournalEntry(BaseModel):
         for item in self.items:
             if item.unit not in allowed_units:
                 raise ValueError(f"unit {item.unit!r} is not allowed for entry type {self.type.value}")
+            if self.type is not EntryType.WORKOUT and item.metrics:
+                raise ValueError(f"metrics are not allowed for entry type {self.type.value}")
+            if self.type is EntryType.WORKOUT:
+                for metric in item.metrics:
+                    if metric.code != "workout_calories":
+                        raise ValueError(f"metric {metric.code!r} is not allowed for workout entry")
 
         return self
+
+
+class ExtractedJournalMetric(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    code: str = Field(min_length=1, max_length=64)
+    value: float = Field(gt=0)
+    confidence: str = Field(default="medium", min_length=1, max_length=32)
 
 
 class ExtractedJournalPayload(BaseModel):

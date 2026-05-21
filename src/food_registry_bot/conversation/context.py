@@ -58,6 +58,7 @@ class NutritionCoachWorkoutEntry(BaseModel):
     entry_id: int = Field(gt=0)
     occurred_at: datetime
     source_text: Optional[str] = None
+    metric_values: dict[str, float] = Field(default_factory=dict)
     items: list[NutritionCoachWorkoutItem] = Field(default_factory=list)
 
 
@@ -173,6 +174,12 @@ class NutritionCoachContextBuilder:
                     entry_id=entry.id,
                     occurred_at=entry.occurred_at,
                     source_text=entry.source_text,
+                    metric_values={
+                        metric.metric.code: metric.value
+                        for item in entry.items
+                        for metric in item.metrics
+                        if metric.metric is not None
+                    },
                     items=[
                         NutritionCoachWorkoutItem(
                             name=item.name,
