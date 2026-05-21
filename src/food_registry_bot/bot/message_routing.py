@@ -134,6 +134,8 @@ class RuleBasedMessageRoutingService:
                 lowered_photo_text = request.text.strip().lower()
                 if lowered_photo_text.startswith("/"):
                     return MessageRoutingDecision(route=AMBIGUOUS, reason="slash_like_photo_text")
+                if self._looks_like_explicit_photo_journal(lowered_photo_text):
+                    return MessageRoutingDecision(route=JOURNAL, reason="photo_journal_cue")
                 if self._looks_like_conversation_photo(
                     lowered_photo_text,
                 ):
@@ -209,6 +211,13 @@ class RuleBasedMessageRoutingService:
             return True
 
         return False
+
+    @staticmethod
+    def _looks_like_explicit_photo_journal(text: str) -> bool:
+        return (
+            RuleBasedMessageRoutingService._looks_like_journal(text)
+            or RuleBasedMessageRoutingService._looks_like_explicit_workout_journal(text)
+        )
 
     @staticmethod
     def _word_count(text: str) -> int:

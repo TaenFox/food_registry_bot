@@ -289,6 +289,7 @@ CONVERSATION_MODEL=gpt-5-mini
 Что делает этот запуск:
 
 - читает переменные из `../food_registry_bot_local/.env`;
+- если `APP_VERSION` не задан явно, автоматически подставляет текущий `git describe --tags --always --dirty`;
 - поднимает PostgreSQL;
 - собирает контейнер бота;
 - ждёт готовности базы;
@@ -429,6 +430,7 @@ POSTGRES_PASSWORD=food_registry
 
 - text-only сообщения;
 - одно фото еды с опциональным caption;
+- photo album или media group не поддерживаются: бот просит прислать одно основное фото;
 - тот же `entries` extraction contract на выходе, что и для structured payload режима.
 
 Для conversational `nutrition coach` на текущем этапе отдельный provider-флаг не нужен:

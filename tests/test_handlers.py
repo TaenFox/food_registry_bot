@@ -2766,7 +2766,42 @@ async def test_handle_message_rejects_photo_media_group_for_workout_screenshot_f
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Пока я умею разбирать только одно изображение за раз. Для тренировки пришли один скриншот с основными итогами.",
+        "Пока я умею разбирать только одно изображение за раз. Пришли одно основное фото или один скриншот.",
+    )
+
+
+async def test_handle_message_rejects_photo_media_group_for_food_flow() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "food_album_user")
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called for media group photos"))
+    )
+
+    async def download_stub(_photo, destination):
+        destination.write(b"food-image-bytes")
+
+    message = SimpleNamespace(
+        text=None,
+        caption=None,
+        photo=[SimpleNamespace(file_id="small"), SimpleNamespace(file_id="large")],
+        media_group_id="album-2",
+        message_id=782,
+        chat=SimpleNamespace(id=987684),
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="food_album_user"),
+        bot=SimpleNamespace(download=AsyncMock(side_effect=download_stub)),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Пока я умею разбирать только одно изображение за раз. Пришли одно основное фото или один скриншот.",
     )
 
 
@@ -3111,6 +3146,76 @@ async def test_photo_message_with_journal_caption_stays_journal_even_with_active
     assert saved_messages == []
     message.answer.assert_awaited_once()
     assert "Сохранил:" in message.answer.await_args.args[0]
+
+
+async def test_workout_photo_with_write_caption_stays_journal_and_is_not_routed_to_conversation() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "workout_photo_caption_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="workout_photo_caption_user", timezone="Europe/Moscow")
+        user.workout_logging_enabled = True
+        session.add(user)
+        session.commit()
+
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.WORKOUT,
+                        items=[
+                            ExtractedJournalItem(
+                                name="тренировка",
+                                quantity=90,
+                                unit="мин",
+                                metrics=[ExtractedJournalMetric(code="workout_calories", value=757.0, confidence="high")],
+                            )
+                        ],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload=(
+                '{"entries":[{"type":"workout","items":[{"name":"тренировка","quantity":90,"unit":"мин",'
+                '"metrics":[{"code":"workout_calories","value":757,"confidence":"high"}]}]}]}'
+            ),
+        )
+    )
+
+    async def download_stub(_photo, destination):
+        destination.write(b"workout-image-bytes")
+
+    message = SimpleNamespace(
+        text=None,
+        caption="запиши тренировку",
+        message_id=992,
+        chat=SimpleNamespace(id=98772),
+        photo=[SimpleNamespace(file_id="small"), SimpleNamespace(file_id="large")],
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="workout_photo_caption_user"),
+        bot=SimpleNamespace(download=AsyncMock(side_effect=download_stub), send_chat_action=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        conversation_service=SimpleNamespace(reply=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("reply must not be called"))),
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_entries = session.query(Entry).all()
+        saved_messages = session.query(ConversationMessage).all()
+
+    assert len(saved_entries) == 1
+    assert saved_entries[0].entry_type == EntryType.WORKOUT
+    assert saved_messages == []
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Сохранил:\n- тренировка (90 мин)\n- калории тренировки: 757.0 ккал",
+    )
 
 
 async def test_handle_message_routes_clear_journal_text_to_extraction_flow() -> None:

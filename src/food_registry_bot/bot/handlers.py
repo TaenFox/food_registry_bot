@@ -1657,7 +1657,7 @@ async def handle_message(
 
         if is_photo_media_group_message(message):
             await message.answer(
-                "Пока я умею разбирать только одно изображение за раз. Для тренировки пришли один скриншот с основными итогами.",
+                "Пока я умею разбирать только одно изображение за раз. Пришли одно основное фото или один скриншот.",
                 reply_markup=build_main_keyboard(),
             )
             return
