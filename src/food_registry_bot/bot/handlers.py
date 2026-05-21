@@ -971,6 +971,10 @@ async def build_extraction_request(message: Message) -> JournalExtractionRequest
     return None
 
 
+def is_photo_media_group_message(message: Message) -> bool:
+    return bool(getattr(message, "photo", None) and getattr(message, "media_group_id", None))
+
+
 async def send_typing_action(message: Message) -> None:
     bot = getattr(message, "bot", None)
     chat = getattr(message, "chat", None)
@@ -1647,6 +1651,13 @@ async def handle_message(
         if extraction_request is None:
             await message.answer(
                 "Сейчас я умею принимать текстовые записи, фото еды и кнопку воды. Если хочешь совет, задай вопрос текстом.",
+                reply_markup=build_main_keyboard(),
+            )
+            return
+
+        if is_photo_media_group_message(message):
+            await message.answer(
+                "Пока я умею разбирать только одно изображение за раз. Для тренировки пришли один скриншот с основными итогами.",
                 reply_markup=build_main_keyboard(),
             )
             return

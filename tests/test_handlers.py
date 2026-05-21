@@ -2735,6 +2735,41 @@ async def test_handle_message_saves_workout_calorie_metric_from_photo_extraction
     )
 
 
+async def test_handle_message_rejects_photo_media_group_for_workout_screenshot_flow() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "workout_album_user")
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: (_ for _ in ()).throw(AssertionError("extract must not be called for media group photos"))
+    )
+
+    async def download_stub(_photo, destination):
+        destination.write(b"workout-image-bytes")
+
+    message = SimpleNamespace(
+        text=None,
+        caption=None,
+        photo=[SimpleNamespace(file_id="small"), SimpleNamespace(file_id="large")],
+        media_group_id="album-1",
+        message_id=781,
+        chat=SimpleNamespace(id=987683),
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="workout_album_user"),
+        bot=SimpleNamespace(download=AsyncMock(side_effect=download_stub)),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Пока я умею разбирать только одно изображение за раз. Для тренировки пришли один скриншот с основными итогами.",
+    )
+
+
 async def test_handle_message_does_not_route_slash_like_text_to_journal() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "slash_user")

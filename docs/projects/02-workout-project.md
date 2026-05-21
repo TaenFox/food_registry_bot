@@ -260,7 +260,6 @@
 Входит в этап:
 
 - отдельный multimodal workout extraction contract;
-- source-priority правила между несколькими screenshots одного workout;
 - сохранение factual workout calorie metric при достаточной уверенности;
 - правила routing для screenshot input;
 - тесты на смешанные и неоднозначные сценарии.
@@ -270,6 +269,7 @@
 - реализован первый узкий подэтап: `single-screenshot workout logging`;
 - бот умеет принять один screenshot тренировки и сохранить `workout entry`;
 - если на screenshot явно видны калории тренировки, они сохраняются как factual metric `workout_calories`;
+- если пользователь присылает media group или несколько изображений, сценарий отклоняется с просьбой прислать один основной screenshot;
 - состав упражнений и multi-image merge пока не реализованы.
 
 Не входит в этап:
