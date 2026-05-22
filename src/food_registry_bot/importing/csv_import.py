@@ -24,6 +24,8 @@ from food_registry_bot.db.session import create_session_factory, session_scope
 from food_registry_bot.nutrition import DailyNutritionGoalSnapshotUseCase
 
 ROW_METRIC_CODES = ("calories", "protein", "fat", "carbs", "fiber")
+CSV_CONTRACT_TYPE_FULL = "food_registry_csv_v1"
+CSV_CONTRACT_TYPE_PARTIAL = "food_registry_csv_v1_partial"
 MEAL_TYPE_BASE_TIMES = {
     MealType.BREAKFAST: (8, 0),
     MealType.LUNCH: (13, 0),
@@ -45,6 +47,7 @@ class ImportedNutritionRow:
     quantity: int | None
     unit: str | None
     metrics: dict[str, float]
+    provided_metric_codes: frozenset[str]
     confidence: str
     source_type: str | None
     comment: str | None
@@ -56,6 +59,7 @@ class CsvNutritionImportResult:
     imported_row_count: int
     created_entry_count: int
     created_snapshot_count: int
+    created_entry_ids: list[int]
 
 
 @dataclass(frozen=True)
@@ -65,6 +69,12 @@ class CsvNutritionRowSummary:
     water_entry_count: int
     date_from: date | None
     date_to: date | None
+
+
+@dataclass(frozen=True)
+class CsvNutritionReadResult:
+    rows: list[ImportedNutritionRow]
+    contract_type: str
 
 
 def _normalize_header(value: str) -> str:
@@ -137,7 +147,6 @@ def _normalize_item_name(value: str, *, entry_type: EntryType) -> str:
 
 
 def build_import_row_signature(row: ImportedNutritionRow) -> str:
-    metric_values = "|".join(f"{metric_code}={row.metrics[metric_code]:.4f}" for metric_code in ROW_METRIC_CODES)
     return "||".join(
         [
             row.summary_date.isoformat(),
@@ -146,7 +155,6 @@ def build_import_row_signature(row: ImportedNutritionRow) -> str:
             row.item_name.strip().lower(),
             str(row.quantity or ""),
             (row.unit or "").strip().lower(),
-            metric_values,
         ]
     )
 
@@ -229,11 +237,13 @@ def _resolve_occurred_at(
 class CsvNutritionImporter:
     REQUIRED_HEADERS = {
         "date": "Дата",
-        "meal": "Приём пищи",
         "item_name": "Блюдо / продукт",
-        "categories": "Категории",
         "quantity": "Количество",
         "unit": "Единица",
+    }
+    OPTIONAL_HEADERS = {
+        "meal": "Приём пищи",
+        "categories": "Категории",
         "calories": "Ккал",
         "protein": "Белки, г",
         "fat": "Жиры, г",
@@ -261,6 +271,7 @@ class CsvNutritionImporter:
         snapshot_dates: set[date] = set()
         created_entry_count = 0
         imported_row_count = 0
+        created_entry_ids: list[int] = []
 
         summary_preferences, _created = self._summary_repository.get_or_create(user_id=user.id)
         for row in rows:
@@ -302,7 +313,7 @@ class CsvNutritionImporter:
                             value=row.metrics[metric_code],
                             confidence=row.confidence,
                         )
-                        for metric_code in ROW_METRIC_CODES
+                        for metric_code in row.provided_metric_codes
                     ],
                 )
 
@@ -315,31 +326,37 @@ class CsvNutritionImporter:
             snapshot_dates.add(row.summary_date)
             created_entry_count += 1
             imported_row_count += 1
+            created_entry_ids.append(entry.id)
 
         return CsvNutritionImportResult(
             imported_row_count=imported_row_count,
             created_entry_count=created_entry_count,
             created_snapshot_count=len(snapshot_dates),
+            created_entry_ids=created_entry_ids,
         )
 
     @classmethod
     def read_csv(cls, csv_path: Path) -> list[ImportedNutritionRow]:
+        return cls.read_csv_with_metadata(csv_path).rows
+
+    @classmethod
+    def read_csv_with_metadata(cls, csv_path: Path) -> CsvNutritionReadResult:
         with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             if reader.fieldnames is None:
                 raise ValueError("CSV file does not contain a header row")
 
-            header_map = cls._resolve_header_map(reader.fieldnames)
+            header_map, contract_type = cls._resolve_header_map(reader.fieldnames)
             rows: list[ImportedNutritionRow] = []
             for row_number, row in enumerate(reader, start=2):
                 if cls._is_empty_row(row):
                     continue
                 imported_row = cls._parse_row(row_number=row_number, row=row, header_map=header_map)
                 rows.append(imported_row)
-        return rows
+        return CsvNutritionReadResult(rows=rows, contract_type=contract_type)
 
     @classmethod
-    def _resolve_header_map(cls, headers: list[str]) -> dict[str, str]:
+    def _resolve_header_map(cls, headers: list[str]) -> tuple[dict[str, str], str]:
         normalized_headers = {_normalize_header(header): header for header in headers}
         header_map: dict[str, str] = {}
         missing_headers: list[str] = []
@@ -352,7 +369,20 @@ class CsvNutritionImporter:
 
         if missing_headers:
             raise ValueError(f"Missing required CSV headers: {', '.join(missing_headers)}")
-        return header_map
+        optional_header_count = 0
+        for field_name, expected_header in cls.OPTIONAL_HEADERS.items():
+            actual_header = normalized_headers.get(_normalize_header(expected_header))
+            if actual_header is None:
+                continue
+            header_map[field_name] = actual_header
+            optional_header_count += 1
+
+        contract_type = (
+            CSV_CONTRACT_TYPE_FULL
+            if optional_header_count == len(cls.OPTIONAL_HEADERS)
+            else CSV_CONTRACT_TYPE_PARTIAL
+        )
+        return header_map, contract_type
 
     @staticmethod
     def _is_empty_row(row: dict[str, str]) -> bool:
@@ -371,14 +401,23 @@ class CsvNutritionImporter:
             for field_name, actual_header in header_map.items()
         }
         summary_date = _parse_date(_require_text(row, header_map, "date"))
-        raw_meal_label = _clean_text(row.get(header_map["meal"]))
+        raw_meal_label = _clean_text(row.get(header_map["meal"])) if "meal" in header_map else None
         meal_type = _resolve_meal_type(raw_meal_label)
         raw_item_name = _require_text(row, header_map, "item_name")
-        categories = _clean_text(row.get(header_map["categories"]))
+        categories = _clean_text(row.get(header_map["categories"])) if "categories" in header_map else None
         quantity = _parse_quantity(row.get(header_map["quantity"]))
         unit = _clean_text(row.get(header_map["unit"]))
+        provided_metric_codes = frozenset(
+            metric_code
+            for metric_code in ROW_METRIC_CODES
+            if metric_code in header_map and _parse_number(row.get(header_map[metric_code])) is not None
+        )
         metrics = {
-            metric_code: _parse_number(row.get(header_map[metric_code])) or 0.0
+            metric_code: (
+                _parse_number(row.get(header_map[metric_code]))
+                if metric_code in header_map
+                else None
+            ) or 0.0
             for metric_code in ROW_METRIC_CODES
         }
         entry_type = _resolve_entry_type(
@@ -399,9 +438,10 @@ class CsvNutritionImporter:
             quantity=quantity,
             unit=normalized_unit,
             metrics=metrics,
-            confidence=_normalize_confidence(row.get(header_map["confidence"])),
-            source_type=_normalize_source_type(row.get(header_map["source"])),
-            comment=_clean_text(row.get(header_map["comment"])),
+            provided_metric_codes=provided_metric_codes,
+            confidence=_normalize_confidence(row.get(header_map["confidence"]) if "confidence" in header_map else None),
+            source_type=_normalize_source_type(row.get(header_map["source"]) if "source" in header_map else None),
+            comment=_clean_text(row.get(header_map["comment"])) if "comment" in header_map else None,
             raw_values=raw_values,
         )
 

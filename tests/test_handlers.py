@@ -13,10 +13,12 @@ from sqlalchemy.pool import StaticPool
 from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.handlers import (
     build_ambiguous_message_response,
+    build_data_exchange_files_response,
     handle_admin,
     handle_admin_allow,
     handle_admin_backfill_nutrition,
     handle_admin_deny,
+    handle_admin_process_import_file,
     handle_admin_users,
     handle_goal,
     handle_health,
@@ -37,6 +39,8 @@ from food_registry_bot.db.models import (
     ConversationMessageRole,
     ConversationMessage,
     ConversationSession,
+    DataExchangeDirection,
+    DataExchangeStatus,
     DailyGoalSnapshot,
     Entry,
     EntryItem,
@@ -48,6 +52,7 @@ from food_registry_bot.db.models import (
     UserGoalPreference,
     UserSummaryPreference,
 )
+from food_registry_bot.db.repositories import DataExchangeFileRepository
 from food_registry_bot.extraction import (
     ExtractedJournalEntry,
     ExtractedJournalItem,
@@ -55,6 +60,7 @@ from food_registry_bot.extraction import (
     ExtractedJournalPayload,
     ValidExtractionPayload,
 )
+from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_FULL, CSV_CONTRACT_TYPE_PARTIAL
 from food_registry_bot.nutrition import StaticNutritionEstimationService
 
 
@@ -317,7 +323,8 @@ async def test_admin_returns_system_overview_and_commands() -> None:
             "- /admin_users\n"
             "- <code>/admin_allow TELEGRAM_USER_ID</code>\n"
             "- <code>/admin_deny TELEGRAM_USER_ID</code>\n"
-            "- <code>/admin_backfill_nutrition [LIMIT]</code>"
+            "- <code>/admin_backfill_nutrition [LIMIT]</code>\n"
+            "- <code>/admin_process_import_file FILE_ID</code>"
         ),
     )
 
@@ -361,7 +368,8 @@ async def test_admin_overview_excludes_admin_from_user_counters() -> None:
             "- /admin_users\n"
             "- <code>/admin_allow TELEGRAM_USER_ID</code>\n"
             "- <code>/admin_deny TELEGRAM_USER_ID</code>\n"
-            "- <code>/admin_backfill_nutrition [LIMIT]</code>"
+            "- <code>/admin_backfill_nutrition [LIMIT]</code>\n"
+            "- <code>/admin_process_import_file FILE_ID</code>"
         ),
     )
 
@@ -541,6 +549,62 @@ async def test_admin_backfill_nutrition_returns_safe_usage_text_for_invalid_limi
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == ("Использование: <code>/admin_backfill_nutrition [LIMIT]</code>",)
+
+
+async def test_admin_process_import_file_returns_usage_for_missing_argument() -> None:
+    session_factory = create_session_factory()
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        answer=AsyncMock(),
+    )
+
+    await handle_admin_process_import_file(
+        message,
+        SimpleNamespace(args=None),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("Использование: <code>/admin_process_import_file FILE_ID</code>",)
+
+
+def test_build_data_exchange_files_response_shows_file_id_and_admin_processing_note() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        partial_file = DataExchangeFileRepository(session).create(
+            user_id=user.id,
+            direction=DataExchangeDirection.IMPORT,
+            contract_type=CSV_CONTRACT_TYPE_PARTIAL,
+            original_filename="partial.csv",
+            storage_path="user_1/import/partial.csv",
+            sha256="a" * 64,
+            row_count=1,
+            food_entry_count=1,
+            water_entry_count=0,
+            status=DataExchangeStatus.READY,
+        )
+        full_file = DataExchangeFileRepository(session).create(
+            user_id=user.id,
+            direction=DataExchangeDirection.EXPORT,
+            contract_type=CSV_CONTRACT_TYPE_FULL,
+            original_filename="export.csv",
+            storage_path="user_1/export/export.csv",
+            sha256="b" * 64,
+            row_count=2,
+            food_entry_count=1,
+            water_entry_count=1,
+            status=DataExchangeStatus.PROCESSED,
+        )
+        session.commit()
+        response = build_data_exchange_files_response([partial_file, full_file])
+
+    assert "[#1] partial.csv" in response
+    assert "требует обработки администратором" in response
+    assert "[#2] export.csv" in response
 
 
 async def test_admin_backfill_nutrition_reports_unhandled_error() -> None:

@@ -55,12 +55,7 @@ from food_registry_bot.db.repositories import (
     UserRepository,
     UserSummaryPreferenceRepository,
 )
-from food_registry_bot.exchange import (
-    DataExchangeService,
-    DuplicateDataRowError,
-    DuplicateFileError,
-    UnsupportedExchangeFileError,
-)
+from food_registry_bot.exchange import DataExchangeService, DuplicateDataRowError, DuplicateFileError, UnsupportedExchangeFileError
 from food_registry_bot.extraction import (
     ExtractionImageInput,
     InvalidExtractionPayload,
@@ -68,7 +63,12 @@ from food_registry_bot.extraction import (
     JournalExtractionRequest,
     StructuredPayloadExtractionService,
 )
-from food_registry_bot.exchange.service import FileLimitExceededError
+from food_registry_bot.exchange.service import (
+    AdminImportProcessingError,
+    CSV_CONTRACT_TYPE_PARTIAL,
+    FileLimitExceededError,
+    PartialImportRequiresAdminError,
+)
 from food_registry_bot.config import get_data_exchange_dir
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
@@ -152,7 +152,7 @@ def build_data_exchange_files_response(files: list[DataExchangeFile]) -> str:
 
     lines = ["Файлы:"]
     for index, exchange_file in enumerate(files, start=1):
-        lines.append(f"{index}. {exchange_file.original_filename}")
+        lines.append(f"{index}. [#{exchange_file.id}] {exchange_file.original_filename}")
         lines.append(
             f"   {EXCHANGE_DIRECTION_LABELS[exchange_file.direction]} · статус: {EXCHANGE_STATUS_LABELS[exchange_file.status]}"
         )
@@ -166,6 +166,8 @@ def build_data_exchange_files_response(files: list[DataExchangeFile]) -> str:
             )
         if exchange_file.date_from is not None and exchange_file.date_to is not None:
             lines.append(f"   даты: {exchange_file.date_from.isoformat()} — {exchange_file.date_to.isoformat()}")
+        if exchange_file.contract_type == CSV_CONTRACT_TYPE_PARTIAL:
+            lines.append("   требует обработки администратором")
     return "\n".join(lines)
 
 
@@ -479,6 +481,7 @@ def build_admin_overview_response(
             "- <code>/admin_allow TELEGRAM_USER_ID</code>",
             "- <code>/admin_deny TELEGRAM_USER_ID</code>",
             "- <code>/admin_backfill_nutrition [LIMIT]</code>",
+            "- <code>/admin_process_import_file FILE_ID</code>",
         ]
     )
 
@@ -1295,6 +1298,65 @@ async def handle_admin_backfill_nutrition(
     )
 
 
+@router.message(Command("admin_process_import_file"))
+async def handle_admin_process_import_file(
+    message: Message,
+    command: CommandObject,
+    session_factory: sessionmaker[Session],
+    nutrition_service: NutritionEstimationService = default_nutrition_service,
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = message.from_user
+    if telegram_user is None or not is_admin_user(telegram_user.id, admin_user_ids):
+        await message.answer("Команда доступна только администратору.")
+        return
+
+    file_id = parse_positive_int_arg(command)
+    if file_id is None:
+        await message.answer("Использование: <code>/admin_process_import_file FILE_ID</code>")
+        return
+
+    with session_scope(session_factory) as session:
+        exchange_file = session.get(DataExchangeFile, file_id)
+        if exchange_file is None or exchange_file.direction is not DataExchangeDirection.IMPORT:
+            await message.answer("Импортный файл с таким id не найден.")
+            return
+
+        exchange_service = DataExchangeService(session)
+        try:
+            food_count, water_count, estimated_metric_count = exchange_service.process_partial_import_file(
+                exchange_file=exchange_file,
+                nutrition_service=nutrition_service,
+            )
+        except DuplicateDataRowError as exc:
+            DataExchangeFileRepository(session).mark_error(
+                file_id=exchange_file.id,
+                processing_message=str(exc),
+            )
+            await message.answer(
+                "Обработка не завершена.\n"
+                f"Причина: {exc}"
+            )
+            return
+        except (AdminImportProcessingError, ValueError) as exc:
+            if exchange_file.status is not DataExchangeStatus.PROCESSED:
+                DataExchangeFileRepository(session).mark_error(
+                    file_id=exchange_file.id,
+                    processing_message=str(exc),
+                )
+            await message.answer(str(exc))
+            return
+
+    await message.answer(
+        "Обработка файла завершена.\n"
+        f"- id файла: {file_id}\n"
+        f"- записей еды: {food_count}\n"
+        f"- записей воды: {water_count}\n"
+        f"- дозаполнено nutrition metrics: {estimated_metric_count}\n"
+        "Файл помечен как обработанный."
+    )
+
+
 @router.message(Command("start"))
 async def handle_start(
     message: Message,
@@ -1816,6 +1878,9 @@ async def handle_data_exchange_file_callback(
                     f"Причина: {exc}"
                 )
                 return
+            except PartialImportRequiresAdminError as exc:
+                await callback.answer(str(exc), show_alert=True)
+                return
             except ValueError as exc:
                 await callback.answer(str(exc), show_alert=True)
                 return
@@ -1904,16 +1969,34 @@ async def handle_document_upload(
                 await message.answer(str(exc), reply_markup=build_main_keyboard())
                 return
 
+        if validation_result.contract_type == CSV_CONTRACT_TYPE_PARTIAL:
+            response_text = (
+                "Файл принят и сохранён.\n\n"
+                "Будет создано:\n"
+                f"- записей еды: {validation_result.food_entry_count}\n"
+                f"- записей воды: {validation_result.water_entry_count}\n\n"
+                "Диапазон дат:\n"
+                f"- {validation_result.date_from.isoformat() if validation_result.date_from else '—'} — "
+                f"{validation_result.date_to.isoformat() if validation_result.date_to else '—'}\n\n"
+                "Статус файла: готов\n"
+                "Файл содержит неполный набор данных и требует обработки администратором.\n"
+                "Для запуска обработки передай администратору id файла из /files."
+            )
+        else:
+            response_text = (
+                "Файл принят и подготовлен к импорту.\n\n"
+                "Будет создано:\n"
+                f"- записей еды: {validation_result.food_entry_count}\n"
+                f"- записей воды: {validation_result.water_entry_count}\n\n"
+                "Диапазон дат:\n"
+                f"- {validation_result.date_from.isoformat() if validation_result.date_from else '—'} — "
+                f"{validation_result.date_to.isoformat() if validation_result.date_to else '—'}\n\n"
+                "Статус файла: готов\n"
+                "Открыть список файлов: /files"
+            )
+
         await message.answer(
-            "Файл принят и подготовлен к импорту.\n\n"
-            "Будет создано:\n"
-            f"- записей еды: {validation_result.food_entry_count}\n"
-            f"- записей воды: {validation_result.water_entry_count}\n\n"
-            "Диапазон дат:\n"
-            f"- {validation_result.date_from.isoformat() if validation_result.date_from else '—'} — "
-            f"{validation_result.date_to.isoformat() if validation_result.date_to else '—'}\n\n"
-            "Статус файла: готов\n"
-            "Открыть список файлов: /files",
+            response_text,
             reply_markup=build_main_keyboard(),
         )
     finally:

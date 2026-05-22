@@ -5,10 +5,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.db.base import Base
-from food_registry_bot.db.models import DailyGoalSnapshot, EntryType, MealType
+from food_registry_bot.db.models import DailyGoalSnapshot, EntryItemMetric, EntryType, MealType
 from food_registry_bot.db.repositories import UserRepository
 from food_registry_bot.db.models import SupportedMetric
-from food_registry_bot.importing.csv_import import CsvNutritionImporter
+from food_registry_bot.importing.csv_import import (
+    CSV_CONTRACT_TYPE_PARTIAL,
+    CsvNutritionImporter,
+)
 from food_registry_bot.nutrition import DailyNutritionSummaryUseCase, DailyWaterSummaryUseCase
 
 
@@ -95,3 +98,32 @@ def test_csv_import_creates_entries_metrics_and_goal_snapshots(tmp_path: Path) -
     assert water_summary.total_ml == 250
     assert water_summary.included_entry_count == 1
     assert session.query(DailyGoalSnapshot).count() == 2
+
+
+def test_csv_import_accepts_partial_contract_and_keeps_only_provided_metrics(tmp_path: Path) -> None:
+    csv_path = tmp_path / "partial_import.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "Дата,Блюдо / продукт,Количество,Единица,Ккал",
+                "2026-05-20,Творог 5%,100,г,\"121,0\"",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=4243, username="partial_import_user")
+
+    read_result = CsvNutritionImporter.read_csv_with_metadata(csv_path)
+    result = CsvNutritionImporter(session).import_rows(user=user, rows=read_result.rows)
+    session.commit()
+
+    assert read_result.contract_type == CSV_CONTRACT_TYPE_PARTIAL
+    assert read_result.rows[0].provided_metric_codes == frozenset({"calories"})
+    assert result.created_entry_count == 1
+
+    assert session.query(DailyGoalSnapshot).count() == 1
+    saved_metrics = session.query(EntryItemMetric).all()
+    assert len(saved_metrics) == 1
+    assert saved_metrics[0].metric.code == "calories"
+    assert saved_metrics[0].value == 121.0

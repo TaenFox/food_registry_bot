@@ -4,6 +4,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 
 from food_registry_bot.bot.payloads import DataExchangeFileCallback, RecentEntryDeleteCallback, SummarySettingsCallback
 from food_registry_bot.db.models import DataExchangeDirection, DataExchangeFile, DataExchangeStatus
+from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_PARTIAL
 
 WATER_250_ML_BUTTON_TEXT = "Вода 250 мл"
 SUMMARY_DISPLAY_MODE_BUTTON_LABELS = {
@@ -188,7 +189,11 @@ def build_data_exchange_files_keyboard(*, files: list[DataExchangeFile]) -> Inli
 
 
 def _build_data_exchange_primary_button(exchange_file: DataExchangeFile) -> InlineKeyboardButton | None:
-    if exchange_file.direction is DataExchangeDirection.IMPORT and exchange_file.status is not DataExchangeStatus.PROCESSED:
+    if (
+        exchange_file.direction is DataExchangeDirection.IMPORT
+        and exchange_file.status is not DataExchangeStatus.PROCESSED
+        and exchange_file.contract_type != CSV_CONTRACT_TYPE_PARTIAL
+    ):
         return InlineKeyboardButton(
             text=f"Импортировать #{exchange_file.id}",
             callback_data=DataExchangeFileCallback(action="import", file_id=exchange_file.id).pack(),
