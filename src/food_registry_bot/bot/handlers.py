@@ -71,6 +71,7 @@ from food_registry_bot.extraction import (
 )
 from food_registry_bot.exchange.service import FileLimitExceededError
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_PARTIAL
+from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_WORKOUT
 from food_registry_bot.config import get_data_exchange_dir
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
@@ -143,6 +144,58 @@ class FoodWriteFlowError(RuntimeError):
     pass
 
 
+def describe_import_contract(contract_type: str) -> str:
+    if contract_type == CSV_CONTRACT_TYPE_WORKOUT:
+        return "тренировки"
+    if contract_type == CSV_CONTRACT_TYPE_PARTIAL:
+        return "еда и вода (неполный файл)"
+    return "еда и вода"
+
+
+def build_import_validation_response_text(validation_result) -> str:
+    contract_label = describe_import_contract(validation_result.contract_type)
+    if validation_result.contract_type == CSV_CONTRACT_TYPE_WORKOUT:
+        return (
+            "Файл принят и подготовлен к импорту.\n\n"
+            f"Распознан тип файла: {contract_label}\n\n"
+            "Будет создано:\n"
+            f"- тренировок: {validation_result.workout_entry_count}\n\n"
+            "Диапазон дат:\n"
+            f"- {validation_result.date_from.isoformat() if validation_result.date_from else '—'} — "
+            f"{validation_result.date_to.isoformat() if validation_result.date_to else '—'}\n\n"
+            "Статус файла: готов\n"
+            "Открыть список файлов: /files"
+        )
+    if validation_result.contract_type == CSV_CONTRACT_TYPE_PARTIAL:
+        return (
+            "Файл принят и подготовлен к импорту.\n\n"
+            f"Распознан тип файла: {contract_label}\n\n"
+            "Будет создано:\n"
+            f"- записей еды: {validation_result.food_entry_count}\n"
+            f"- записей воды: {validation_result.water_entry_count}\n\n"
+            "Диапазон дат:\n"
+            f"- {validation_result.date_from.isoformat() if validation_result.date_from else '—'} — "
+            f"{validation_result.date_to.isoformat() if validation_result.date_to else '—'}\n\n"
+            "Статус файла: готов\n"
+            "Файл содержит неполный набор данных.\n"
+            "После импорта часть итогов дня может быть неполной.\n"
+            "Если понадобится дозаполнение метрик, попроси администратора запустить /admin_backfill_nutrition.\n"
+            "Открыть список файлов: /files"
+        )
+    return (
+        "Файл принят и подготовлен к импорту.\n\n"
+        f"Распознан тип файла: {contract_label}\n\n"
+        "Будет создано:\n"
+        f"- записей еды: {validation_result.food_entry_count}\n"
+        f"- записей воды: {validation_result.water_entry_count}\n\n"
+        "Диапазон дат:\n"
+        f"- {validation_result.date_from.isoformat() if validation_result.date_from else '—'} — "
+        f"{validation_result.date_to.isoformat() if validation_result.date_to else '—'}\n\n"
+        "Статус файла: готов\n"
+        "Открыть список файлов: /files"
+    )
+
+
 def build_data_exchange_files_response(files: list[DataExchangeFile]) -> str:
     if not files:
         return (
@@ -159,9 +212,13 @@ def build_data_exchange_files_response(files: list[DataExchangeFile]) -> str:
             f"   {EXCHANGE_DIRECTION_LABELS[exchange_file.direction]} · статус: {EXCHANGE_STATUS_LABELS[exchange_file.status]}"
         )
         if exchange_file.direction is DataExchangeDirection.IMPORT:
-            lines.append(
-                f"   еда: {exchange_file.food_entry_count}, вода: {exchange_file.water_entry_count}"
-            )
+            lines.append(f"   тип: {describe_import_contract(exchange_file.contract_type)}")
+            if exchange_file.contract_type == CSV_CONTRACT_TYPE_WORKOUT:
+                lines.append(f"   тренировок: {exchange_file.row_count}")
+            else:
+                lines.append(
+                    f"   еда: {exchange_file.food_entry_count}, вода: {exchange_file.water_entry_count}"
+                )
         else:
             lines.append(
                 f"   строк: {exchange_file.row_count}, еда: {exchange_file.food_entry_count}, вода: {exchange_file.water_entry_count}"
@@ -1880,7 +1937,7 @@ async def handle_data_exchange_file_callback(
 
         if callback_data.action == "import":
             try:
-                food_count, water_count = exchange_service.import_file(exchange_file=exchange_file, user=user)
+                import_result = exchange_service.import_file(exchange_file=exchange_file, user=user)
             except DuplicateDataRowError as exc:
                 DataExchangeFileRepository(session).mark_error(
                     file_id=exchange_file.id,
@@ -1908,12 +1965,20 @@ async def handle_data_exchange_file_callback(
                 reply_markup=build_data_exchange_files_keyboard(files=files),
             )
             await callback.answer("Импорт выполнен.")
-            await callback.message.answer(
-                "Импорт завершён.\n"
-                f"- записей еды: {food_count}\n"
-                f"- записей воды: {water_count}\n"
-                "Файл помечен как обработанный."
-            )
+            if import_result.contract_type == CSV_CONTRACT_TYPE_WORKOUT:
+                completion_text = (
+                    "Импорт завершён.\n"
+                    f"- тренировок: {import_result.workout_entry_count}\n"
+                    "Файл помечен как обработанный."
+                )
+            else:
+                completion_text = (
+                    "Импорт завершён.\n"
+                    f"- записей еды: {import_result.food_entry_count}\n"
+                    f"- записей воды: {import_result.water_entry_count}\n"
+                    "Файл помечен как обработанный."
+                )
+            await callback.message.answer(completion_text)
             return
 
         if callback_data.action == "download":
@@ -1986,33 +2051,7 @@ async def handle_document_upload(
                 await message.answer(str(exc), reply_markup=build_main_keyboard())
                 return
 
-        if validation_result.contract_type == CSV_CONTRACT_TYPE_PARTIAL:
-            response_text = (
-                "Файл принят и подготовлен к импорту.\n\n"
-                "Будет создано:\n"
-                f"- записей еды: {validation_result.food_entry_count}\n"
-                f"- записей воды: {validation_result.water_entry_count}\n\n"
-                "Диапазон дат:\n"
-                f"- {validation_result.date_from.isoformat() if validation_result.date_from else '—'} — "
-                f"{validation_result.date_to.isoformat() if validation_result.date_to else '—'}\n\n"
-                "Статус файла: готов\n"
-                "Файл содержит неполный набор данных.\n"
-                "После импорта часть итогов дня может быть неполной.\n"
-                "Если понадобится дозаполнение метрик, попроси администратора запустить /admin_backfill_nutrition.\n"
-                "Открыть список файлов: /files"
-            )
-        else:
-            response_text = (
-                "Файл принят и подготовлен к импорту.\n\n"
-                "Будет создано:\n"
-                f"- записей еды: {validation_result.food_entry_count}\n"
-                f"- записей воды: {validation_result.water_entry_count}\n\n"
-                "Диапазон дат:\n"
-                f"- {validation_result.date_from.isoformat() if validation_result.date_from else '—'} — "
-                f"{validation_result.date_to.isoformat() if validation_result.date_to else '—'}\n\n"
-                "Статус файла: готов\n"
-                "Открыть список файлов: /files"
-            )
+        response_text = build_import_validation_response_text(validation_result)
 
         await message.answer(
             response_text,

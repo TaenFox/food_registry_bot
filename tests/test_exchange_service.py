@@ -16,7 +16,11 @@ from food_registry_bot.exchange.service import (
     FileLimitExceededError,
     LocalDataExchangeStorage,
 )
-from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_PARTIAL
+from food_registry_bot.importing.csv_import import (
+    CSV_CONTRACT_TYPE_FULL,
+    CSV_CONTRACT_TYPE_PARTIAL,
+    CSV_CONTRACT_TYPE_WORKOUT,
+)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -32,6 +36,8 @@ def create_test_session() -> Session:
             SupportedMetric(code="fat", name="Fat", unit="g"),
             SupportedMetric(code="carbs", name="Carbs", unit="g"),
             SupportedMetric(code="fiber", name="Fiber", unit="g"),
+            SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
+            SupportedMetric(code="workout_calorie_credit", name="Workout Calorie Credit", unit="kcal"),
         ]
     )
     session.commit()
@@ -62,6 +68,17 @@ def build_partial_csv(
 ) -> None:
     content = (FIXTURES_DIR / "import_partial.csv").read_text(encoding="utf-8")
     content = content.replace("2026-05-20,Творог 5%", f"{entry_date},{item_name}")
+    csv_path.write_text(content, encoding="utf-8")
+
+
+def build_workout_csv(
+    csv_path: Path,
+    *,
+    workout_name: str = "силовая: спина и руки",
+    entry_date: str = "2026-05-20",
+) -> None:
+    content = (FIXTURES_DIR / "import_workout.csv").read_text(encoding="utf-8")
+    content = content.replace("2026-05-20,силовая: спина и руки", f"{entry_date},{workout_name}")
     csv_path.write_text(content, encoding="utf-8")
 
 
@@ -186,10 +203,10 @@ def test_import_marks_file_processed(tmp_path: Path) -> None:
         validation_result=validation_result,
     )
 
-    food_count, water_count = service.import_file(exchange_file=exchange_file, user=user)
+    import_result = service.import_file(exchange_file=exchange_file, user=user)
 
-    assert food_count == 1
-    assert water_count == 1
+    assert import_result.food_entry_count == 1
+    assert import_result.water_entry_count == 1
     assert exchange_file.status is DataExchangeStatus.PROCESSED
 
 
@@ -290,9 +307,9 @@ def test_partial_import_file_is_saved_and_can_be_imported_by_user(tmp_path: Path
 
     assert validation_result.contract_type == CSV_CONTRACT_TYPE_PARTIAL
     assert exchange_file.validation_message == "Файл готов к импорту. После импорта часть итогов может быть неполной."
-    food_count, water_count = service.import_file(exchange_file=exchange_file, user=user)
-    assert food_count == 1
-    assert water_count == 0
+    import_result = service.import_file(exchange_file=exchange_file, user=user)
+    assert import_result.food_entry_count == 1
+    assert import_result.water_entry_count == 0
     assert exchange_file.status is DataExchangeStatus.PROCESSED
 
 
@@ -327,6 +344,98 @@ def test_duplicate_check_uses_core_row_data_for_partial_file(tmp_path: Path) -> 
             user=user,
             source_path=partial_csv_path,
             original_filename="partial.csv",
+        )
+
+    assert exc_info.value.row_number == 2
+
+
+def test_validate_and_import_workout_file(tmp_path: Path) -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=4010, username="workout_user")
+    storage = LocalDataExchangeStorage(base_dir=tmp_path / "data_exchange")
+    csv_path = tmp_path / "workout.csv"
+    build_workout_csv(csv_path)
+    service = DataExchangeService(session, storage=storage)
+
+    sha256, validation_result = service.validate_import_file(
+        user=user,
+        source_path=csv_path,
+        original_filename="workout.csv",
+    )
+    exchange_file = service.create_import_file(
+        user=user,
+        source_path=csv_path,
+        original_filename="workout.csv",
+        sha256=sha256,
+        validation_result=validation_result,
+    )
+    import_result = service.import_file(exchange_file=exchange_file, user=user)
+
+    assert validation_result.contract_type == CSV_CONTRACT_TYPE_WORKOUT
+    assert validation_result.workout_entry_count == 2
+    assert import_result.workout_entry_count == 2
+    assert exchange_file.status is DataExchangeStatus.PROCESSED
+
+
+def test_validate_import_detects_contract_by_headers_not_filename(tmp_path: Path) -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=4012, username="header_detection_user")
+    storage = LocalDataExchangeStorage(base_dir=tmp_path / "data_exchange")
+    csv_path = tmp_path / "Дневник_питания_Паша_Тренировки.csv"
+    build_sample_csv(csv_path)
+    service = DataExchangeService(session, storage=storage)
+
+    _sha256, validation_result = service.validate_import_file(
+        user=user,
+        source_path=csv_path,
+        original_filename=csv_path.name,
+    )
+
+    assert validation_result.contract_type == CSV_CONTRACT_TYPE_FULL
+
+
+def test_validate_workout_import_rejects_duplicate_after_import(tmp_path: Path) -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=4011, username="workout_duplicate_user")
+    storage = LocalDataExchangeStorage(base_dir=tmp_path / "data_exchange")
+    csv_path = tmp_path / "workout.csv"
+    build_workout_csv(csv_path)
+    service = DataExchangeService(session, storage=storage)
+
+    sha256, validation_result = service.validate_import_file(
+        user=user,
+        source_path=csv_path,
+        original_filename="workout.csv",
+    )
+    exchange_file = service.create_import_file(
+        user=user,
+        source_path=csv_path,
+        original_filename="workout.csv",
+        sha256=sha256,
+        validation_result=validation_result,
+    )
+    service.import_file(exchange_file=exchange_file, user=user)
+    session.commit()
+
+    duplicate_csv_path = tmp_path / "workout_duplicate.csv"
+    build_workout_csv(
+        duplicate_csv_path,
+        workout_name="силовая: спина и руки",
+        entry_date="2026-05-20",
+    )
+    duplicate_csv_path.write_text(
+        duplicate_csv_path.read_text(encoding="utf-8").replace(
+            "Основным источником считала часы",
+            "Другой комментарий",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DuplicateDataRowError) as exc_info:
+        service.validate_import_file(
+            user=user,
+            source_path=duplicate_csv_path,
+            original_filename="workout_duplicate.csv",
         )
 
     assert exc_info.value.row_number == 2

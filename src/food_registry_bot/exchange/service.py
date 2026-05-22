@@ -24,10 +24,16 @@ from food_registry_bot.db.repositories import DataExchangeFileRepository, EntryR
 from food_registry_bot.db.repositories import UserSummaryPreferenceRepository
 from food_registry_bot.importing.csv_import import (
     CSV_CONTRACT_TYPE_FULL,
+    CSV_CONTRACT_TYPE_WORKOUT,
     CsvNutritionImporter,
+    CsvWorkoutImporter,
     ImportedNutritionRow,
+    ImportedWorkoutRow,
     ROW_METRIC_CODES,
+    build_workout_import_row_signature,
+    detect_csv_contract,
     summarize_import_rows,
+    summarize_workout_import_rows,
 )
 from food_registry_bot.nutrition import resolve_local_summary_date
 
@@ -150,13 +156,22 @@ class LocalDataExchangeStorage:
 
 @dataclass(frozen=True)
 class ImportValidationResult:
-    rows: list[ImportedNutritionRow]
+    rows: list[ImportedNutritionRow] | list[ImportedWorkoutRow]
     contract_type: str
     row_count: int
     food_entry_count: int
     water_entry_count: int
+    workout_entry_count: int
     date_from: date | None
     date_to: date | None
+
+
+@dataclass(frozen=True)
+class ImportExecutionResult:
+    contract_type: str
+    food_entry_count: int = 0
+    water_entry_count: int = 0
+    workout_entry_count: int = 0
 
 
 class DataExchangeService:
@@ -201,33 +216,58 @@ class DataExchangeService:
             raise DuplicateFileError("Такой файл уже был загружен ранее.")
 
         try:
-            read_result = CsvNutritionImporter.read_csv_with_metadata(source_path)
+            detected_contract = detect_csv_contract(source_path)
         except ValueError as exc:
             raise UnsupportedExchangeFileError(
-                "Не знаю, как обработать этот CSV-файл. Ожидаю поддержанный обменный файл food_registry_bot с данными по еде и воде."
+                "Не знаю, как обработать этот CSV-файл. Ожидаю поддержанный обменный файл food_registry_bot с данными по еде, воде или тренировкам."
             ) from exc
-        rows = read_result.rows
 
-        duplicate_row = self._find_duplicate_data_row(user=user, rows=rows)
-        if duplicate_row is not None:
-            row_number, row = duplicate_row
-            raise DuplicateDataRowError(
-                row_number=row_number,
-                description=(
-                    "В файле обнаружены данные, которые уже есть в системе. "
-                    f"Первый дубликат найден в строке {row_number}: {_format_row_description(row)}."
-                ),
-            )
+        if detected_contract.contract_type == CSV_CONTRACT_TYPE_WORKOUT:
+            workout_read_result = CsvWorkoutImporter.read_csv_with_metadata(source_path)
+            rows = workout_read_result.rows
+            duplicate_row = self._find_duplicate_workout_row(user=user, rows=rows)
+            if duplicate_row is not None:
+                row_number, row = duplicate_row
+                raise DuplicateDataRowError(
+                    row_number=row_number,
+                    description=(
+                        "В файле обнаружены тренировки, которые уже есть в системе. "
+                        f"Первый дубликат найден в строке {row_number}: {self._format_workout_row_description(row)}."
+                    ),
+                )
+            summary = summarize_workout_import_rows(rows)
+            read_contract_type = workout_read_result.contract_type
+            food_entry_count = 0
+            water_entry_count = 0
+            workout_entry_count = summary.workout_entry_count
+        else:
+            nutrition_read_result = CsvNutritionImporter.read_csv_with_metadata(source_path)
+            rows = nutrition_read_result.rows
+            duplicate_row = self._find_duplicate_data_row(user=user, rows=rows)
+            if duplicate_row is not None:
+                row_number, row = duplicate_row
+                raise DuplicateDataRowError(
+                    row_number=row_number,
+                    description=(
+                        "В файле обнаружены данные, которые уже есть в системе. "
+                        f"Первый дубликат найден в строке {row_number}: {_format_row_description(row)}."
+                    ),
+                )
+            summary = summarize_import_rows(rows)
+            read_contract_type = nutrition_read_result.contract_type
+            food_entry_count = summary.food_entry_count
+            water_entry_count = summary.water_entry_count
+            workout_entry_count = 0
 
-        summary = summarize_import_rows(rows)
         return (
             sha256,
             ImportValidationResult(
                 rows=rows,
-                contract_type=read_result.contract_type,
+                contract_type=read_contract_type,
                 row_count=summary.row_count,
-                food_entry_count=summary.food_entry_count,
-                water_entry_count=summary.water_entry_count,
+                food_entry_count=food_entry_count,
+                water_entry_count=water_entry_count,
+                workout_entry_count=workout_entry_count,
                 date_from=summary.date_from,
                 date_to=summary.date_to,
             ),
@@ -263,18 +303,41 @@ class DataExchangeService:
             date_to=validation_result.date_to,
             validation_message=(
                 "Файл готов к импорту."
-                if validation_result.contract_type == CSV_CONTRACT_TYPE_FULL
+                if validation_result.contract_type in {CSV_CONTRACT_TYPE_FULL, CSV_CONTRACT_TYPE_WORKOUT}
                 else "Файл готов к импорту. После импорта часть итогов может быть неполной."
             ),
         )
 
-    def import_file(self, *, exchange_file: DataExchangeFile, user: User) -> tuple[int, int]:
+    def import_file(self, *, exchange_file: DataExchangeFile, user: User) -> ImportExecutionResult:
         if exchange_file.direction is not DataExchangeDirection.IMPORT:
             raise ValueError("Only import files can be imported")
         if exchange_file.status is DataExchangeStatus.PROCESSED:
             raise ValueError("Этот файл уже был импортирован ранее. Повторный импорт запрещён.")
 
         file_path = self._storage.resolve_path(exchange_file.storage_path)
+        if exchange_file.contract_type == CSV_CONTRACT_TYPE_WORKOUT:
+            rows = CsvWorkoutImporter.read_csv(file_path)
+            duplicate_row = self._find_duplicate_workout_row(user=user, rows=rows)
+            if duplicate_row is not None:
+                row_number, row = duplicate_row
+                raise DuplicateDataRowError(
+                    row_number=row_number,
+                    description=(
+                        "Импорт остановлен: обнаружен дубликат уже существующих тренировок. "
+                        f"Строка {row_number}: {self._format_workout_row_description(row)}."
+                    ),
+                )
+            CsvWorkoutImporter(self._session).import_rows(user=user, rows=rows)
+            self._file_repository.mark_processed(
+                file_id=exchange_file.id,
+                processing_message=f"Импорт выполнен: тренировок {len(rows)}.",
+                processed_at=datetime.now(timezone.utc),
+            )
+            return ImportExecutionResult(
+                contract_type=exchange_file.contract_type,
+                workout_entry_count=len(rows),
+            )
+
         rows = CsvNutritionImporter.read_csv(file_path)
         duplicate_row = self._find_duplicate_data_row(user=user, rows=rows)
         if duplicate_row is not None:
@@ -297,7 +360,11 @@ class DataExchangeService:
             ),
             processed_at=datetime.now(timezone.utc),
         )
-        return imported_food_count, imported_water_count
+        return ImportExecutionResult(
+            contract_type=exchange_file.contract_type,
+            food_entry_count=imported_food_count,
+            water_entry_count=imported_water_count,
+        )
 
     def create_export_file(self, *, user: User) -> DataExchangeFile:
         if self._file_repository.count_for_user_and_direction(
@@ -412,6 +479,61 @@ class DataExchangeService:
                 )
                 existing_rows.append(imported_row)
         return existing_rows
+
+    def _find_duplicate_workout_row(
+        self,
+        *,
+        user: User,
+        rows: list[ImportedWorkoutRow],
+    ) -> tuple[int, ImportedWorkoutRow] | None:
+        existing_signatures = self._build_existing_workout_signatures(user=user)
+        for row in rows:
+            if build_workout_import_row_signature(row) in existing_signatures:
+                return row.row_number, row
+        return None
+
+    def _build_existing_workout_signatures(self, *, user: User) -> set[str]:
+        entries = self._entry_repository.list_recent_for_user(user_id=user.id, limit=100000)
+        summary_preference, _created = self._summary_preference_repository.get_or_create(user_id=user.id)
+        signatures: set[str] = set()
+        for entry in entries:
+            if entry.entry_type is not EntryType.WORKOUT:
+                continue
+            for item in entry.items:
+                workout_calories = next(
+                    (
+                        metric.value
+                        for metric in item.metrics
+                        if metric.metric is not None and metric.metric.code == "workout_calories"
+                    ),
+                    0.0,
+                )
+                signatures.add(
+                    build_workout_import_row_signature(
+                        ImportedWorkoutRow(
+                            row_number=0,
+                            summary_date=resolve_local_summary_date(
+                                reference_at=entry.occurred_at,
+                                timezone_name=user.timezone,
+                                nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                            ),
+                            workout_name=item.name,
+                            duration_minutes=item.quantity or 0,
+                            workout_calories=workout_calories,
+                            workout_calorie_credit=0.0,
+                            comment=entry.llm_comment,
+                            raw_values={},
+                        )
+                    )
+                )
+        return signatures
+
+    @staticmethod
+    def _format_workout_row_description(row: ImportedWorkoutRow) -> str:
+        return (
+            f"{row.summary_date.isoformat()}, {row.workout_name}, "
+            f"{row.duration_minutes} мин, {round(row.workout_calories, 1)} ккал"
+        )
 
     @staticmethod
     def _rows_match_for_duplicate(

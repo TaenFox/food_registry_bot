@@ -11,6 +11,8 @@ from food_registry_bot.db.models import SupportedMetric
 from food_registry_bot.importing.csv_import import (
     CSV_CONTRACT_TYPE_PARTIAL,
     CsvNutritionImporter,
+    CsvWorkoutImporter,
+    detect_csv_contract,
 )
 from food_registry_bot.nutrition import DailyNutritionSummaryUseCase, DailyWaterSummaryUseCase
 
@@ -28,6 +30,8 @@ def create_test_session() -> Session:
             SupportedMetric(code="fat", name="Fat", unit="g"),
             SupportedMetric(code="carbs", name="Carbs", unit="g"),
             SupportedMetric(code="fiber", name="Fiber", unit="g"),
+            SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
+            SupportedMetric(code="workout_calorie_credit", name="Workout Calorie Credit", unit="kcal"),
         ]
     )
     session.commit()
@@ -108,3 +112,32 @@ def test_csv_import_accepts_partial_contract_and_keeps_only_provided_metrics(tmp
     assert len(saved_metrics) == 1
     assert saved_metrics[0].metric.code == "calories"
     assert saved_metrics[0].value == 121.0
+
+
+def test_workout_csv_import_parses_rows_and_imports_metrics() -> None:
+    csv_path = FIXTURES_DIR / "import_workout.csv"
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=4244, username="workout_import_user")
+
+    read_result = CsvWorkoutImporter.read_csv_with_metadata(csv_path)
+    result = CsvWorkoutImporter(session).import_rows(user=user, rows=read_result.rows)
+    session.commit()
+
+    assert read_result.contract_type == "workout_csv_v1"
+    assert len(read_result.rows) == 2
+    assert read_result.rows[0].duration_minutes == 92
+    assert read_result.rows[0].workout_calories == 652.0
+    assert read_result.rows[0].workout_calorie_credit == 250.0
+    assert result.created_entry_count == 2
+
+    saved_metrics = session.query(EntryItemMetric).all()
+    assert len(saved_metrics) == 4
+
+
+def test_detect_csv_contract_uses_headers_instead_of_filename(tmp_path: Path) -> None:
+    csv_path = tmp_path / "Дневник_питания_Паша_Тренировки.csv"
+    csv_path.write_text((FIXTURES_DIR / "import_full.csv").read_text(encoding="utf-8"), encoding="utf-8")
+
+    detected_contract = detect_csv_contract(csv_path)
+
+    assert detected_contract.contract_type == "food_registry_csv_v1"

@@ -14,6 +14,7 @@ from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.handlers import (
     build_ambiguous_message_response,
     build_data_exchange_files_response,
+    build_import_validation_response_text,
     handle_admin,
     handle_admin_allow,
     handle_admin_backfill_nutrition,
@@ -63,6 +64,7 @@ from food_registry_bot.extraction import (
     ValidExtractionPayload,
 )
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_FULL, CSV_CONTRACT_TYPE_PARTIAL
+from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_WORKOUT
 from food_registry_bot.nutrition import StaticNutritionEstimationService
 
 
@@ -754,6 +756,48 @@ def test_build_data_exchange_files_response_shows_file_id_and_admin_processing_n
     assert "[#1] partial.csv" in response
     assert "после импорта часть итогов может быть неполной" in response
     assert "[#2] export.csv" in response
+
+
+def test_build_data_exchange_files_response_shows_workout_import_count() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        workout_file = DataExchangeFileRepository(session).create(
+            user_id=user.id,
+            direction=DataExchangeDirection.IMPORT,
+            contract_type=CSV_CONTRACT_TYPE_WORKOUT,
+            original_filename="workout.csv",
+            storage_path="user_1/import/workout.csv",
+            sha256="d" * 64,
+            row_count=2,
+            food_entry_count=0,
+            water_entry_count=0,
+            status=DataExchangeStatus.READY,
+        )
+        session.commit()
+        response = build_data_exchange_files_response([workout_file])
+
+    assert "[#1] workout.csv" in response
+    assert "тип: тренировки" in response
+    assert "тренировок: 2" in response
+
+
+def test_build_import_validation_response_text_mentions_detected_workout_contract() -> None:
+    validation_result = SimpleNamespace(
+        contract_type=CSV_CONTRACT_TYPE_WORKOUT,
+        workout_entry_count=2,
+        food_entry_count=0,
+        water_entry_count=0,
+        date_from=datetime(2026, 5, 20, tzinfo=timezone.utc).date(),
+        date_to=datetime(2026, 5, 21, tzinfo=timezone.utc).date(),
+    )
+
+    response = build_import_validation_response_text(validation_result)
+
+    assert "Распознан тип файла: тренировки" in response
+    assert "- тренировок: 2" in response
 
 
 def test_build_data_exchange_files_keyboard_uses_addressable_delete_buttons() -> None:
