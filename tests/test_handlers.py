@@ -181,7 +181,8 @@ async def test_start_creates_user_for_allowed_user() -> None:
         "- посмотреть итог дня: /today;\n"
         "- посмотреть и удалить последние записи: /recent;\n"
         "- посмотреть или изменить цели: /goal;\n"
-        "- настроить summary: /settings.",
+        "- настроить summary: /settings;\n"
+        "- управлять файлами импорта и экспорта: /files.",
     )
 
 

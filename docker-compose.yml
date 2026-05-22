@@ -42,6 +42,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-food_registry}
       POSTGRES_USER: ${POSTGRES_USER:-food_registry}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-food_registry}
+    volumes:
+      - data_exchange_data:/app/var/data_exchange
 
 volumes:
   postgres_data:
+  data_exchange_data:

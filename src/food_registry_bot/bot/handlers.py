@@ -5,18 +5,22 @@ from contextlib import suppress
 import logging
 import html
 from io import BytesIO
+from pathlib import Path
+import tempfile
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from aiogram import Router
 from aiogram import F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, FSInputFile, Message
 from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.keyboards import (
     WATER_250_ML_BUTTON_TEXT,
+    build_data_exchange_files_keyboard,
     build_main_keyboard,
     build_recent_entries_delete_keyboard,
     build_recent_entry_confirmation_keyboard,
@@ -29,17 +33,19 @@ from food_registry_bot.bot.message_routing import (
     MessageRoutingService,
     RuleBasedMessageRoutingService,
 )
-from food_registry_bot.bot.payloads import RecentEntryDeleteCallback, SummarySettingsCallback
+from food_registry_bot.bot.payloads import DataExchangeFileCallback, RecentEntryDeleteCallback, SummarySettingsCallback
 from food_registry_bot.conversation import (
     ConversationService,
     DisabledConversationService,
     NutritionCoachContextBuilder,
 )
 from food_registry_bot.db.models import ConversationMessageRole, ConversationSession, EntryType
+from food_registry_bot.db.models import DataExchangeDirection, DataExchangeFile, DataExchangeStatus
 from food_registry_bot.db.session import session_scope
 from food_registry_bot.db.repositories import (
     ConversationMessageRepository,
     ConversationSessionRepository,
+    DataExchangeFileRepository,
     EntryItemCreate,
     EntryItemMetricRepository,
     EntryItemMetricValue,
@@ -49,6 +55,12 @@ from food_registry_bot.db.repositories import (
     UserRepository,
     UserSummaryPreferenceRepository,
 )
+from food_registry_bot.exchange import (
+    DataExchangeService,
+    DuplicateDataRowError,
+    DuplicateFileError,
+    UnsupportedExchangeFileError,
+)
 from food_registry_bot.extraction import (
     ExtractionImageInput,
     InvalidExtractionPayload,
@@ -56,6 +68,8 @@ from food_registry_bot.extraction import (
     JournalExtractionRequest,
     StructuredPayloadExtractionService,
 )
+from food_registry_bot.exchange.service import FileLimitExceededError
+from food_registry_bot.config import get_data_exchange_dir
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
     calculate_default_workout_calorie_credit,
@@ -112,10 +126,88 @@ BAR_MODE_LABELS = {
     "К": "Ккал",
 }
 BAR_MODE_LABEL_WIDTH = 6
+EXCHANGE_STATUS_LABELS = {
+    DataExchangeStatus.READY: "готов",
+    DataExchangeStatus.PROCESSED: "обработан",
+    DataExchangeStatus.ERROR: "ошибка",
+}
+EXCHANGE_DIRECTION_LABELS = {
+    DataExchangeDirection.IMPORT: "импорт",
+    DataExchangeDirection.EXPORT: "экспорт",
+}
 
 
 class FoodWriteFlowError(RuntimeError):
     pass
+
+
+def build_data_exchange_files_response(files: list[DataExchangeFile]) -> str:
+    if not files:
+        return (
+            "Файлов пока нет.\n"
+            "Что можно сделать:\n"
+            "- загрузить CSV-файл для проверки и подготовки импорта;\n"
+            "- создать экспорт через кнопку ниже."
+        )
+
+    lines = ["Файлы:"]
+    for index, exchange_file in enumerate(files, start=1):
+        lines.append(f"{index}. {exchange_file.original_filename}")
+        lines.append(
+            f"   {EXCHANGE_DIRECTION_LABELS[exchange_file.direction]} · статус: {EXCHANGE_STATUS_LABELS[exchange_file.status]}"
+        )
+        if exchange_file.direction is DataExchangeDirection.IMPORT:
+            lines.append(
+                f"   еда: {exchange_file.food_entry_count}, вода: {exchange_file.water_entry_count}"
+            )
+        else:
+            lines.append(
+                f"   строк: {exchange_file.row_count}, еда: {exchange_file.food_entry_count}, вода: {exchange_file.water_entry_count}"
+            )
+        if exchange_file.date_from is not None and exchange_file.date_to is not None:
+            lines.append(f"   даты: {exchange_file.date_from.isoformat()} — {exchange_file.date_to.isoformat()}")
+    return "\n".join(lines)
+
+
+async def download_message_document_to_temp_file(message: Message) -> tuple[Path, str]:
+    document = getattr(message, "document", None)
+    if document is None:
+        raise ValueError("Incoming message does not contain a document")
+    original_filename = document.file_name or "upload.csv"
+    exchange_dir = get_data_exchange_dir()
+    upload_dir = exchange_dir / "_uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        prefix="upload_",
+        suffix=".csv",
+        dir=upload_dir,
+        delete=False,
+    ) as handle:
+        temp_path = Path(handle.name)
+    await message.bot.download(document, destination=temp_path)
+    return temp_path, original_filename
+
+
+async def render_data_exchange_files_message(
+    target,
+    *,
+    files: list[DataExchangeFile],
+) -> None:
+    text = build_data_exchange_files_response(files)
+    reply_markup = build_data_exchange_files_keyboard(files=files)
+    if isinstance(target, Message):
+        await target.answer(text, reply_markup=reply_markup)
+        return
+    await safe_edit_message_text(target.message, text=text, reply_markup=reply_markup)
+
+
+async def safe_edit_message_text(message: Message, *, text: str, reply_markup) -> None:
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc):
+            return
+        raise
 
 
 def build_ambiguous_message_response() -> str:
@@ -1226,7 +1318,8 @@ async def handle_start(
             "- посмотреть итог дня: /today;\n"
             "- посмотреть и удалить последние записи: /recent;\n"
             "- посмотреть или изменить цели: /goal;\n"
-            "- настроить summary: /settings.",
+            "- настроить summary: /settings;\n"
+            "- управлять файлами импорта и экспорта: /files.",
             reply_markup=build_main_keyboard(),
         )
         return
@@ -1241,7 +1334,8 @@ async def handle_start(
         "- посмотреть итог дня: /today;\n"
         "- посмотреть и удалить последние записи: /recent;\n"
         "- посмотреть или изменить цели: /goal;\n"
-        "- настроить summary: /settings.",
+        "- настроить summary: /settings;\n"
+        "- управлять файлами импорта и экспорта: /files.",
         reply_markup=build_main_keyboard(),
     )
 
@@ -1609,6 +1703,223 @@ async def handle_goal(
         ),
         reply_markup=build_main_keyboard(),
     )
+
+
+@router.message(Command("files"))
+async def handle_files(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        files = DataExchangeService(session).list_files(user_id=user_id)
+
+    await render_data_exchange_files_message(message, files=files)
+
+
+@router.callback_query(DataExchangeFileCallback.filter())
+async def handle_data_exchange_file_callback(
+    callback: CallbackQuery,
+    callback_data: DataExchangeFileCallback,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = callback.from_user
+    if telegram_user is None:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+    if callback.message is None:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+
+    with session_scope(session_factory) as session:
+        if not (
+            is_admin_user(telegram_user.id, admin_user_ids)
+            or UserAccessRepository(session).is_allowed(telegram_user.id)
+        ):
+            await callback.answer("Нет доступа к боту. Попроси администратора его выдать.", show_alert=True)
+            return
+
+        user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
+        if user is None:
+            user, _created = UserRepository(session).get_or_create(
+                telegram_user_id=telegram_user.id,
+                username=telegram_user.username,
+            )
+        exchange_service = DataExchangeService(session)
+
+        if callback_data.action == "refresh":
+            files = exchange_service.list_files(user_id=user.id)
+            await safe_edit_message_text(
+                callback.message,
+                text=build_data_exchange_files_response(files),
+                reply_markup=build_data_exchange_files_keyboard(files=files),
+            )
+            await callback.answer()
+            return
+
+        if callback_data.action == "create_export":
+            try:
+                exchange_service.create_export_file(user=user)
+            except FileLimitExceededError as exc:
+                await callback.answer(str(exc), show_alert=True)
+                return
+            files = exchange_service.list_files(user_id=user.id)
+            await safe_edit_message_text(
+                callback.message,
+                text=build_data_exchange_files_response(files),
+                reply_markup=build_data_exchange_files_keyboard(files=files),
+            )
+            await callback.answer("Экспорт подготовлен.")
+            return
+
+        exchange_file = DataExchangeFileRepository(session).get_by_id_for_user(
+            file_id=callback_data.file_id,
+            user_id=user.id,
+        )
+        if exchange_file is None:
+            await callback.answer("Файл уже удалён или недоступен.", show_alert=True)
+            return
+
+        if callback_data.action == "delete":
+            exchange_service.delete_file(exchange_file=exchange_file)
+            files = exchange_service.list_files(user_id=user.id)
+            await safe_edit_message_text(
+                callback.message,
+                text=build_data_exchange_files_response(files),
+                reply_markup=build_data_exchange_files_keyboard(files=files),
+            )
+            await callback.answer("Файл удалён.")
+            return
+
+        if callback_data.action == "import":
+            try:
+                food_count, water_count = exchange_service.import_file(exchange_file=exchange_file, user=user)
+            except DuplicateDataRowError as exc:
+                DataExchangeFileRepository(session).mark_error(
+                    file_id=exchange_file.id,
+                    processing_message=str(exc),
+                )
+                files = exchange_service.list_files(user_id=user.id)
+                await safe_edit_message_text(
+                    callback.message,
+                    text=build_data_exchange_files_response(files),
+                    reply_markup=build_data_exchange_files_keyboard(files=files),
+                )
+                await callback.answer("Импорт не выполнен.", show_alert=True)
+                await callback.message.answer(
+                    "Импорт не завершён.\n"
+                    f"Причина: {exc}"
+                )
+                return
+            except ValueError as exc:
+                await callback.answer(str(exc), show_alert=True)
+                return
+            files = exchange_service.list_files(user_id=user.id)
+            await safe_edit_message_text(
+                callback.message,
+                text=build_data_exchange_files_response(files),
+                reply_markup=build_data_exchange_files_keyboard(files=files),
+            )
+            await callback.answer("Импорт выполнен.")
+            await callback.message.answer(
+                "Импорт завершён.\n"
+                f"- записей еды: {food_count}\n"
+                f"- записей воды: {water_count}\n"
+                "Файл помечен как обработанный."
+            )
+            return
+
+        if callback_data.action == "download":
+            file_path = exchange_service.get_download_path(exchange_file=exchange_file)
+            input_file = FSInputFile(file_path, filename=exchange_file.original_filename)
+            await callback.message.answer_document(input_file)
+            if exchange_file.status is not DataExchangeStatus.PROCESSED:
+                exchange_service.mark_export_downloaded(exchange_file=exchange_file)
+            files = exchange_service.list_files(user_id=user.id)
+            await safe_edit_message_text(
+                callback.message,
+                text=build_data_exchange_files_response(files),
+                reply_markup=build_data_exchange_files_keyboard(files=files),
+            )
+            await callback.answer("Файл отправлен.")
+            return
+
+        await callback.answer("Неизвестное действие.", show_alert=True)
+
+
+@router.message(F.document)
+async def handle_document_upload(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    temp_path: Path | None = None
+    try:
+        temp_path, original_filename = await download_message_document_to_temp_file(message)
+        with session_scope(session_factory) as session:
+            _, _user_id = ensure_user_registered(message, session)
+            user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
+            if user is None:
+                raise RuntimeError("User profile was not found after registration")
+            exchange_service = DataExchangeService(session)
+            try:
+                sha256, validation_result = exchange_service.validate_import_file(
+                    user=user,
+                    source_path=temp_path,
+                    original_filename=original_filename,
+                )
+                exchange_service.create_import_file(
+                    user=user,
+                    source_path=temp_path,
+                    original_filename=original_filename,
+                    sha256=sha256,
+                    validation_result=validation_result,
+                )
+            except UnsupportedExchangeFileError as exc:
+                await message.answer(str(exc), reply_markup=build_main_keyboard())
+                return
+            except DuplicateFileError as exc:
+                await message.answer(
+                    "Файл не принят.\n\n"
+                    f"{exc}",
+                    reply_markup=build_main_keyboard(),
+                )
+                return
+            except DuplicateDataRowError as exc:
+                await message.answer(
+                    "Файл не принят.\n\n"
+                    f"{exc}",
+                    reply_markup=build_main_keyboard(),
+                )
+                return
+            except FileLimitExceededError as exc:
+                await message.answer(str(exc), reply_markup=build_main_keyboard())
+                return
+
+        await message.answer(
+            "Файл принят и подготовлен к импорту.\n\n"
+            "Будет создано:\n"
+            f"- записей еды: {validation_result.food_entry_count}\n"
+            f"- записей воды: {validation_result.water_entry_count}\n\n"
+            "Диапазон дат:\n"
+            f"- {validation_result.date_from.isoformat() if validation_result.date_from else '—'} — "
+            f"{validation_result.date_to.isoformat() if validation_result.date_to else '—'}\n\n"
+            "Статус файла: готов\n"
+            "Открыть список файлов: /files",
+            reply_markup=build_main_keyboard(),
+        )
+    finally:
+        if temp_path is not None:
+            with suppress(FileNotFoundError):
+                temp_path.unlink()
  
  
 @router.message(F.text == WATER_250_ML_BUTTON_TEXT)
@@ -1826,7 +2137,6 @@ async def handle_message(
                 saved_food_entries: list = []
                 saved_items = build_saved_items_from_payload(extraction_result.payload)
                 extracted_workout_metric_lines = build_extracted_workout_metric_lines(extraction_result.payload)
-                saved_entry_types = {entry.type for entry in extraction_result.payload.entries}
                 occurred_at_values: list[datetime] = []
                 for extracted_entry in extraction_result.payload.entries:
                     occurred_at = extracted_entry.occurred_at or datetime.now(timezone.utc)

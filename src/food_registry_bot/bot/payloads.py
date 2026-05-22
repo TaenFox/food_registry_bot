@@ -18,7 +18,13 @@ class RecentEntryDeleteCallback(CallbackData, prefix="recent_delete"):
     action: str
     entry_id: int = 0
 
+
+class DataExchangeFileCallback(CallbackData, prefix="data_exchange"):
+    action: str
+    file_id: int = 0
+
 __all__ = [
+    "DataExchangeFileCallback",
     "NormalizedEntryItemPayload",
     "NormalizedEntryPayload",
     "NormalizedJournalPayload",

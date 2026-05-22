@@ -58,6 +58,15 @@ class CsvNutritionImportResult:
     created_snapshot_count: int
 
 
+@dataclass(frozen=True)
+class CsvNutritionRowSummary:
+    row_count: int
+    food_entry_count: int
+    water_entry_count: int
+    date_from: date | None
+    date_to: date | None
+
+
 def _normalize_header(value: str) -> str:
     return " ".join(value.strip().lower().split())
 
@@ -125,6 +134,41 @@ def _normalize_item_name(value: str, *, entry_type: EntryType) -> str:
     if entry_type is EntryType.WATER:
         return "water"
     return cleaned
+
+
+def build_import_row_signature(row: ImportedNutritionRow) -> str:
+    metric_values = "|".join(f"{metric_code}={row.metrics[metric_code]:.4f}" for metric_code in ROW_METRIC_CODES)
+    return "||".join(
+        [
+            row.summary_date.isoformat(),
+            row.entry_type.value,
+            row.meal_type.value if row.meal_type is not None else "",
+            row.item_name.strip().lower(),
+            str(row.quantity or ""),
+            (row.unit or "").strip().lower(),
+            metric_values,
+        ]
+    )
+
+
+def summarize_import_rows(rows: list[ImportedNutritionRow]) -> CsvNutritionRowSummary:
+    if not rows:
+        return CsvNutritionRowSummary(
+            row_count=0,
+            food_entry_count=0,
+            water_entry_count=0,
+            date_from=None,
+            date_to=None,
+        )
+
+    dates = [row.summary_date for row in rows]
+    return CsvNutritionRowSummary(
+        row_count=len(rows),
+        food_entry_count=sum(1 for row in rows if row.entry_type is EntryType.FOOD),
+        water_entry_count=sum(1 for row in rows if row.entry_type is EntryType.WATER),
+        date_from=min(dates),
+        date_to=max(dates),
+    )
 
 
 def _resolve_meal_type(value: str | None) -> MealType | None:

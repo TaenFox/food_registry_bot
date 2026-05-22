@@ -14,6 +14,7 @@ from food_registry_bot import __version__
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SECRETS_DIR = PROJECT_ROOT.parent / f"{PROJECT_ROOT.name}_local"
 SECRETS_ENV_FILE = SECRETS_DIR / ".env"
+DATA_EXCHANGE_DIR = PROJECT_ROOT / "var" / "data_exchange"
 
 
 def get_project_root() -> Path:
@@ -26,6 +27,10 @@ def get_secrets_dir() -> Path:
 
 def get_secrets_env_file() -> Path:
     return SECRETS_ENV_FILE
+
+
+def get_data_exchange_dir() -> Path:
+    return DATA_EXCHANGE_DIR
 
 
 def detect_git_app_version(project_root: Path = PROJECT_ROOT) -> str | None:
