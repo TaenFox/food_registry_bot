@@ -211,8 +211,8 @@ def build_data_exchange_files_response(files: list[DataExchangeFile]) -> str:
         lines.append(
             f"   {EXCHANGE_DIRECTION_LABELS[exchange_file.direction]} · статус: {EXCHANGE_STATUS_LABELS[exchange_file.status]}"
         )
+        lines.append(f"   тип: {describe_import_contract(exchange_file.contract_type)}")
         if exchange_file.direction is DataExchangeDirection.IMPORT:
-            lines.append(f"   тип: {describe_import_contract(exchange_file.contract_type)}")
             if exchange_file.contract_type == CSV_CONTRACT_TYPE_WORKOUT:
                 lines.append(f"   тренировок: {exchange_file.row_count}")
             else:
@@ -220,9 +220,12 @@ def build_data_exchange_files_response(files: list[DataExchangeFile]) -> str:
                     f"   еда: {exchange_file.food_entry_count}, вода: {exchange_file.water_entry_count}"
                 )
         else:
-            lines.append(
-                f"   строк: {exchange_file.row_count}, еда: {exchange_file.food_entry_count}, вода: {exchange_file.water_entry_count}"
-            )
+            if exchange_file.contract_type == CSV_CONTRACT_TYPE_WORKOUT:
+                lines.append(f"   тренировок: {exchange_file.row_count}")
+            else:
+                lines.append(
+                    f"   строк: {exchange_file.row_count}, еда: {exchange_file.food_entry_count}, вода: {exchange_file.water_entry_count}"
+                )
         if exchange_file.date_from is not None and exchange_file.date_to is not None:
             lines.append(f"   даты: {exchange_file.date_from.isoformat()} — {exchange_file.date_to.isoformat()}")
         if exchange_file.contract_type == CSV_CONTRACT_TYPE_PARTIAL:
@@ -1903,7 +1906,7 @@ async def handle_data_exchange_file_callback(
 
         if callback_data.action == "create_export":
             try:
-                exchange_service.create_export_file(user=user)
+                export_result = exchange_service.create_export_files(user=user)
             except FileLimitExceededError as exc:
                 await callback.answer(str(exc), show_alert=True)
                 return
@@ -1913,7 +1916,10 @@ async def handle_data_exchange_file_callback(
                 text=build_data_exchange_files_response(files),
                 reply_markup=build_data_exchange_files_keyboard(files=files),
             )
-            await callback.answer("Экспорт подготовлен.")
+            prepared_count = len(export_result.files)
+            await callback.answer(
+                "Экспорт подготовлен." if prepared_count == 1 else "Файлы экспорта подготовлены."
+            )
             return
 
         exchange_file = DataExchangeFileRepository(session).get_by_id_for_user(

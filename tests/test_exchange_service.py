@@ -210,7 +210,7 @@ def test_import_marks_file_processed(tmp_path: Path) -> None:
     assert exchange_file.status is DataExchangeStatus.PROCESSED
 
 
-def test_create_export_file_and_mark_processed(tmp_path: Path) -> None:
+def test_create_export_files_and_mark_processed(tmp_path: Path) -> None:
     session = create_test_session()
     user = UserRepository(session).create(telegram_user_id=4005, username="export_user")
     storage = LocalDataExchangeStorage(base_dir=tmp_path / "data_exchange")
@@ -232,16 +232,74 @@ def test_create_export_file_and_mark_processed(tmp_path: Path) -> None:
     )
     service.import_file(exchange_file=exchange_file, user=user)
 
-    export_file = service.create_export_file(user=user)
+    export_result = service.create_export_files(user=user)
+    assert len(export_result.files) == 1
+    export_file = export_result.files[0]
     export_path = service.get_download_path(exchange_file=export_file)
 
     assert export_file.direction is DataExchangeDirection.EXPORT
     assert export_file.status is DataExchangeStatus.READY
+    assert export_file.contract_type == CSV_CONTRACT_TYPE_FULL
     assert export_path.exists()
 
     service.mark_export_downloaded(exchange_file=export_file)
 
     assert export_file.status is DataExchangeStatus.PROCESSED
+
+
+def test_create_export_files_includes_separate_workout_csv(tmp_path: Path) -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=40051, username="export_workout_user")
+    storage = LocalDataExchangeStorage(base_dir=tmp_path / "data_exchange")
+    nutrition_csv_path = tmp_path / "import.csv"
+    workout_csv_path = tmp_path / "workout.csv"
+    build_sample_csv(nutrition_csv_path)
+    build_workout_csv(workout_csv_path)
+    service = DataExchangeService(session, storage=storage)
+
+    nutrition_sha256, nutrition_validation = service.validate_import_file(
+        user=user,
+        source_path=nutrition_csv_path,
+        original_filename="import.csv",
+    )
+    nutrition_file = service.create_import_file(
+        user=user,
+        source_path=nutrition_csv_path,
+        original_filename="import.csv",
+        sha256=nutrition_sha256,
+        validation_result=nutrition_validation,
+    )
+    service.import_file(exchange_file=nutrition_file, user=user)
+
+    workout_sha256, workout_validation = service.validate_import_file(
+        user=user,
+        source_path=workout_csv_path,
+        original_filename="workout.csv",
+    )
+    workout_file = service.create_import_file(
+        user=user,
+        source_path=workout_csv_path,
+        original_filename="workout.csv",
+        sha256=workout_sha256,
+        validation_result=workout_validation,
+    )
+    service.import_file(exchange_file=workout_file, user=user)
+
+    export_result = service.create_export_files(user=user)
+
+    assert len(export_result.files) == 2
+    assert {export_file.contract_type for export_file in export_result.files} == {
+        CSV_CONTRACT_TYPE_FULL,
+        CSV_CONTRACT_TYPE_WORKOUT,
+    }
+    workout_export_file = next(
+        export_file for export_file in export_result.files if export_file.contract_type == CSV_CONTRACT_TYPE_WORKOUT
+    )
+    workout_export_path = service.get_download_path(exchange_file=workout_export_file)
+
+    assert workout_export_file.row_count == 2
+    assert "food_registry_workout_export_" in workout_export_file.original_filename
+    assert workout_export_path.exists()
 
 
 def test_limit_is_enforced_for_import_files(tmp_path: Path) -> None:

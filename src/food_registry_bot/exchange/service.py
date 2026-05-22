@@ -55,6 +55,16 @@ CSV_HEADERS = [
     "Источник оценки",
     "Уверенность оценки",
 ]
+WORKOUT_CSV_HEADERS = [
+    "Дата",
+    "Тип",
+    "Длительность, мин",
+    "Интенсивность",
+    "Ккал тренировки",
+    "Ккал учитывать в питании",
+    "Учитывать",
+    "Комментарий",
+]
 MEAL_TYPE_LABELS = {
     MealType.BREAKFAST: "Завтрак",
     MealType.LUNCH: "Обед",
@@ -172,6 +182,11 @@ class ImportExecutionResult:
     food_entry_count: int = 0
     water_entry_count: int = 0
     workout_entry_count: int = 0
+
+
+@dataclass(frozen=True)
+class ExportBuildResult:
+    files: list[DataExchangeFile]
 
 
 class DataExchangeService:
@@ -366,42 +381,62 @@ class DataExchangeService:
             water_entry_count=imported_water_count,
         )
 
-    def create_export_file(self, *, user: User) -> DataExchangeFile:
-        if self._file_repository.count_for_user_and_direction(
+    def create_export_files(self, *, user: User) -> ExportBuildResult:
+        nutrition_rows = self._build_nutrition_export_rows(user=user)
+        workout_rows = self._build_workout_export_rows(user=user)
+        export_specs: list[tuple[str, str, list[dict[str, str]], list[str]]] = []
+        export_date = datetime.now(timezone.utc).date().isoformat()
+
+        if nutrition_rows or not workout_rows:
+            export_specs.append(
+                (
+                    CSV_CONTRACT_TYPE_FULL,
+                    f"food_registry_export_{export_date}.csv",
+                    nutrition_rows,
+                    CSV_HEADERS,
+                )
+            )
+        if workout_rows:
+            export_specs.append(
+                (
+                    CSV_CONTRACT_TYPE_WORKOUT,
+                    f"food_registry_workout_export_{export_date}.csv",
+                    workout_rows,
+                    WORKOUT_CSV_HEADERS,
+                )
+            )
+
+        existing_export_count = self._file_repository.count_for_user_and_direction(
             user_id=user.id,
             direction=DataExchangeDirection.EXPORT,
-        ) >= EXPORT_FILE_LIMIT:
+        )
+        if existing_export_count + len(export_specs) > EXPORT_FILE_LIMIT:
             raise FileLimitExceededError(
                 "Лимит экспортных файлов достигнут. Удали лишний файл через /files и попробуй снова."
             )
 
-        rows = self._build_export_rows(user=user)
-        content = self._render_csv(rows)
-        sha256 = hashlib.sha256(content).hexdigest()
-        filename = f"food_registry_export_{datetime.now(timezone.utc).date().isoformat()}.csv"
-        relative_path = self._storage.build_relative_path(
-            user_id=user.id,
-            direction=DataExchangeDirection.EXPORT,
-            original_filename=filename,
-            sha256=sha256,
-        )
-        self._storage.write_bytes(payload=content, relative_path=relative_path)
-        summary_rows = CsvNutritionImporter.read_csv(self._storage.resolve_path(relative_path))
-        summary = summarize_import_rows(summary_rows)
-        return self._file_repository.create(
-            user_id=user.id,
-            direction=DataExchangeDirection.EXPORT,
-            contract_type=CSV_CONTRACT_TYPE_FULL,
-            original_filename=filename,
-            storage_path=relative_path,
-            sha256=sha256,
-            row_count=summary.row_count,
-            food_entry_count=summary.food_entry_count,
-            water_entry_count=summary.water_entry_count,
-            date_from=summary.date_from,
-            date_to=summary.date_to,
-            validation_message="Файл готов к скачиванию.",
-        )
+        created_files: list[DataExchangeFile] = []
+        for contract_type, filename, rows, headers in export_specs:
+            content = self._render_csv(rows, fieldnames=headers)
+            sha256 = hashlib.sha256(content).hexdigest()
+            relative_path = self._storage.build_relative_path(
+                user_id=user.id,
+                direction=DataExchangeDirection.EXPORT,
+                original_filename=filename,
+                sha256=sha256,
+            )
+            self._storage.write_bytes(payload=content, relative_path=relative_path)
+            created_files.append(
+                self._create_export_file_record(
+                    user=user,
+                    contract_type=contract_type,
+                    original_filename=filename,
+                    relative_path=relative_path,
+                    sha256=sha256,
+                )
+            )
+
+        return ExportBuildResult(files=created_files)
 
     def mark_export_downloaded(self, *, exchange_file: DataExchangeFile) -> None:
         self._file_repository.mark_processed(
@@ -556,7 +591,7 @@ class DataExchangeService:
         return True
 
 
-    def _build_export_rows(self, *, user: User) -> list[dict[str, str]]:
+    def _build_nutrition_export_rows(self, *, user: User) -> list[dict[str, str]]:
         entries = self._entry_repository.list_recent_for_user(user_id=user.id, limit=100000)
         summary_preference, _created = self._summary_preference_repository.get_or_create(user_id=user.id)
         rows: list[dict[str, str]] = []
@@ -594,10 +629,87 @@ class DataExchangeService:
                 )
         return rows
 
+    def _build_workout_export_rows(self, *, user: User) -> list[dict[str, str]]:
+        entries = self._entry_repository.list_recent_for_user(user_id=user.id, limit=100000)
+        summary_preference, _created = self._summary_preference_repository.get_or_create(user_id=user.id)
+        rows: list[dict[str, str]] = []
+        for entry in sorted(entries, key=lambda current: (current.occurred_at, current.id)):
+            if entry.entry_type is not EntryType.WORKOUT:
+                continue
+            for item in sorted(entry.items, key=lambda current: current.position):
+                metrics_by_code = {
+                    metric.metric.code: metric.value
+                    for metric in item.metrics
+                    if metric.metric is not None
+                }
+                workout_credit = metrics_by_code.get("workout_calorie_credit", 0.0)
+                rows.append(
+                    {
+                        "Дата": resolve_local_summary_date(
+                            reference_at=entry.occurred_at,
+                            timezone_name=user.timezone,
+                            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                        ).isoformat(),
+                        "Тип": item.name,
+                        "Длительность, мин": str(item.quantity or ""),
+                        "Интенсивность": "",
+                        "Ккал тренировки": _format_metric_value(metrics_by_code.get("workout_calories", 0.0)),
+                        "Ккал учитывать в питании": _format_metric_value(workout_credit),
+                        "Учитывать": "да" if workout_credit > 0 else "нет",
+                        "Комментарий": entry.llm_comment or "",
+                    }
+                )
+        return rows
+
+    def _create_export_file_record(
+        self,
+        *,
+        user: User,
+        contract_type: str,
+        original_filename: str,
+        relative_path: str,
+        sha256: str,
+    ) -> DataExchangeFile:
+        resolved_path = self._storage.resolve_path(relative_path)
+        if contract_type == CSV_CONTRACT_TYPE_WORKOUT:
+            summary_rows = CsvWorkoutImporter.read_csv(resolved_path)
+            summary = summarize_workout_import_rows(summary_rows)
+            return self._file_repository.create(
+                user_id=user.id,
+                direction=DataExchangeDirection.EXPORT,
+                contract_type=contract_type,
+                original_filename=original_filename,
+                storage_path=relative_path,
+                sha256=sha256,
+                row_count=summary.row_count,
+                food_entry_count=0,
+                water_entry_count=0,
+                date_from=summary.date_from,
+                date_to=summary.date_to,
+                validation_message="Файл готов к скачиванию.",
+            )
+
+        summary_rows = CsvNutritionImporter.read_csv(resolved_path)
+        summary = summarize_import_rows(summary_rows)
+        return self._file_repository.create(
+            user_id=user.id,
+            direction=DataExchangeDirection.EXPORT,
+            contract_type=contract_type,
+            original_filename=original_filename,
+            storage_path=relative_path,
+            sha256=sha256,
+            row_count=summary.row_count,
+            food_entry_count=summary.food_entry_count,
+            water_entry_count=summary.water_entry_count,
+            date_from=summary.date_from,
+            date_to=summary.date_to,
+            validation_message="Файл готов к скачиванию.",
+        )
+
     @staticmethod
-    def _render_csv(rows: list[dict[str, str]]) -> bytes:
+    def _render_csv(rows: list[dict[str, str]], *, fieldnames: list[str]) -> bytes:
         buffer = io.StringIO()
-        writer = csv.DictWriter(buffer, fieldnames=CSV_HEADERS)
+        writer = csv.DictWriter(buffer, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
             writer.writerow(row)

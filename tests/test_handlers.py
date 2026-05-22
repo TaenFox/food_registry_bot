@@ -754,8 +754,10 @@ def test_build_data_exchange_files_response_shows_file_id_and_admin_processing_n
         response = build_data_exchange_files_response([partial_file, full_file])
 
     assert "[#1] partial.csv" in response
+    assert "тип: еда и вода (неполный файл)" in response
     assert "после импорта часть итогов может быть неполной" in response
     assert "[#2] export.csv" in response
+    assert "тип: еда и вода" in response
 
 
 def test_build_data_exchange_files_response_shows_workout_import_count() -> None:
@@ -782,6 +784,32 @@ def test_build_data_exchange_files_response_shows_workout_import_count() -> None
     assert "[#1] workout.csv" in response
     assert "тип: тренировки" in response
     assert "тренировок: 2" in response
+
+
+def test_build_data_exchange_files_response_shows_workout_export_count() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        workout_export_file = DataExchangeFileRepository(session).create(
+            user_id=user.id,
+            direction=DataExchangeDirection.EXPORT,
+            contract_type=CSV_CONTRACT_TYPE_WORKOUT,
+            original_filename="workout_export.csv",
+            storage_path="user_1/export/workout_export.csv",
+            sha256="e" * 64,
+            row_count=3,
+            food_entry_count=0,
+            water_entry_count=0,
+            status=DataExchangeStatus.READY,
+        )
+        session.commit()
+        response = build_data_exchange_files_response([workout_export_file])
+
+    assert "[#1] workout_export.csv" in response
+    assert "тип: тренировки" in response
+    assert "тренировок: 3" in response
 
 
 def test_build_import_validation_response_text_mentions_detected_workout_contract() -> None:
