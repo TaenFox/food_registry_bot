@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.keyboards import (
     WATER_250_ML_BUTTON_TEXT,
+    build_admin_delete_entries_confirmation_keyboard,
     build_data_exchange_files_keyboard,
     build_main_keyboard,
     build_recent_entries_delete_keyboard,
@@ -33,7 +34,12 @@ from food_registry_bot.bot.message_routing import (
     MessageRoutingService,
     RuleBasedMessageRoutingService,
 )
-from food_registry_bot.bot.payloads import DataExchangeFileCallback, RecentEntryDeleteCallback, SummarySettingsCallback
+from food_registry_bot.bot.payloads import (
+    AdminDeleteEntriesCallback,
+    DataExchangeFileCallback,
+    RecentEntryDeleteCallback,
+    SummarySettingsCallback,
+)
 from food_registry_bot.conversation import (
     ConversationService,
     DisabledConversationService,
@@ -63,12 +69,8 @@ from food_registry_bot.extraction import (
     JournalExtractionRequest,
     StructuredPayloadExtractionService,
 )
-from food_registry_bot.exchange.service import (
-    AdminImportProcessingError,
-    CSV_CONTRACT_TYPE_PARTIAL,
-    FileLimitExceededError,
-    PartialImportRequiresAdminError,
-)
+from food_registry_bot.exchange.service import FileLimitExceededError
+from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_PARTIAL
 from food_registry_bot.config import get_data_exchange_dir
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
@@ -167,7 +169,7 @@ def build_data_exchange_files_response(files: list[DataExchangeFile]) -> str:
         if exchange_file.date_from is not None and exchange_file.date_to is not None:
             lines.append(f"   даты: {exchange_file.date_from.isoformat()} — {exchange_file.date_to.isoformat()}")
         if exchange_file.contract_type == CSV_CONTRACT_TYPE_PARTIAL:
-            lines.append("   требует обработки администратором")
+            lines.append("   после импорта часть итогов может быть неполной")
     return "\n".join(lines)
 
 
@@ -480,8 +482,8 @@ def build_admin_overview_response(
             "- /admin_users",
             "- <code>/admin_allow TELEGRAM_USER_ID</code>",
             "- <code>/admin_deny TELEGRAM_USER_ID</code>",
+            "- <code>/admin_delete_entries TELEGRAM_USER_ID</code>",
             "- <code>/admin_backfill_nutrition [LIMIT]</code>",
-            "- <code>/admin_process_import_file FILE_ID</code>",
         ]
     )
 
@@ -1220,6 +1222,83 @@ async def handle_admin_users(
     await message.answer(build_admin_users_response(known_users, admin_user_ids))
 
 
+@router.message(Command("admin_delete_entries"))
+async def handle_admin_delete_entries(
+    message: Message,
+    command: CommandObject,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = message.from_user
+    if telegram_user is None or not is_admin_user(telegram_user.id, admin_user_ids):
+        await message.answer("Команда доступна только администратору.")
+        return
+
+    target_user_id = parse_target_telegram_user_id(command)
+    if target_user_id is None:
+        await message.answer("Использование: <code>/admin_delete_entries TELEGRAM_USER_ID</code>")
+        return
+
+    with session_scope(session_factory) as session:
+        user = UserRepository(session).get_by_telegram_user_id(target_user_id)
+        if user is None:
+            await message.answer(f"Пользователь с Telegram ID {target_user_id} не найден.")
+            return
+
+        entry_count = len(EntryRepository(session).list_recent_for_user(user_id=user.id, limit=100000))
+
+    await message.answer(
+        "Подтверди удаление записей пользователя.\n"
+        f"Telegram ID: {target_user_id}\n"
+        f"Будет удалено записей: {entry_count}",
+        reply_markup=build_admin_delete_entries_confirmation_keyboard(
+            telegram_user_id=target_user_id,
+        ),
+    )
+
+
+@router.callback_query(AdminDeleteEntriesCallback.filter())
+async def handle_admin_delete_entries_callback(
+    callback: CallbackQuery,
+    callback_data: AdminDeleteEntriesCallback,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = callback.from_user
+    if telegram_user is None:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+    if callback.message is None:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    if not is_admin_user(telegram_user.id, admin_user_ids):
+        await callback.answer("Команда доступна только администратору.", show_alert=True)
+        return
+
+    if callback_data.action == "cancel":
+        await safe_edit_message_text(
+            callback.message,
+            text="Удаление записей отменено.",
+            reply_markup=None,
+        )
+        await callback.answer("Удаление отменено.")
+        return
+
+    with session_scope(session_factory) as session:
+        user = UserRepository(session).get_by_telegram_user_id(callback_data.telegram_user_id)
+        if user is None:
+            await callback.answer("Пользователь уже недоступен.", show_alert=True)
+            return
+        deleted_count = EntryRepository(session).delete_all_for_user(user_id=user.id)
+
+    await safe_edit_message_text(
+        callback.message,
+        text=f"Удалено записей пользователя {callback_data.telegram_user_id}: {deleted_count}.",
+        reply_markup=None,
+    )
+    await callback.answer("Удаление выполнено.")
+
+
 @router.message(Command("admin"))
 async def handle_admin(
     message: Message,
@@ -1295,65 +1374,6 @@ async def handle_admin_backfill_nutrition(
         requested_by=telegram_user.id,
         limit=limit,
         task=task,
-    )
-
-
-@router.message(Command("admin_process_import_file"))
-async def handle_admin_process_import_file(
-    message: Message,
-    command: CommandObject,
-    session_factory: sessionmaker[Session],
-    nutrition_service: NutritionEstimationService = default_nutrition_service,
-    admin_user_ids: tuple[int, ...] = (),
-) -> None:
-    telegram_user = message.from_user
-    if telegram_user is None or not is_admin_user(telegram_user.id, admin_user_ids):
-        await message.answer("Команда доступна только администратору.")
-        return
-
-    file_id = parse_positive_int_arg(command)
-    if file_id is None:
-        await message.answer("Использование: <code>/admin_process_import_file FILE_ID</code>")
-        return
-
-    with session_scope(session_factory) as session:
-        exchange_file = session.get(DataExchangeFile, file_id)
-        if exchange_file is None or exchange_file.direction is not DataExchangeDirection.IMPORT:
-            await message.answer("Импортный файл с таким id не найден.")
-            return
-
-        exchange_service = DataExchangeService(session)
-        try:
-            food_count, water_count, estimated_metric_count = exchange_service.process_partial_import_file(
-                exchange_file=exchange_file,
-                nutrition_service=nutrition_service,
-            )
-        except DuplicateDataRowError as exc:
-            DataExchangeFileRepository(session).mark_error(
-                file_id=exchange_file.id,
-                processing_message=str(exc),
-            )
-            await message.answer(
-                "Обработка не завершена.\n"
-                f"Причина: {exc}"
-            )
-            return
-        except (AdminImportProcessingError, ValueError) as exc:
-            if exchange_file.status is not DataExchangeStatus.PROCESSED:
-                DataExchangeFileRepository(session).mark_error(
-                    file_id=exchange_file.id,
-                    processing_message=str(exc),
-                )
-            await message.answer(str(exc))
-            return
-
-    await message.answer(
-        "Обработка файла завершена.\n"
-        f"- id файла: {file_id}\n"
-        f"- записей еды: {food_count}\n"
-        f"- записей воды: {water_count}\n"
-        f"- дозаполнено nutrition metrics: {estimated_metric_count}\n"
-        "Файл помечен как обработанный."
     )
 
 
@@ -1878,9 +1898,6 @@ async def handle_data_exchange_file_callback(
                     f"Причина: {exc}"
                 )
                 return
-            except PartialImportRequiresAdminError as exc:
-                await callback.answer(str(exc), show_alert=True)
-                return
             except ValueError as exc:
                 await callback.answer(str(exc), show_alert=True)
                 return
@@ -1971,7 +1988,7 @@ async def handle_document_upload(
 
         if validation_result.contract_type == CSV_CONTRACT_TYPE_PARTIAL:
             response_text = (
-                "Файл принят и сохранён.\n\n"
+                "Файл принят и подготовлен к импорту.\n\n"
                 "Будет создано:\n"
                 f"- записей еды: {validation_result.food_entry_count}\n"
                 f"- записей воды: {validation_result.water_entry_count}\n\n"
@@ -1979,8 +1996,10 @@ async def handle_document_upload(
                 f"- {validation_result.date_from.isoformat() if validation_result.date_from else '—'} — "
                 f"{validation_result.date_to.isoformat() if validation_result.date_to else '—'}\n\n"
                 "Статус файла: готов\n"
-                "Файл содержит неполный набор данных и требует обработки администратором.\n"
-                "Для запуска обработки передай администратору id файла из /files."
+                "Файл содержит неполный набор данных.\n"
+                "После импорта часть итогов дня может быть неполной.\n"
+                "Если понадобится дозаполнение метрик, попроси администратора запустить /admin_backfill_nutrition.\n"
+                "Открыть список файлов: /files"
             )
         else:
             response_text = (

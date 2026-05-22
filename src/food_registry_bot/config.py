@@ -14,7 +14,6 @@ from food_registry_bot import __version__
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SECRETS_DIR = PROJECT_ROOT.parent / f"{PROJECT_ROOT.name}_local"
 SECRETS_ENV_FILE = SECRETS_DIR / ".env"
-DATA_EXCHANGE_DIR = PROJECT_ROOT / "var" / "data_exchange"
 
 
 def get_project_root() -> Path:
@@ -29,25 +28,37 @@ def get_secrets_env_file() -> Path:
     return SECRETS_ENV_FILE
 
 
+def resolve_default_data_exchange_dir() -> Path:
+    return Path.cwd() / "var" / "data_exchange"
+
+
 def get_data_exchange_dir() -> Path:
-    return DATA_EXCHANGE_DIR
+    return get_settings().data_exchange_dir
 
 
 def detect_git_app_version(project_root: Path = PROJECT_ROOT) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(project_root), "describe", "--tags", "--always", "--dirty"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return None
+    commands = (
+        ["git", "-C", str(project_root), "describe", "--exact-match", "--tags", "HEAD"],
+        ["git", "-C", str(project_root), "branch", "--show-current"],
+        ["git", "-C", str(project_root), "describe", "--tags", "--always", "--dirty"],
+    )
 
-    version = result.stdout.strip()
-    if not version:
-        return None
-    return version
+    for command in commands:
+        try:
+            result = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            continue
+
+        version = result.stdout.strip()
+        if version:
+            return version
+
+    return None
 
 
 def resolve_app_version() -> str:
@@ -90,6 +101,10 @@ class Settings(BaseSettings):
     nutrition_model: str = Field(default="gpt-5-mini", alias="NUTRITION_MODEL")
     conversation_model: str = Field(default="gpt-5-mini", alias="CONVERSATION_MODEL")
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
+    data_exchange_dir: Path = Field(
+        default_factory=resolve_default_data_exchange_dir,
+        alias="DATA_EXCHANGE_DIR",
+    )
 
     postgres_host: str = Field(default="localhost", alias="POSTGRES_HOST")
     postgres_port: int = Field(default=5432, alias="POSTGRES_PORT")

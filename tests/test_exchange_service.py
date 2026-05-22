@@ -7,18 +7,18 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.db.base import Base
-from food_registry_bot.db.models import DataExchangeDirection, DataExchangeStatus, EntryItemMetric, SupportedMetric
+from food_registry_bot.db.models import DataExchangeDirection, DataExchangeStatus, SupportedMetric
 from food_registry_bot.db.repositories import UserRepository
 from food_registry_bot.exchange.service import (
-    CSV_CONTRACT_TYPE_PARTIAL,
     DataExchangeService,
     DuplicateDataRowError,
     DuplicateFileError,
     FileLimitExceededError,
     LocalDataExchangeStorage,
-    PartialImportRequiresAdminError,
 )
-from food_registry_bot.nutrition import StaticNutritionEstimationService
+from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_PARTIAL
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 def create_test_session() -> Session:
@@ -48,14 +48,10 @@ def build_sample_csv(
     item_name: str = "Творог 5%",
     entry_date: str = "2026-05-20",
 ) -> None:
-    write_csv(
-        csv_path,
-        [
-            "Дата,Приём пищи,Блюдо / продукт,Категории,Количество,Единица,Ккал,\"Белки, г\",\"Жиры, г\",\"Углеводы, г\",\"Клетчатка, г\",Комментарий,Источник оценки,Уверенность оценки",
-            f"{entry_date},Завтрак,{item_name},завтрак,100,г,\"121,0\",\"17,0\",\"5,0\",\"3,0\",\"0,0\",По справочнику,справочник,средняя",
-            f"{entry_date},Напиток,Вода,\"напиток, гидратация\",250,мл,\"0,0\",\"0,0\",\"0,0\",\"0,0\",\"0,0\",Стакан воды,описание,высокая",
-        ],
-    )
+    content = (FIXTURES_DIR / "import_full.csv").read_text(encoding="utf-8")
+    content = content.replace("2026-05-20,Завтрак,Творог 5%", f"{entry_date},Завтрак,{item_name}")
+    content = content.replace("2026-05-20,Напиток,Вода", f"{entry_date},Напиток,Вода")
+    csv_path.write_text(content, encoding="utf-8")
 
 
 def build_partial_csv(
@@ -64,13 +60,9 @@ def build_partial_csv(
     item_name: str = "Творог 5%",
     entry_date: str = "2026-05-20",
 ) -> None:
-    write_csv(
-        csv_path,
-        [
-            "Дата,Блюдо / продукт,Количество,Единица,Ккал",
-            f"{entry_date},{item_name},100,г,\"121,0\"",
-        ],
-    )
+    content = (FIXTURES_DIR / "import_partial.csv").read_text(encoding="utf-8")
+    content = content.replace("2026-05-20,Творог 5%", f"{entry_date},{item_name}")
+    csv_path.write_text(content, encoding="utf-8")
 
 
 def test_validate_and_store_import_file(tmp_path: Path) -> None:
@@ -275,7 +267,7 @@ def test_limit_is_enforced_for_import_files(tmp_path: Path) -> None:
         )
 
 
-def test_partial_import_file_is_saved_but_requires_admin_processing(tmp_path: Path) -> None:
+def test_partial_import_file_is_saved_and_can_be_imported_by_user(tmp_path: Path) -> None:
     session = create_test_session()
     user = UserRepository(session).create(telegram_user_id=4007, username="partial_user")
     storage = LocalDataExchangeStorage(base_dir=tmp_path / "data_exchange")
@@ -297,57 +289,11 @@ def test_partial_import_file_is_saved_but_requires_admin_processing(tmp_path: Pa
     )
 
     assert validation_result.contract_type == CSV_CONTRACT_TYPE_PARTIAL
-    assert exchange_file.validation_message == "Файл требует обработки администратором."
-    with pytest.raises(PartialImportRequiresAdminError):
-        service.import_file(exchange_file=exchange_file, user=user)
-
-
-def test_admin_process_import_file_fills_only_missing_metrics(tmp_path: Path) -> None:
-    session = create_test_session()
-    user = UserRepository(session).create(telegram_user_id=4008, username="partial_admin_user")
-    storage = LocalDataExchangeStorage(base_dir=tmp_path / "data_exchange")
-    csv_path = tmp_path / "partial.csv"
-    build_partial_csv(csv_path)
-    service = DataExchangeService(session, storage=storage)
-
-    sha256, validation_result = service.validate_import_file(
-        user=user,
-        source_path=csv_path,
-        original_filename="partial.csv",
-    )
-    exchange_file = service.create_import_file(
-        user=user,
-        source_path=csv_path,
-        original_filename="partial.csv",
-        sha256=sha256,
-        validation_result=validation_result,
-    )
-
-    nutrition_service = StaticNutritionEstimationService(
-        raw_payload=(
-            '{"items":[{"client_item_id":"entry-1:item-0","metrics":['
-            '{"code":"calories","value":130.0,"confidence":"medium"},'
-            '{"code":"protein","value":17.0,"confidence":"medium"},'
-            '{"code":"fat","value":5.0,"confidence":"medium"},'
-            '{"code":"carbs","value":3.0,"confidence":"medium"},'
-            '{"code":"fiber","value":0.0,"confidence":"medium"}]}]}'
-        )
-    )
-
-    food_count, water_count, estimated_metric_count = service.process_partial_import_file(
-        exchange_file=exchange_file,
-        nutrition_service=nutrition_service,
-    )
-
+    assert exchange_file.validation_message == "Файл готов к импорту. После импорта часть итогов может быть неполной."
+    food_count, water_count = service.import_file(exchange_file=exchange_file, user=user)
     assert food_count == 1
     assert water_count == 0
-    assert estimated_metric_count == 4
     assert exchange_file.status is DataExchangeStatus.PROCESSED
-
-    saved_metrics = session.query(EntryItemMetric).all()
-    assert len(saved_metrics) == 5
-    calories_metric = next(metric for metric in saved_metrics if metric.metric.code == "calories")
-    assert calories_metric.value == 121.0
 
 
 def test_duplicate_check_uses_core_row_data_for_partial_file(tmp_path: Path) -> None:

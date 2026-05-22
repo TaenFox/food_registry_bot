@@ -23,7 +23,13 @@ class DataExchangeFileCallback(CallbackData, prefix="data_exchange"):
     action: str
     file_id: int = 0
 
+
+class AdminDeleteEntriesCallback(CallbackData, prefix="admin_delete_entries"):
+    action: str
+    telegram_user_id: int = 0
+
 __all__ = [
+    "AdminDeleteEntriesCallback",
     "DataExchangeFileCallback",
     "NormalizedEntryItemPayload",
     "NormalizedEntryPayload",

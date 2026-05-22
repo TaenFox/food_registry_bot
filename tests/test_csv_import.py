@@ -14,6 +14,8 @@ from food_registry_bot.importing.csv_import import (
 )
 from food_registry_bot.nutrition import DailyNutritionSummaryUseCase, DailyWaterSummaryUseCase
 
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
 
 def create_test_session() -> Session:
     engine = create_engine("sqlite:///:memory:", future=True)
@@ -32,19 +34,8 @@ def create_test_session() -> Session:
     return session
 
 
-def test_csv_import_parses_food_and_water_rows(tmp_path: Path) -> None:
-    csv_path = tmp_path / "import.csv"
-    csv_path.write_text(
-        "\n".join(
-            [
-                "Дата,Приём пищи,Блюдо / продукт,Категории,Количество,Единица,Ккал,\"Белки, г\",\"Жиры, г\",\"Углеводы, г\",\"Клетчатка, г\",Комментарий,Источник оценки,Уверенность оценки",
-                "2026-05-20,Завтрак,Творог 5%,завтрак,100,г,\"121,0\",\"17,0\",\"5,0\",\"3,0\",\"0,0\",По справочнику,справочник,средняя",
-                "2026-05-20,Напиток,Вода,\"напиток, гидратация\",250,мл,\"0,0\",\"0,0\",\"0,0\",\"0,0\",\"0,0\",Стакан воды,описание,высокая",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
+def test_csv_import_parses_food_and_water_rows() -> None:
+    csv_path = FIXTURES_DIR / "import_full.csv"
     rows = CsvNutritionImporter.read_csv(csv_path)
 
     assert len(rows) == 2
@@ -63,9 +54,7 @@ def test_csv_import_creates_entries_metrics_and_goal_snapshots(tmp_path: Path) -
     csv_path.write_text(
         "\n".join(
             [
-                "Дата,Приём пищи,Блюдо / продукт,Категории,Количество,Единица,Ккал,\"Белки, г\",\"Жиры, г\",\"Углеводы, г\",\"Клетчатка, г\",Комментарий,Источник оценки,Уверенность оценки",
-                "2026-05-20,Завтрак,Творог 5%,завтрак,100,г,\"121,0\",\"17,0\",\"5,0\",\"3,0\",\"0,0\",По справочнику,справочник,средняя",
-                "2026-05-20,Напиток,Вода,\"напиток, гидратация\",250,мл,\"0,0\",\"0,0\",\"0,0\",\"0,0\",\"0,0\",Стакан воды,описание,высокая",
+                (FIXTURES_DIR / "import_full.csv").read_text(encoding="utf-8").strip(),
                 "2026-05-21,Ужин,Рис отварной,ужин,100,г,\"123,0\",\"2,4\",\"0,3\",\"27,0\",\"0,4\",Рис,описание,средняя",
             ]
         ),
@@ -102,15 +91,7 @@ def test_csv_import_creates_entries_metrics_and_goal_snapshots(tmp_path: Path) -
 
 def test_csv_import_accepts_partial_contract_and_keeps_only_provided_metrics(tmp_path: Path) -> None:
     csv_path = tmp_path / "partial_import.csv"
-    csv_path.write_text(
-        "\n".join(
-            [
-                "Дата,Блюдо / продукт,Количество,Единица,Ккал",
-                "2026-05-20,Творог 5%,100,г,\"121,0\"",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    csv_path.write_text((FIXTURES_DIR / "import_partial.csv").read_text(encoding="utf-8"), encoding="utf-8")
     session = create_test_session()
     user = UserRepository(session).create(telegram_user_id=4243, username="partial_import_user")
 

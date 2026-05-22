@@ -470,6 +470,21 @@ class EntryRepository:
         self._session.delete(entry)
         self._session.flush()
 
+    def delete_all_for_user(self, *, user_id: int) -> int:
+        entries = list(
+            self._session.scalars(
+                select(Entry)
+                .where(Entry.user_id == user_id)
+                .options(selectinload(Entry.items))
+                .order_by(Entry.id.asc())
+            )
+        )
+        deleted_count = len(entries)
+        for entry in entries:
+            self._session.delete(entry)
+        self._session.flush()
+        return deleted_count
+
     def list_food_for_user_between(
         self,
         *,

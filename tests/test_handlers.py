@@ -17,8 +17,9 @@ from food_registry_bot.bot.handlers import (
     handle_admin,
     handle_admin_allow,
     handle_admin_backfill_nutrition,
+    handle_admin_delete_entries_callback,
+    handle_admin_delete_entries,
     handle_admin_deny,
-    handle_admin_process_import_file,
     handle_admin_users,
     handle_goal,
     handle_health,
@@ -32,8 +33,9 @@ from food_registry_bot.bot.handlers import (
     handle_water_250_ml,
 )
 from food_registry_bot.bot.message_routing import MessageRoutingDecision
-from food_registry_bot.bot.payloads import RecentEntryDeleteCallback, SummarySettingsCallback
+from food_registry_bot.bot.payloads import AdminDeleteEntriesCallback, RecentEntryDeleteCallback, SummarySettingsCallback
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT
+from food_registry_bot.bot.keyboards import build_data_exchange_files_keyboard
 from food_registry_bot.db.base import Base
 from food_registry_bot.db.models import (
     ConversationMessageRole,
@@ -323,8 +325,8 @@ async def test_admin_returns_system_overview_and_commands() -> None:
             "- /admin_users\n"
             "- <code>/admin_allow TELEGRAM_USER_ID</code>\n"
             "- <code>/admin_deny TELEGRAM_USER_ID</code>\n"
-            "- <code>/admin_backfill_nutrition [LIMIT]</code>\n"
-            "- <code>/admin_process_import_file FILE_ID</code>"
+            "- <code>/admin_delete_entries TELEGRAM_USER_ID</code>\n"
+            "- <code>/admin_backfill_nutrition [LIMIT]</code>"
         ),
     )
 
@@ -368,8 +370,8 @@ async def test_admin_overview_excludes_admin_from_user_counters() -> None:
             "- /admin_users\n"
             "- <code>/admin_allow TELEGRAM_USER_ID</code>\n"
             "- <code>/admin_deny TELEGRAM_USER_ID</code>\n"
-            "- <code>/admin_backfill_nutrition [LIMIT]</code>\n"
-            "- <code>/admin_process_import_file FILE_ID</code>"
+            "- <code>/admin_delete_entries TELEGRAM_USER_ID</code>\n"
+            "- <code>/admin_backfill_nutrition [LIMIT]</code>"
         ),
     )
 
@@ -475,6 +477,171 @@ async def test_admin_users_is_forbidden_for_non_admin() -> None:
     assert message.answer.await_args.args == ("Команда доступна только администратору.",)
 
 
+async def test_admin_delete_entries_requests_confirmation() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        first_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            source_text="омлет",
+            occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        )
+        second_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.WATER,
+            source_text="вода",
+            occurred_at=datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc),
+        )
+        session.add_all([first_entry, second_entry])
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        answer=AsyncMock(),
+    )
+    command = SimpleNamespace(args=str(ALLOWED_USER_ID))
+
+    await handle_admin_delete_entries(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 2
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Подтверди удаление записей пользователя.\n"
+        f"Telegram ID: {ALLOWED_USER_ID}\n"
+        "Будет удалено записей: 2",
+    )
+    reply_markup = message.answer.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Подтвердить удаление"
+    assert reply_markup.inline_keyboard[0][1].text == "Отмена"
+
+
+async def test_admin_delete_entries_returns_usage_for_missing_argument() -> None:
+    session_factory = create_session_factory()
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        answer=AsyncMock(),
+    )
+
+    await handle_admin_delete_entries(
+        message,
+        SimpleNamespace(args=None),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == ("Использование: <code>/admin_delete_entries TELEGRAM_USER_ID</code>",)
+
+
+async def test_admin_delete_entries_returns_not_found_for_unknown_user() -> None:
+    session_factory = create_session_factory()
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        answer=AsyncMock(),
+    )
+
+    await handle_admin_delete_entries(
+        message,
+        SimpleNamespace(args=str(DENIED_USER_ID)),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (f"Пользователь с Telegram ID {DENIED_USER_ID} не найден.",)
+
+
+async def test_admin_delete_entries_confirm_callback_removes_entries() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add_all(
+            [
+                Entry(
+                    user_id=user.id,
+                    entry_type=EntryType.FOOD,
+                    source_text="омлет",
+                    occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+                ),
+                Entry(
+                    user_id=user.id,
+                    entry_type=EntryType.WATER,
+                    source_text="вода",
+                    occurred_at=datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc),
+                ),
+            ]
+        )
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_admin_delete_entries_callback(
+        callback,
+        AdminDeleteEntriesCallback(action="confirm", telegram_user_id=ALLOWED_USER_ID),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 0
+
+    callback.message.edit_text.assert_awaited_once_with(
+        f"Удалено записей пользователя {ALLOWED_USER_ID}: 2.",
+        reply_markup=None,
+    )
+    callback.answer.assert_awaited_once_with("Удаление выполнено.")
+
+
+async def test_admin_delete_entries_cancel_callback_keeps_entries() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(
+            Entry(
+                user_id=user.id,
+                entry_type=EntryType.FOOD,
+                source_text="омлет",
+                occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+            )
+        )
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_admin_delete_entries_callback(
+        callback,
+        AdminDeleteEntriesCallback(action="cancel", telegram_user_id=ALLOWED_USER_ID),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        assert session.query(Entry).count() == 1
+
+    callback.message.edit_text.assert_awaited_once_with(
+        "Удаление записей отменено.",
+        reply_markup=None,
+    )
+    callback.answer.assert_awaited_once_with("Удаление отменено.")
+
+
 async def test_admin_backfill_nutrition_recomputes_incomplete_entries() -> None:
     session_factory = create_session_factory()
     with session_factory() as session:
@@ -551,24 +718,6 @@ async def test_admin_backfill_nutrition_returns_safe_usage_text_for_invalid_limi
     assert message.answer.await_args.args == ("Использование: <code>/admin_backfill_nutrition [LIMIT]</code>",)
 
 
-async def test_admin_process_import_file_returns_usage_for_missing_argument() -> None:
-    session_factory = create_session_factory()
-    message = SimpleNamespace(
-        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
-        answer=AsyncMock(),
-    )
-
-    await handle_admin_process_import_file(
-        message,
-        SimpleNamespace(args=None),
-        session_factory,
-        admin_user_ids=(ADMIN_ID,),
-    )
-
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Использование: <code>/admin_process_import_file FILE_ID</code>",)
-
-
 def test_build_data_exchange_files_response_shows_file_id_and_admin_processing_note() -> None:
     session_factory = create_session_factory()
     with session_factory() as session:
@@ -603,8 +752,34 @@ def test_build_data_exchange_files_response_shows_file_id_and_admin_processing_n
         response = build_data_exchange_files_response([partial_file, full_file])
 
     assert "[#1] partial.csv" in response
-    assert "требует обработки администратором" in response
+    assert "после импорта часть итогов может быть неполной" in response
     assert "[#2] export.csv" in response
+
+
+def test_build_data_exchange_files_keyboard_uses_addressable_delete_buttons() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        processed_import = DataExchangeFileRepository(session).create(
+            user_id=user.id,
+            direction=DataExchangeDirection.IMPORT,
+            contract_type=CSV_CONTRACT_TYPE_PARTIAL,
+            original_filename="partial.csv",
+            storage_path="user_1/import/partial.csv",
+            sha256="c" * 64,
+            row_count=1,
+            food_entry_count=1,
+            water_entry_count=0,
+            status=DataExchangeStatus.PROCESSED,
+        )
+        session.commit()
+
+        keyboard = build_data_exchange_files_keyboard(files=[processed_import])
+
+    button_texts = [button.text for row in keyboard.inline_keyboard for button in row]
+    assert "Удалить #1" in button_texts
 
 
 async def test_admin_backfill_nutrition_reports_unhandled_error() -> None:

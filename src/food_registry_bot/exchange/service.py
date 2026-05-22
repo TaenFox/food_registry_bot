@@ -21,24 +21,14 @@ from food_registry_bot.db.models import (
     User,
 )
 from food_registry_bot.db.repositories import DataExchangeFileRepository, EntryRepository
-from food_registry_bot.db.repositories import (
-    EntryItemMetricRepository,
-    EntryItemMetricValue,
-    UserSummaryPreferenceRepository,
-)
+from food_registry_bot.db.repositories import UserSummaryPreferenceRepository
 from food_registry_bot.importing.csv_import import (
     CSV_CONTRACT_TYPE_FULL,
-    CSV_CONTRACT_TYPE_PARTIAL,
     CsvNutritionImporter,
     ImportedNutritionRow,
     ROW_METRIC_CODES,
     summarize_import_rows,
 )
-from food_registry_bot.nutrition.journal_adapter import (
-    prepare_nutrition_request_from_entries,
-    resolve_nutrition_estimates,
-)
-from food_registry_bot.nutrition.service import InvalidNutritionPayload, NutritionEstimationService
 from food_registry_bot.nutrition import resolve_local_summary_date
 
 IMPORT_FILE_LIMIT = 5
@@ -87,14 +77,6 @@ class DuplicateDataRowError(ValueError):
 
 
 class FileLimitExceededError(ValueError):
-    pass
-
-
-class PartialImportRequiresAdminError(ValueError):
-    pass
-
-
-class AdminImportProcessingError(ValueError):
     pass
 
 
@@ -188,7 +170,6 @@ class DataExchangeService:
         self._storage = storage or LocalDataExchangeStorage()
         self._file_repository = DataExchangeFileRepository(session)
         self._entry_repository = EntryRepository(session)
-        self._metric_repository = EntryItemMetricRepository(session)
         self._summary_preference_repository = UserSummaryPreferenceRepository(session)
 
     def validate_import_file(
@@ -283,7 +264,7 @@ class DataExchangeService:
             validation_message=(
                 "Файл готов к импорту."
                 if validation_result.contract_type == CSV_CONTRACT_TYPE_FULL
-                else "Файл требует обработки администратором."
+                else "Файл готов к импорту. После импорта часть итогов может быть неполной."
             ),
         )
 
@@ -292,10 +273,6 @@ class DataExchangeService:
             raise ValueError("Only import files can be imported")
         if exchange_file.status is DataExchangeStatus.PROCESSED:
             raise ValueError("Этот файл уже был импортирован ранее. Повторный импорт запрещён.")
-        if exchange_file.contract_type == CSV_CONTRACT_TYPE_PARTIAL:
-            raise PartialImportRequiresAdminError(
-                "Этот файл содержит неполный набор данных. Попроси администратора запустить обработку файла."
-            )
 
         file_path = self._storage.resolve_path(exchange_file.storage_path)
         rows = CsvNutritionImporter.read_csv(file_path)
@@ -321,50 +298,6 @@ class DataExchangeService:
             processed_at=datetime.now(timezone.utc),
         )
         return imported_food_count, imported_water_count
-
-    def process_partial_import_file(
-        self,
-        *,
-        exchange_file: DataExchangeFile,
-        nutrition_service: NutritionEstimationService,
-    ) -> tuple[int, int, int]:
-        if exchange_file.direction is not DataExchangeDirection.IMPORT:
-            raise ValueError("Обрабатывать можно только импортные файлы.")
-        if exchange_file.status is DataExchangeStatus.PROCESSED:
-            raise ValueError("Этот файл уже был импортирован ранее. Повторная обработка запрещена.")
-
-        user = exchange_file.user
-        if user is None:
-            raise RuntimeError("Import file user relation is not loaded")
-
-        file_path = self._storage.resolve_path(exchange_file.storage_path)
-        rows = CsvNutritionImporter.read_csv(file_path)
-        duplicate_row = self._find_duplicate_data_row(user=user, rows=rows)
-        if duplicate_row is not None:
-            row_number, row = duplicate_row
-            raise DuplicateDataRowError(
-                row_number=row_number,
-                description=(
-                    "Обработка остановлена: обнаружен дубликат уже существующих данных. "
-                    f"Строка {row_number}: {_format_row_description(row)}."
-                ),
-            )
-
-        import_result = CsvNutritionImporter(self._session).import_rows(user=user, rows=rows)
-        estimated_metric_count = self._fill_missing_metrics_for_entries(
-            entry_ids=import_result.created_entry_ids,
-            nutrition_service=nutrition_service,
-        )
-        self._file_repository.mark_processed(
-            file_id=exchange_file.id,
-            processing_message=(
-                "Обработка администратором выполнена: "
-                f"еда {exchange_file.food_entry_count}, вода {exchange_file.water_entry_count}, "
-                f"дозаполнено метрик {estimated_metric_count}."
-            ),
-            processed_at=datetime.now(timezone.utc),
-        )
-        return exchange_file.food_entry_count, exchange_file.water_entry_count, estimated_metric_count
 
     def create_export_file(self, *, user: User) -> DataExchangeFile:
         if self._file_repository.count_for_user_and_direction(
@@ -500,72 +433,6 @@ class DataExchangeService:
             return False
         return True
 
-    def _fill_missing_metrics_for_entries(
-        self,
-        *,
-        entry_ids: list[int],
-        nutrition_service: NutritionEstimationService,
-    ) -> int:
-        entries = self._entry_repository.list_by_ids(entry_ids=entry_ids)
-        if not entries:
-            return 0
-
-        prepared_request = prepare_nutrition_request_from_entries(entries)
-        if prepared_request is None:
-            raise AdminImportProcessingError(
-                "Не удалось подготовить запрос на оценку nutrition metrics для импортированного файла."
-            )
-
-        nutrition_result = nutrition_service.estimate(prepared_request.request)
-        if isinstance(nutrition_result, InvalidNutritionPayload):
-            raise AdminImportProcessingError(nutrition_result.message)
-
-        resolved_estimates = resolve_nutrition_estimates(prepared_request, nutrition_result.payload)
-        saved_metric_count = 0
-        for estimate in resolved_estimates:
-            if not estimate.item_ref.entry_key.startswith("entry-"):
-                continue
-            entry_id_raw = estimate.item_ref.entry_key.removeprefix("entry-")
-            if not entry_id_raw.isdigit():
-                continue
-            entry_id = int(entry_id_raw)
-            entry = next((current for current in entries if current.id == entry_id), None)
-            if entry is None:
-                continue
-            item_position_raw = estimate.item_ref.item_key.removeprefix("item-")
-            if not item_position_raw.isdigit():
-                continue
-            item_position = int(item_position_raw)
-            item = next((current for current in entry.items if current.position == item_position), None)
-            if item is None:
-                continue
-
-            existing_metric_codes = {
-                metric.metric.code
-                for metric in item.metrics
-                if metric.metric is not None
-            }
-            missing_metric_values = [
-                metric
-                for metric in estimate.metrics
-                if metric.code not in existing_metric_codes
-            ]
-            if not missing_metric_values:
-                continue
-
-            saved_metrics = self._metric_repository.upsert_metrics(
-                entry_item_id=item.id,
-                metric_values=[
-                    EntryItemMetricValue(
-                        code=metric.code,
-                        value=metric.value,
-                        confidence=metric.confidence.value,
-                    )
-                    for metric in missing_metric_values
-                ],
-            )
-            saved_metric_count += len(saved_metrics)
-        return saved_metric_count
 
     def _build_export_rows(self, *, user: User) -> list[dict[str, str]]:
         entries = self._entry_repository.list_recent_for_user(user_id=user.id, limit=100000)
