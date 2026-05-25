@@ -26,6 +26,11 @@ class DataExchangeFileCallback(CallbackData, prefix="data_exchange"):
     file_id: int = 0
 
 
+class PeriodReportCallback(CallbackData, prefix="period_report"):
+    action: str
+    period_days: int = 8
+
+
 class AdminDeleteEntriesCallback(CallbackData, prefix="admin_delete_entries"):
     action: str
     telegram_user_id: int = 0
@@ -36,6 +41,7 @@ __all__ = [
     "NormalizedEntryItemPayload",
     "NormalizedEntryPayload",
     "NormalizedJournalPayload",
+    "PeriodReportCallback",
     "RecentEntryDeleteCallback",
     "SummarySettingsCallback",
 ]

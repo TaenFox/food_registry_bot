@@ -23,6 +23,7 @@ from food_registry_bot.bot.keyboards import (
     build_admin_delete_entries_confirmation_keyboard,
     build_data_exchange_files_keyboard,
     build_main_keyboard,
+    build_period_report_keyboard,
     build_recent_entries_delete_keyboard,
     build_recent_entry_confirmation_keyboard,
     build_recent_entry_selection_keyboard,
@@ -37,6 +38,7 @@ from food_registry_bot.bot.message_routing import (
 from food_registry_bot.bot.payloads import (
     AdminDeleteEntriesCallback,
     DataExchangeFileCallback,
+    PeriodReportCallback,
     RecentEntryDeleteCallback,
     SummarySettingsCallback,
 )
@@ -86,6 +88,7 @@ from food_registry_bot.nutrition import (
     DailyNutritionSummary,
     DailyNutritionSummaryUseCase,
     FailedNutritionEstimation,
+    PeriodReportUseCase,
     NutritionBackfillCompleted,
     NutritionEstimationService,
     resolve_day_bounds_utc,
@@ -141,6 +144,8 @@ EXCHANGE_DIRECTION_LABELS = {
     DataExchangeDirection.IMPORT: "импорт",
     DataExchangeDirection.EXPORT: "экспорт",
 }
+PERIOD_REPORT_PERIOD_SEQUENCE = (8, 16, 32)
+DEFAULT_PERIOD_REPORT_DAYS = PERIOD_REPORT_PERIOD_SEQUENCE[0]
 
 
 class FoodWriteFlowError(RuntimeError):
@@ -1106,6 +1111,104 @@ def build_daily_report_for_summary_date(
     return "\n\n".join([summary_report, workout_report])
 
 
+def build_period_report_response(
+    report,
+    *,
+    enabled_metric_codes: tuple[str, ...],
+    workout_logging_enabled: bool,
+) -> str:
+    show_nutrition_metrics = any(metric_code != "water" for metric_code in enabled_metric_codes)
+    show_water = "water" in enabled_metric_codes
+    has_any_metric_to_render = show_nutrition_metrics or show_water
+    has_any_workout_data = workout_logging_enabled and report.workout_entry_count > 0
+    if not has_any_metric_to_render and not has_any_workout_data:
+        return "В summary сейчас всё скрыто. Включи хотя бы один показатель в /settings."
+
+    has_visible_data = (
+        (show_nutrition_metrics and report.food_data_day_count > 0)
+        or (show_water and report.water_data_day_count > 0)
+        or has_any_workout_data
+    )
+    if not has_visible_data:
+        return "За этот период пока нет данных по включённым показателям."
+
+    lines = [
+        f"Отчёт: {report.summary_date_from.strftime('%d.%m.%Y')}-{report.summary_date_to.strftime('%d.%m.%Y')}",
+        f"Дней в периоде: {report.period_day_count}",
+    ]
+    if show_nutrition_metrics:
+        lines.append(f"Дней с данными по еде: {report.food_data_day_count}")
+    if show_water:
+        lines.append(f"Дней с данными по воде: {report.water_data_day_count}")
+    if has_any_workout_data:
+        lines.append(f"Дней с тренировками: {report.workout_day_count}")
+
+    average_lines: list[str] = []
+    if show_nutrition_metrics and report.food_data_day_count > 0:
+        for metric_code, _short_label, unit in SUMMARY_METRIC_LINES:
+            if metric_code not in enabled_metric_codes or metric_code == "water":
+                continue
+            metric_value = getattr(report.average_nutrition_totals, metric_code)
+            average_lines.append(f"- {GOAL_METRIC_LABELS[metric_code]}: {round(metric_value, 1)} {unit}")
+    if show_water and report.water_data_day_count > 0:
+        average_lines.append(f"- вода: {round(report.average_water_ml, 1)} мл")
+
+    if average_lines:
+        lines.extend(["", "Среднее по дням с данными", *average_lines])
+
+    if has_any_workout_data:
+        lines.extend(
+            [
+                "",
+                "Тренировки",
+                f"- тренировок: {report.workout_entry_count}",
+            ]
+        )
+
+    notes: list[str] = []
+    if show_nutrition_metrics and report.incomplete_food_day_count > 0:
+        notes.append(f"Неполных дней по еде: {report.incomplete_food_day_count}.")
+    if show_water and report.incomplete_water_day_count > 0:
+        notes.append(f"Неполных дней по воде: {report.incomplete_water_day_count}.")
+    if notes:
+        lines.extend(["", *notes])
+
+    return "\n".join(lines)
+
+
+def build_period_report(
+    *,
+    session: Session,
+    user_id: int,
+    timezone_name: str,
+    summary_date_to: date,
+    period_days: int,
+    workout_logging_enabled: bool,
+    summary_preference,
+) -> str:
+    report = PeriodReportUseCase(session).run(
+        user_id=user_id,
+        timezone_name=timezone_name,
+        summary_date_to=summary_date_to,
+        period_day_count=period_days,
+        nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        workout_logging_enabled=workout_logging_enabled,
+    )
+    return build_period_report_response(
+        report,
+        enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
+        workout_logging_enabled=workout_logging_enabled,
+    )
+
+
+def resolve_next_period_days(period_days: int) -> int:
+    try:
+        current_index = PERIOD_REPORT_PERIOD_SEQUENCE.index(period_days)
+    except ValueError:
+        return DEFAULT_PERIOD_REPORT_DAYS
+    return PERIOD_REPORT_PERIOD_SEQUENCE[(current_index + 1) % len(PERIOD_REPORT_PERIOD_SEQUENCE)]
+
+
 def payload_contains_credit_eligible_workout_entries(payload) -> bool:
     for entry in payload.entries:
         if entry.type is not EntryType.WORKOUT:
@@ -1512,6 +1615,7 @@ async def handle_start(
             "- при желании включить запись тренировок в /settings;\n"
             "- задать вопрос о питании;\n"
             "- посмотреть итог дня: /today;\n"
+            "- посмотреть отчёт за период: /report;\n"
             "- посмотреть и удалить последние записи: /recent;\n"
             "- посмотреть или изменить цели: /goal;\n"
             "- настроить summary: /settings;\n"
@@ -1528,6 +1632,7 @@ async def handle_start(
         "- при желании включить запись тренировок в /settings;\n"
         "- задать вопрос о питании;\n"
         "- посмотреть итог дня: /today;\n"
+        "- посмотреть отчёт за период: /report;\n"
         "- посмотреть и удалить последние записи: /recent;\n"
         "- посмотреть или изменить цели: /goal;\n"
         "- настроить summary: /settings;\n"
@@ -1915,6 +2020,110 @@ async def handle_today(
         rendered_report,
         reply_markup=build_main_keyboard(),
     )
+
+
+@router.message(Command("report"))
+async def handle_report(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    telegram_user = message.from_user
+    if telegram_user is None:
+        raise ValueError("Incoming message does not contain Telegram user")
+
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
+        if user is None:
+            raise RuntimeError("User profile was not found after registration")
+        preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+
+        summary_date_to = resolve_local_summary_date(
+            reference_at=datetime.now(timezone.utc),
+            timezone_name=user.timezone,
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
+        )
+        rendered_report = build_period_report(
+            session=session,
+            user_id=user_id,
+            timezone_name=user.timezone,
+            summary_date_to=summary_date_to,
+            period_days=DEFAULT_PERIOD_REPORT_DAYS,
+            workout_logging_enabled=user.workout_logging_enabled,
+            summary_preference=preference,
+        )
+
+    await message.answer(
+        rendered_report,
+        reply_markup=build_period_report_keyboard(period_days=DEFAULT_PERIOD_REPORT_DAYS),
+    )
+
+
+@router.callback_query(PeriodReportCallback.filter())
+async def handle_period_report_callback(
+    callback: CallbackQuery,
+    callback_data: PeriodReportCallback,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = callback.from_user
+    if telegram_user is None:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+    if callback_data.action not in {"cycle_period", "close"}:
+        await callback.answer("Неизвестное действие.", show_alert=True)
+        return
+    if callback.message is None:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+
+    if callback_data.action == "close":
+        with suppress(TelegramBadRequest):
+            await callback.message.delete()
+        await callback.answer()
+        return
+
+    with session_scope(session_factory) as session:
+        if not (
+            is_admin_user(telegram_user.id, admin_user_ids)
+            or UserAccessRepository(session).is_allowed(telegram_user.id)
+        ):
+            await callback.answer("Нет доступа к боту. Попроси администратора его выдать.", show_alert=True)
+            return
+
+        user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
+        if user is None:
+            user, _created = UserRepository(session).get_or_create(
+                telegram_user_id=telegram_user.id,
+                username=telegram_user.username,
+            )
+        preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user.id)
+
+        next_period_days = resolve_next_period_days(callback_data.period_days)
+        summary_date_to = resolve_local_summary_date(
+            reference_at=datetime.now(timezone.utc),
+            timezone_name=user.timezone,
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
+        )
+        rendered_report = build_period_report(
+            session=session,
+            user_id=user.id,
+            timezone_name=user.timezone,
+            summary_date_to=summary_date_to,
+            period_days=next_period_days,
+            workout_logging_enabled=user.workout_logging_enabled,
+            summary_preference=preference,
+        )
+
+    await callback.message.edit_text(
+        rendered_report,
+        reply_markup=build_period_report_keyboard(period_days=next_period_days),
+    )
+    await callback.answer("Период переключён.")
 
 
 @router.message(Command("goal"))

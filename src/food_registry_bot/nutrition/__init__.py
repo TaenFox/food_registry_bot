@@ -58,6 +58,7 @@ from food_registry_bot.nutrition.workout_credit import (
     DailyWorkoutCalorieCreditUseCase,
     resolve_workout_metric_value,
 )
+from food_registry_bot.nutrition.period_report import PeriodReport, PeriodReportUseCase
 
 __all__ = [
     "InvalidNutritionPayload",
@@ -108,4 +109,6 @@ __all__ = [
     "calculate_default_workout_calorie_credit",
     "DailyWorkoutCalorieCreditUseCase",
     "resolve_workout_metric_value",
+    "PeriodReport",
+    "PeriodReportUseCase",
 ]

@@ -5,6 +5,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 from food_registry_bot.bot.payloads import (
     AdminDeleteEntriesCallback,
     DataExchangeFileCallback,
+    PeriodReportCallback,
     RecentEntryDeleteCallback,
     SummarySettingsCallback,
 )
@@ -15,6 +16,7 @@ SUMMARY_DISPLAY_MODE_BUTTON_LABELS = {
     "text": "текст",
     "bars": "бары",
 }
+PERIOD_REPORT_PERIOD_SEQUENCE = (8, 16, 32)
 
 
 def build_main_keyboard() -> ReplyKeyboardMarkup:
@@ -277,6 +279,40 @@ def build_data_exchange_files_keyboard(*, files: list[DataExchangeFile]) -> Inli
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_period_report_keyboard(*, period_days: int) -> InlineKeyboardMarkup:
+    next_period_days = _resolve_next_period_days(period_days)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"Следующий период: {_format_period_days(next_period_days)}",
+                    callback_data=PeriodReportCallback(action="cycle_period", period_days=period_days).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Закрыть",
+                    callback_data=PeriodReportCallback(action="close", period_days=period_days).pack(),
+                )
+            ],
+        ]
+    )
+
+
+def _resolve_next_period_days(period_days: int) -> int:
+    try:
+        current_index = PERIOD_REPORT_PERIOD_SEQUENCE.index(period_days)
+    except ValueError:
+        return PERIOD_REPORT_PERIOD_SEQUENCE[0]
+    return PERIOD_REPORT_PERIOD_SEQUENCE[(current_index + 1) % len(PERIOD_REPORT_PERIOD_SEQUENCE)]
+
+
+def _format_period_days(period_days: int) -> str:
+    if period_days == 32:
+        return "32 дня"
+    return f"{period_days} дней"
 
 
 def _build_data_exchange_primary_button(exchange_file: DataExchangeFile) -> InlineKeyboardButton | None:
