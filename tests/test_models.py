@@ -15,4 +15,5 @@ def test_core_tables_registered() -> None:
         "entry_item_metrics",
         "conversation_sessions",
         "conversation_messages",
+        "data_exchange_files",
     }
