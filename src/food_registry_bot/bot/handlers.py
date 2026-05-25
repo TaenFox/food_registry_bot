@@ -711,19 +711,38 @@ def build_recent_entry_display_line(*, index: int, entry, timezone_name: str) ->
     return f"{index}. {format_entry_timestamp(entry, timezone_name)} — {title}"
 
 
+def build_recent_entries_day_heading(*, entry, timezone_name: str, nutrition_day_start_hour: int) -> str:
+    summary_date = resolve_local_summary_date(
+        reference_at=entry.occurred_at,
+        timezone_name=timezone_name,
+        nutrition_day_start_hour=nutrition_day_start_hour,
+    )
+    return summary_date.strftime("%d.%m.%Y")
+
+
 def build_recent_entries_response(
     entries: list,
     *,
     timezone_name: str,
     page: int,
     count: int,
+    nutrition_day_start_hour: int,
     selection_mode: bool = False,
 ) -> str:
     if not entries:
         return "Пока записей нет. Отправь еду текстом, фото блюда или нажми кнопку воды."
 
     lines = [f"Последние записи (страница {page + 1}, по {count}):"]
+    current_heading: str | None = None
     for index, entry in enumerate(entries, start=page * count + 1):
+        heading = build_recent_entries_day_heading(
+            entry=entry,
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
+        )
+        if heading != current_heading:
+            lines.extend(["", heading])
+            current_heading = heading
         lines.append(build_recent_entry_display_line(index=index, entry=entry, timezone_name=timezone_name))
     if selection_mode:
         lines.extend(["", "Выбери запись, которую нужно удалить."])
@@ -1560,6 +1579,7 @@ async def handle_recent(
         user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
         if user is None:
             raise RuntimeError("User profile was not found after registration")
+        summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
         page, entries, has_previous_page, has_next_page = load_recent_entries_page(
             entry_repository=EntryRepository(session),
             user_id=user_id,
@@ -1578,7 +1598,13 @@ async def handle_recent(
         else build_main_keyboard()
     )
     await message.answer(
-        build_recent_entries_response(entries, timezone_name=user.timezone, page=page, count=recent_count),
+        build_recent_entries_response(
+            entries,
+            timezone_name=user.timezone,
+            page=page,
+            count=recent_count,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        ),
         reply_markup=reply_markup,
     )
 
@@ -1612,6 +1638,7 @@ async def handle_recent_delete_callback(
                 telegram_user_id=telegram_user.id,
                 username=telegram_user.username,
             )
+        summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user.id)
         entry_repository = EntryRepository(session)
         page, recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
             entry_repository=entry_repository,
@@ -1627,6 +1654,7 @@ async def handle_recent_delete_callback(
                     timezone_name=user.timezone,
                     page=page,
                     count=callback_data.count,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                 ),
                 reply_markup=(
                     build_recent_entries_delete_keyboard(
@@ -1649,6 +1677,7 @@ async def handle_recent_delete_callback(
                     timezone_name=user.timezone,
                     page=page,
                     count=callback_data.count,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                     selection_mode=True,
                 ),
                 reply_markup=(
@@ -1708,6 +1737,7 @@ async def handle_recent_delete_callback(
             timezone_name=user.timezone,
             page=page,
             count=callback_data.count,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
         ),
         reply_markup=(
             build_recent_entries_delete_keyboard(
