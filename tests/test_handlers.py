@@ -1034,14 +1034,230 @@ async def test_recent_returns_latest_entries_for_allowed_user() -> None:
         answer=AsyncMock(),
     )
 
-    await handle_recent(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    await handle_recent(message, SimpleNamespace(args=None), session_factory, admin_user_ids=(ADMIN_ID,))
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Последние записи:\n1. 14:00 — вода (250 мл)\n2. 13:00 — яблоко",
+        "Последние записи (страница 1, по 5):\n\n18.05.2026\n1. 14:00 — вода (250 мл)\n2. 13:00 — яблоко",
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Выбрать для удаления"
+
+
+async def test_recent_shows_pagination_controls_for_next_page() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_paged_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="recent_paged_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        for hour in range(6):
+            entry = Entry(
+                user_id=user.id,
+                entry_type=EntryType.FOOD,
+                source_text=f"еда {hour}",
+                occurred_at=datetime(2026, 5, 18, 10 + hour, 0, tzinfo=timezone.utc),
+            )
+            session.add(entry)
+            session.flush()
+            session.add(EntryItem(entry_id=entry.id, position=0, name=f"еда {hour}"))
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_paged_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent(message, SimpleNamespace(args=None), session_factory, admin_user_ids=(ADMIN_ID,))
+
+    assert message.answer.await_args.args == (
+        "Последние записи (страница 1, по 5):\n"
+        "\n"
+        "18.05.2026\n"
+        "1. 18:00 — еда 5\n"
+        "2. 17:00 — еда 4\n"
+        "3. 16:00 — еда 3\n"
+        "4. 15:00 — еда 2\n"
+        "5. 14:00 — еда 1",
+    )
+    reply_markup = message.answer.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Вперёд →"
+    assert reply_markup.inline_keyboard[1][0].text == "Выбрать для удаления"
+
+
+async def test_recent_accepts_requested_count() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_count_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="recent_count_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        for hour in range(4):
+            entry = Entry(
+                user_id=user.id,
+                entry_type=EntryType.FOOD,
+                source_text=f"еда {hour}",
+                occurred_at=datetime(2026, 5, 18, 10 + hour, 0, tzinfo=timezone.utc),
+            )
+            session.add(entry)
+            session.flush()
+            session.add(EntryItem(entry_id=entry.id, position=0, name=f"еда {hour}"))
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_count_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent(message, SimpleNamespace(args="3"), session_factory, admin_user_ids=(ADMIN_ID,))
+
+    assert message.answer.await_args.args == (
+        "Последние записи (страница 1, по 3):\n"
+        "\n"
+        "18.05.2026\n"
+        "1. 16:00 — еда 3\n"
+        "2. 15:00 — еда 2\n"
+        "3. 14:00 — еда 1",
+    )
+    reply_markup = message.answer.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Вперёд →"
+    assert reply_markup.inline_keyboard[1][0].text == "Выбрать для удаления"
+
+
+async def test_recent_returns_usage_for_invalid_count() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_invalid_count_user")
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_invalid_count_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent(message, SimpleNamespace(args="abc"), session_factory, admin_user_ids=(ADMIN_ID,))
+
+    assert message.answer.await_args.args == (
+        "Использование: <code>/recent [COUNT]</code>, где COUNT от 1 до 60.",
+    )
+
+
+async def test_recent_returns_limit_error_for_too_large_count() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_large_count_user")
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_large_count_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent(message, SimpleNamespace(args="61"), session_factory, admin_user_ids=(ADMIN_ID,))
+
+    assert message.answer.await_args.args == (
+        "Для <code>/recent</code> можно запросить от 1 до 60 записей.",
+    )
+
+
+async def test_recent_groups_entries_by_nutrition_day() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_grouped_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="recent_grouped_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(
+            UserSummaryPreference(
+                user_id=user.id,
+                nutrition_day_start_hour=4,
+                show_calories=True,
+                show_protein=True,
+                show_fat=True,
+                show_carbs=True,
+                show_fiber=True,
+                show_water=True,
+                show_post_entry_delta_suffix=True,
+                summary_display_mode="text",
+            )
+        )
+        session.flush()
+
+        same_nutrition_day_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            source_text="поздний ужин",
+            occurred_at=datetime(2026, 5, 18, 22, 30, tzinfo=timezone.utc),
+        )
+        previous_nutrition_day_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            source_text="ранний завтрак",
+            occurred_at=datetime(2026, 5, 18, 0, 30, tzinfo=timezone.utc),
+        )
+        session.add_all([same_nutrition_day_entry, previous_nutrition_day_entry])
+        session.flush()
+        session.add(EntryItem(entry_id=same_nutrition_day_entry.id, position=0, name="поздний ужин"))
+        session.add(EntryItem(entry_id=previous_nutrition_day_entry.id, position=0, name="ранний завтрак"))
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_grouped_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent(message, SimpleNamespace(args=None), session_factory, admin_user_ids=(ADMIN_ID,))
+
+    assert message.answer.await_args.args == (
+        "Последние записи (страница 1, по 5):\n"
+        "\n"
+        "18.05.2026\n"
+        "1. 01:30 — поздний ужин\n"
+        "\n"
+        "17.05.2026\n"
+        "2. 03:30 — ранний завтрак",
+    )
+
+
+async def test_recent_repeats_day_group_on_each_page() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_same_day_pages_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="recent_same_day_pages_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        for hour in range(7):
+            entry = Entry(
+                user_id=user.id,
+                entry_type=EntryType.FOOD,
+                source_text=f"еда {hour}",
+                occurred_at=datetime(2026, 5, 18, 10 + hour, 0, tzinfo=timezone.utc),
+            )
+            session.add(entry)
+            session.flush()
+            session.add(EntryItem(entry_id=entry.id, position=0, name=f"еда {hour}"))
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_same_day_pages_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_delete_callback(
+        callback,
+        RecentEntryDeleteCallback(action="list", page=1, count=3),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert callback.message.edit_text.await_args.args == (
+        "Последние записи (страница 2, по 3):\n"
+        "\n"
+        "18.05.2026\n"
+        "4. 16:00 — еда 3\n"
+        "5. 15:00 — еда 2\n"
+        "6. 14:00 — еда 1",
+    )
 
 
 async def test_recent_delete_open_shows_entry_selection_buttons() -> None:
@@ -1076,7 +1292,9 @@ async def test_recent_delete_open_shows_entry_selection_buttons() -> None:
 
     callback.message.edit_text.assert_awaited_once()
     assert callback.message.edit_text.await_args.args == (
-        "Последние записи:\n"
+        "Последние записи (страница 1, по 5):\n"
+        "\n"
+        "18.05.2026\n"
         "1. 14:00 — вода (250 мл)\n"
         "2. 13:00 — яблоко\n"
         "\n"
@@ -1117,11 +1335,62 @@ async def test_recent_delete_open_returns_selection_screen() -> None:
     )
 
     assert callback.message.edit_text.await_args.args == (
-        "Последние записи:\n"
+        "Последние записи (страница 1, по 5):\n"
+        "\n"
+        "18.05.2026\n"
         "1. 13:00 — яблоко\n"
         "\n"
         "Выбери запись, которую нужно удалить.",
     )
+
+
+async def test_recent_list_callback_opens_second_page() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_second_page_user")
+    with session_factory() as session:
+        user = User(
+            telegram_user_id=ALLOWED_USER_ID,
+            username="recent_second_page_user",
+            timezone="Europe/Moscow",
+        )
+        session.add(user)
+        session.flush()
+
+        for hour in range(7):
+            entry = Entry(
+                user_id=user.id,
+                entry_type=EntryType.FOOD,
+                source_text=f"еда {hour}",
+                occurred_at=datetime(2026, 5, 18, 10 + hour, 0, tzinfo=timezone.utc),
+            )
+            session.add(entry)
+            session.flush()
+            session.add(EntryItem(entry_id=entry.id, position=0, name=f"еда {hour}"))
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_second_page_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_delete_callback(
+        callback,
+        RecentEntryDeleteCallback(action="list", page=1, count=5),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert callback.message.edit_text.await_args.args == (
+        "Последние записи (страница 2, по 5):\n"
+        "\n"
+        "18.05.2026\n"
+        "6. 14:00 — еда 1\n"
+        "7. 13:00 — еда 0",
+    )
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "← Назад"
+    assert reply_markup.inline_keyboard[1][0].text == "Выбрать для удаления"
 
 
 async def test_recent_delete_confirm_removes_entry_and_refreshes_recent_list() -> None:
@@ -1178,7 +1447,7 @@ async def test_recent_delete_confirm_removes_entry_and_refreshes_recent_list() -
         assert session.query(Entry).count() == 1
 
     callback.message.edit_text.assert_awaited_once_with(
-        "Последние записи:\n1. 12:00 — вода (250 мл)",
+        "Последние записи (страница 1, по 5):\n\n19.05.2026\n1. 12:00 — вода (250 мл)",
         reply_markup=callback.message.edit_text.await_args.kwargs["reply_markup"],
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
@@ -1268,6 +1537,105 @@ async def test_recent_delete_returns_safe_error_for_stale_button() -> None:
 
     callback.message.edit_text.assert_not_awaited()
     callback.answer.assert_awaited_once_with("Эта запись уже удалена или больше недоступна.", show_alert=True)
+
+
+async def test_recent_delete_confirm_moves_to_previous_page_when_current_becomes_empty() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_delete_page_fallback_user")
+    with session_factory() as session:
+        user = User(
+            telegram_user_id=ALLOWED_USER_ID,
+            username="recent_delete_page_fallback_user",
+            timezone="Europe/Moscow",
+        )
+        session.add(user)
+        session.flush()
+
+        created_entries: list[Entry] = []
+        for hour in range(6):
+            entry = Entry(
+                user_id=user.id,
+                entry_type=EntryType.FOOD,
+                source_text=f"еда {hour}",
+                occurred_at=datetime(2026, 5, 19, 8 + hour, 0, tzinfo=timezone.utc),
+            )
+            session.add(entry)
+            session.flush()
+            session.add(EntryItem(entry_id=entry.id, position=0, name=f"еда {hour}"))
+            created_entries.append(entry)
+        session.commit()
+        oldest_entry_id = created_entries[0].id
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_delete_page_fallback_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_delete_callback(
+        callback,
+        RecentEntryDeleteCallback(action="confirm", entry_id=oldest_entry_id, page=1),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert callback.message.edit_text.await_args.args == (
+        "Последние записи (страница 1, по 5):\n"
+        "\n"
+        "19.05.2026\n"
+        "1. 16:00 — еда 5\n"
+        "2. 15:00 — еда 4\n"
+        "3. 14:00 — еда 3\n"
+        "4. 13:00 — еда 2\n"
+        "5. 12:00 — еда 1",
+    )
+
+
+async def test_recent_list_callback_uses_requested_count() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_requested_count_page_user")
+    with session_factory() as session:
+        user = User(
+            telegram_user_id=ALLOWED_USER_ID,
+            username="recent_requested_count_page_user",
+            timezone="Europe/Moscow",
+        )
+        session.add(user)
+        session.flush()
+
+        for hour in range(7):
+            entry = Entry(
+                user_id=user.id,
+                entry_type=EntryType.FOOD,
+                source_text=f"еда {hour}",
+                occurred_at=datetime(2026, 5, 18, 10 + hour, 0, tzinfo=timezone.utc),
+            )
+            session.add(entry)
+            session.flush()
+            session.add(EntryItem(entry_id=entry.id, position=0, name=f"еда {hour}"))
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_requested_count_page_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_delete_callback(
+        callback,
+        RecentEntryDeleteCallback(action="list", page=1, count=3),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert callback.message.edit_text.await_args.args == (
+        "Последние записи (страница 2, по 3):\n"
+        "\n"
+        "18.05.2026\n"
+        "4. 16:00 — еда 3\n"
+        "5. 15:00 — еда 2\n"
+        "6. 14:00 — еда 1",
+    )
 
 
 async def test_today_returns_daily_nutrition_totals_for_allowed_user() -> None:

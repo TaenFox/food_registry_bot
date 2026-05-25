@@ -105,6 +105,9 @@ default_nutrition_service = StaticNutritionEstimationService(raw_payload="")
 default_conversation_service = DisabledConversationService()
 default_message_routing_service = RuleBasedMessageRoutingService()
 NUTRITION_COACH_DISPLAY_NAME = "Нутрициолог"
+RECENT_ENTRIES_DEFAULT_COUNT = 5
+RECENT_ENTRIES_MAX_COUNT = 60
+RECENT_ENTRY_LIST_TITLE_MAX_LENGTH = 48
 SUMMARY_METRIC_LINES = (
     ("calories", "К", "ккал"),
     ("protein", "Б", "г"),
@@ -704,15 +707,42 @@ def build_recent_entry_button_label(entry, timezone_name: str) -> str:
 
 
 def build_recent_entry_display_line(*, index: int, entry, timezone_name: str) -> str:
-    return f"{index}. {format_entry_timestamp(entry, timezone_name)} — {build_recent_entry_title(entry)}"
+    title = truncate_button_label(build_recent_entry_title(entry), max_length=RECENT_ENTRY_LIST_TITLE_MAX_LENGTH)
+    return f"{index}. {format_entry_timestamp(entry, timezone_name)} — {title}"
 
 
-def build_recent_entries_response(entries: list, *, timezone_name: str, selection_mode: bool = False) -> str:
+def build_recent_entries_day_heading(*, entry, timezone_name: str, nutrition_day_start_hour: int) -> str:
+    summary_date = resolve_local_summary_date(
+        reference_at=entry.occurred_at,
+        timezone_name=timezone_name,
+        nutrition_day_start_hour=nutrition_day_start_hour,
+    )
+    return summary_date.strftime("%d.%m.%Y")
+
+
+def build_recent_entries_response(
+    entries: list,
+    *,
+    timezone_name: str,
+    page: int,
+    count: int,
+    nutrition_day_start_hour: int,
+    selection_mode: bool = False,
+) -> str:
     if not entries:
         return "Пока записей нет. Отправь еду текстом, фото блюда или нажми кнопку воды."
 
-    lines = ["Последние записи:"]
-    for index, entry in enumerate(entries, start=1):
+    lines = [f"Последние записи (страница {page + 1}, по {count}):"]
+    current_heading: str | None = None
+    for index, entry in enumerate(entries, start=page * count + 1):
+        heading = build_recent_entries_day_heading(
+            entry=entry,
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
+        )
+        if heading != current_heading:
+            lines.extend(["", heading])
+            current_heading = heading
         lines.append(build_recent_entry_display_line(index=index, entry=entry, timezone_name=timezone_name))
     if selection_mode:
         lines.extend(["", "Выбери запись, которую нужно удалить."])
@@ -1091,11 +1121,35 @@ def resolve_recent_entry_for_callback(
     entry_repository: EntryRepository,
     user_id: int,
     entry_id: int,
-    limit: int = 5,
 ):
-    recent_entries = entry_repository.list_recent_for_user(user_id=user_id, limit=limit)
-    recent_entry_by_id = {entry.id: entry for entry in recent_entries}
-    return recent_entries, recent_entry_by_id.get(entry_id)
+    return entry_repository.get_by_id_for_user(entry_id=entry_id, user_id=user_id)
+
+
+def load_recent_entries_page(
+    *,
+    entry_repository: EntryRepository,
+    user_id: int,
+    page: int,
+    page_size: int = RECENT_ENTRIES_DEFAULT_COUNT,
+) -> tuple[int, list, bool, bool]:
+    page = max(page, 0)
+    while True:
+        entries = entry_repository.list_recent_for_user(
+            user_id=user_id,
+            limit=page_size + 1,
+            offset=page * page_size,
+        )
+        if entries or page == 0:
+            page_entries = entries[:page_size]
+            return page, page_entries, page > 0, len(entries) > page_size
+        page -= 1
+
+
+def resolve_recent_count(command: CommandObject | None) -> int | None:
+    parsed_value = parse_positive_int_arg(command)
+    if parsed_value is None:
+        return None
+    return min(parsed_value, RECENT_ENTRIES_MAX_COUNT)
 
 
 def build_goal_response(
@@ -1497,22 +1551,60 @@ async def handle_health(
 @router.message(Command("recent"))
 async def handle_recent(
     message: Message,
+    command: CommandObject,
     session_factory: sessionmaker[Session],
     admin_user_ids: tuple[int, ...] = (),
 ) -> None:
     if not await require_user_access(message, session_factory, admin_user_ids):
         return
 
+    raw_args = command.args.strip() if command.args is not None else ""
+    if raw_args and parse_positive_int_arg(command) is None:
+        await message.answer(
+            f"Использование: <code>/recent [COUNT]</code>, где COUNT от 1 до {RECENT_ENTRIES_MAX_COUNT}."
+        )
+        return
+
+    requested_count = parse_positive_int_arg(command)
+    if requested_count is not None and requested_count > RECENT_ENTRIES_MAX_COUNT:
+        await message.answer(
+            f"Для <code>/recent</code> можно запросить от 1 до {RECENT_ENTRIES_MAX_COUNT} записей."
+        )
+        return
+
+    recent_count = resolve_recent_count(command) or RECENT_ENTRIES_DEFAULT_COUNT
+
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
         user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
         if user is None:
             raise RuntimeError("User profile was not found after registration")
-        entries = EntryRepository(session).list_recent_for_user(user_id=user_id, limit=5)
+        summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+        page, entries, has_previous_page, has_next_page = load_recent_entries_page(
+            entry_repository=EntryRepository(session),
+            user_id=user_id,
+            page=0,
+            page_size=recent_count,
+        )
 
-    reply_markup = build_recent_entries_delete_keyboard() if entries else build_main_keyboard()
+    reply_markup = (
+        build_recent_entries_delete_keyboard(
+            page=page,
+            count=recent_count,
+            has_previous_page=has_previous_page,
+            has_next_page=has_next_page,
+        )
+        if entries
+        else build_main_keyboard()
+    )
     await message.answer(
-        build_recent_entries_response(entries, timezone_name=user.timezone),
+        build_recent_entries_response(
+            entries,
+            timezone_name=user.timezone,
+            page=page,
+            count=recent_count,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        ),
         reply_markup=reply_markup,
     )
 
@@ -1546,14 +1638,31 @@ async def handle_recent_delete_callback(
                 telegram_user_id=telegram_user.id,
                 username=telegram_user.username,
             )
+        summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user.id)
         entry_repository = EntryRepository(session)
-        recent_entries = entry_repository.list_recent_for_user(user_id=user.id, limit=5)
+        page, recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
+            entry_repository=entry_repository,
+            user_id=user.id,
+            page=callback_data.page,
+            page_size=callback_data.count,
+        )
 
-        if callback_data.action == "close":
+        if callback_data.action == "list":
             await callback.message.edit_text(
-                build_recent_entries_response(recent_entries, timezone_name=user.timezone),
+                build_recent_entries_response(
+                    recent_entries,
+                    timezone_name=user.timezone,
+                    page=page,
+                    count=callback_data.count,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                ),
                 reply_markup=(
-                    build_recent_entries_delete_keyboard()
+                    build_recent_entries_delete_keyboard(
+                        page=page,
+                        count=callback_data.count,
+                        has_previous_page=has_previous_page,
+                        has_next_page=has_next_page,
+                    )
                     if recent_entries
                     else None
                 ),
@@ -1566,6 +1675,9 @@ async def handle_recent_delete_callback(
                 build_recent_entries_response(
                     recent_entries,
                     timezone_name=user.timezone,
+                    page=page,
+                    count=callback_data.count,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                     selection_mode=True,
                 ),
                 reply_markup=(
@@ -1573,7 +1685,11 @@ async def handle_recent_delete_callback(
                         entry_buttons=[
                             (build_recent_entry_button_label(entry, user.timezone), entry.id)
                             for entry in recent_entries
-                        ]
+                        ],
+                        page=page,
+                        count=callback_data.count,
+                        has_previous_page=has_previous_page,
+                        has_next_page=has_next_page,
                     )
                     if recent_entries
                     else None
@@ -1582,7 +1698,7 @@ async def handle_recent_delete_callback(
             await callback.answer()
             return
 
-        recent_entries, selected_entry = resolve_recent_entry_for_callback(
+        selected_entry = resolve_recent_entry_for_callback(
             entry_repository=entry_repository,
             user_id=user.id,
             entry_id=callback_data.entry_id,
@@ -1594,7 +1710,11 @@ async def handle_recent_delete_callback(
         if callback_data.action == "select":
             await callback.message.edit_text(
                 build_recent_entry_delete_confirmation(entry=selected_entry, timezone_name=user.timezone),
-                reply_markup=build_recent_entry_confirmation_keyboard(entry_id=selected_entry.id),
+                reply_markup=build_recent_entry_confirmation_keyboard(
+                    entry_id=selected_entry.id,
+                    page=page,
+                    count=callback_data.count,
+                ),
             )
             await callback.answer()
             return
@@ -1604,12 +1724,28 @@ async def handle_recent_delete_callback(
             return
 
         entry_repository.delete(selected_entry)
-        updated_recent_entries = entry_repository.list_recent_for_user(user_id=user.id, limit=5)
+        page, updated_recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
+            entry_repository=entry_repository,
+            user_id=user.id,
+            page=page,
+            page_size=callback_data.count,
+        )
 
     await callback.message.edit_text(
-        build_recent_entries_response(updated_recent_entries, timezone_name=user.timezone),
+        build_recent_entries_response(
+            updated_recent_entries,
+            timezone_name=user.timezone,
+            page=page,
+            count=callback_data.count,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        ),
         reply_markup=(
-            build_recent_entries_delete_keyboard()
+            build_recent_entries_delete_keyboard(
+                page=page,
+                count=callback_data.count,
+                has_previous_page=has_previous_page,
+                has_next_page=has_next_page,
+            )
             if updated_recent_entries
             else None
         ),

@@ -474,6 +474,39 @@ def test_entry_repository_lists_recent_entries_in_descending_order() -> None:
     assert [entry.id for entry in recent_entries] == [newer_entry.id, older_entry.id]
 
 
+def test_entry_repository_lists_recent_entries_with_offset() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=405, username="recent_offset")
+    repository = EntryRepository(session)
+
+    first_entry = repository.create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        source_text="яблоко",
+        items=[EntryItemCreate(name="яблоко")],
+    )
+    second_entry = repository.create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 18, 11, 0, tzinfo=timezone.utc),
+        source_text="банан",
+        items=[EntryItemCreate(name="банан")],
+    )
+    third_entry = repository.create(
+        user_id=user.id,
+        entry_type=EntryType.WATER,
+        occurred_at=datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc),
+        source_text="250 мл",
+        items=[EntryItemCreate(name="water", quantity=250, unit="ml")],
+    )
+
+    recent_entries = repository.list_recent_for_user(user_id=user.id, limit=1, offset=1)
+
+    assert [entry.id for entry in recent_entries] == [second_entry.id]
+    assert third_entry.id != first_entry.id
+
+
 def test_entry_repository_deletes_entry_with_items() -> None:
     session = create_test_session()
     user = UserRepository(session).create(telegram_user_id=406, username="delete_user")
