@@ -5,6 +5,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 from food_registry_bot.bot.payloads import (
     AdminDeleteEntriesCallback,
     DataExchangeFileCallback,
+    PeriodReportCallback,
     RecentEntryDeleteCallback,
     SummarySettingsCallback,
 )
@@ -15,6 +16,7 @@ SUMMARY_DISPLAY_MODE_BUTTON_LABELS = {
     "text": "текст",
     "bars": "бары",
 }
+PERIOD_REPORT_PERIOD_SEQUENCE = (8, 16, 32)
 
 
 def build_main_keyboard() -> ReplyKeyboardMarkup:
@@ -39,6 +41,8 @@ def build_summary_settings_keyboard(
     show_post_entry_delta_suffix: bool,
     summary_display_mode: str,
     nutrition_day_start_hour: int,
+    report_goal_tolerance_percent: int,
+    report_noticeable_entry_percentile: int,
 ) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -100,6 +104,18 @@ def build_summary_settings_keyboard(
                 InlineKeyboardButton(
                     text=f"Начало дня: {nutrition_day_start_hour:02d}:00",
                     callback_data=SummarySettingsCallback(action="cycle_nutrition_day_start_hour").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Допуск к цели: {report_goal_tolerance_percent}%",
+                    callback_data=SummarySettingsCallback(action="cycle_report_goal_tolerance_percent").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Порог заметных записей: {report_noticeable_entry_percentile}%",
+                    callback_data=SummarySettingsCallback(action="cycle_report_noticeable_entry_percentile").pack(),
                 )
             ]
         ]
@@ -277,6 +293,106 @@ def build_data_exchange_files_keyboard(*, files: list[DataExchangeFile]) -> Inli
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_period_report_keyboard(*, period_days: int) -> InlineKeyboardMarkup:
+    next_period_days = _resolve_next_period_days(period_days)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"Следующий период: {_format_period_days(next_period_days)}",
+                    callback_data=PeriodReportCallback(action="cycle_period", period_days=period_days).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Динамика",
+                    callback_data=PeriodReportCallback(action="open_dynamics", period_days=period_days).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Заметные записи пищи",
+                    callback_data=PeriodReportCallback(action="open_noticeable", period_days=period_days).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Закрыть",
+                    callback_data=PeriodReportCallback(action="close", period_days=period_days).pack(),
+                )
+            ],
+        ]
+    )
+
+
+def _resolve_next_period_days(period_days: int) -> int:
+    try:
+        current_index = PERIOD_REPORT_PERIOD_SEQUENCE.index(period_days)
+    except ValueError:
+        return PERIOD_REPORT_PERIOD_SEQUENCE[0]
+    return PERIOD_REPORT_PERIOD_SEQUENCE[(current_index + 1) % len(PERIOD_REPORT_PERIOD_SEQUENCE)]
+
+
+def _format_period_days(period_days: int) -> str:
+    if period_days == 32:
+        return "32 дня"
+    return f"{period_days} дней"
+
+
+def build_period_report_dynamics_keyboard(*, period_days: int, metric_code: str, next_metric_code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Следующая метрика",
+                    callback_data=PeriodReportCallback(
+                        action="cycle_dynamics_metric",
+                        period_days=period_days,
+                        metric_code=next_metric_code,
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Закрыть",
+                    callback_data=PeriodReportCallback(
+                        action="close",
+                        period_days=period_days,
+                        metric_code=metric_code,
+                    ).pack(),
+                )
+            ],
+        ]
+    )
+
+
+def build_period_report_noticeable_keyboard(*, period_days: int, metric_code: str, next_metric_code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Следующая метрика",
+                    callback_data=PeriodReportCallback(
+                        action="cycle_noticeable_metric",
+                        period_days=period_days,
+                        metric_code=next_metric_code,
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Закрыть",
+                    callback_data=PeriodReportCallback(
+                        action="close",
+                        period_days=period_days,
+                        metric_code=metric_code,
+                    ).pack(),
+                )
+            ],
+        ]
+    )
 
 
 def _build_data_exchange_primary_button(exchange_file: DataExchangeFile) -> InlineKeyboardButton | None:

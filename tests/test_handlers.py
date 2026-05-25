@@ -25,8 +25,10 @@ from food_registry_bot.bot.handlers import (
     handle_goal,
     handle_health,
     handle_message,
+    handle_period_report_callback,
     handle_recent,
     handle_recent_delete_callback,
+    handle_report,
     handle_settings,
     handle_start,
     handle_today,
@@ -34,7 +36,7 @@ from food_registry_bot.bot.handlers import (
     handle_water_250_ml,
 )
 from food_registry_bot.bot.message_routing import MessageRoutingDecision
-from food_registry_bot.bot.payloads import AdminDeleteEntriesCallback, RecentEntryDeleteCallback, SummarySettingsCallback
+from food_registry_bot.bot.payloads import AdminDeleteEntriesCallback, PeriodReportCallback, RecentEntryDeleteCallback, SummarySettingsCallback
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT
 from food_registry_bot.bot.keyboards import build_data_exchange_files_keyboard
 from food_registry_bot.db.base import Base
@@ -145,6 +147,26 @@ async def call_handle_today_at(
         handle_today.__globals__["datetime"] = original_datetime
 
 
+async def call_handle_report_at(
+    *,
+    fixed_now: datetime,
+    message,
+    session_factory: sessionmaker[Session],
+) -> None:
+    original_datetime = handle_report.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return fixed_now
+
+    handle_report.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_report(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    finally:
+        handle_report.__globals__["datetime"] = original_datetime
+
+
 async def test_start_denies_unallowed_user() -> None:
     session_factory = create_session_factory()
     message = SimpleNamespace(
@@ -189,6 +211,7 @@ async def test_start_creates_user_for_allowed_user() -> None:
         "- при желании включить запись тренировок в /settings;\n"
         "- задать вопрос о питании;\n"
         "- посмотреть итог дня: /today;\n"
+        "- посмотреть отчёт за период: /report;\n"
         "- посмотреть и удалить последние записи: /recent;\n"
         "- посмотреть или изменить цели: /goal;\n"
         "- настроить summary: /settings;\n"
@@ -1702,6 +1725,613 @@ async def test_today_returns_daily_nutrition_totals_for_allowed_user() -> None:
     )
 
 
+async def test_report_returns_period_averages_by_days_with_data() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "report_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="report_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        first_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 18, 8, 0, tzinfo=timezone.utc),
+        )
+        second_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 20, 8, 0, tzinfo=timezone.utc),
+        )
+        incomplete_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 22, 8, 0, tzinfo=timezone.utc),
+        )
+        first_water = Entry(
+            user_id=user.id,
+            entry_type=EntryType.WATER,
+            occurred_at=datetime(2026, 5, 18, 9, 0, tzinfo=timezone.utc),
+        )
+        second_water = Entry(
+            user_id=user.id,
+            entry_type=EntryType.WATER,
+            occurred_at=datetime(2026, 5, 20, 9, 0, tzinfo=timezone.utc),
+        )
+        session.add_all([first_entry, second_entry, incomplete_entry, first_water, second_water])
+        session.flush()
+
+        first_item = EntryItem(entry_id=first_entry.id, position=0, name="омлет")
+        second_item = EntryItem(entry_id=second_entry.id, position=0, name="рис")
+        incomplete_item = EntryItem(entry_id=incomplete_entry.id, position=0, name="перекус")
+        first_water_item = EntryItem(entry_id=first_water.id, position=0, name="water", quantity=500, unit="ml")
+        second_water_item = EntryItem(entry_id=second_water.id, position=0, name="water", quantity=1500, unit="ml")
+        session.add_all([first_item, second_item, incomplete_item, first_water_item, second_water_item])
+        session.flush()
+
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=1, value=300.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=2, value=30.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=3, value=10.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=4, value=40.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=5, value=5.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=1, value=500.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=2, value=50.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=3, value=20.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=4, value=60.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=5, value=7.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=incomplete_item.id, metric_id=1, value=120.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=incomplete_item.id, metric_id=2, value=8.0, confidence="medium"),
+            ]
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="report_user"),
+        answer=AsyncMock(),
+    )
+
+    await call_handle_report_at(
+        fixed_now=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        (
+            "Отчёт: 18.05.2026-25.05.2026\n"
+            "Дней в периоде: 8\n"
+            "Дней с данными по еде: 3\n"
+            "Дней с данными по воде: 2\n"
+            "\n"
+            "Среднее по дням с данными\n"
+            "- калории: 266.7 ккал\n"
+            "- белки: 26.7 г\n"
+            "- жиры: 10.0 г\n"
+            "- углеводы: 33.3 г\n"
+            "- клетчатка: 4.0 г\n"
+            "- вода: 1000.0 мл\n"
+            "\n"
+            "Цели считаются с допуском 10%.\n"
+            "- калории: 0 из 2 дней\n"
+            "- белки: 0 из 2 дней\n"
+            "- жиры: 0 из 2 дней\n"
+            "- углеводы: 0 из 2 дней\n"
+            "- клетчатка: 0 из 2 дней\n"
+            "- вода: 0 из 2 дней\n"
+            "\n"
+            "Неполных дней по еде: 1."
+        ),
+    )
+
+
+async def test_report_uses_goal_tolerance_preference_for_goal_hits() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "report_goal_tolerance_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="report_goal_tolerance_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(UserSummaryPreference(user_id=user.id, report_goal_tolerance_percent=20))
+
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        item = EntryItem(entry_id=entry.id, position=0, name="обед")
+        session.add(item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=item.id, metric_id=1, value=1600.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=2, value=85.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=3, value=60.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=4, value=210.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=5, value=25.0, confidence="medium"),
+            ]
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="report_goal_tolerance_user"),
+        answer=AsyncMock(),
+    )
+
+    await call_handle_report_at(
+        fixed_now=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
+
+    assert "Цели считаются с допуском 20%." in message.answer.await_args.args[0]
+    assert "- калории: 1 из 1 дней" in message.answer.await_args.args[0]
+
+
+async def test_report_callback_cycles_to_next_period() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "report_cycle_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="report_cycle_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 20, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        item = EntryItem(entry_id=entry.id, position=0, name="каша")
+        session.add(item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=item.id, metric_id=1, value=300.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=2, value=15.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=3, value=6.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=4, value=45.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=5, value=5.0, confidence="medium"),
+            ]
+        )
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="report_cycle_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    original_datetime = handle_period_report_callback.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+
+    handle_period_report_callback.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_period_report_callback(
+            callback,
+            PeriodReportCallback(action="cycle_period", period_days=8),
+            session_factory,
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_period_report_callback.__globals__["datetime"] = original_datetime
+
+    callback.message.edit_text.assert_awaited_once()
+    assert callback.message.edit_text.await_args.args[0].startswith(
+        "Отчёт: 10.05.2026-25.05.2026\nДней в периоде: 16"
+    )
+    callback.answer.assert_awaited_once_with("Период переключён.")
+
+
+async def test_report_close_callback_deletes_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "report_close_user")
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="report_close_user"),
+        message=SimpleNamespace(delete=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_period_report_callback(
+        callback,
+        PeriodReportCallback(action="close", period_days=8),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    callback.message.delete.assert_awaited_once()
+    callback.answer.assert_awaited_once_with()
+
+
+async def test_report_open_dynamics_sends_separate_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "report_dynamics_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="report_dynamics_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        first_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 18, 8, 0, tzinfo=timezone.utc),
+        )
+        second_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 22, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add_all([first_entry, second_entry])
+        session.flush()
+
+        first_item = EntryItem(entry_id=first_entry.id, position=0, name="омлет")
+        second_item = EntryItem(entry_id=second_entry.id, position=0, name="рис")
+        session.add_all([first_item, second_item])
+        session.flush()
+
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=1, value=300.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=2, value=30.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=3, value=10.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=4, value=40.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=5, value=5.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=1, value=500.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=2, value=50.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=3, value=20.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=4, value=60.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=5, value=7.0, confidence="medium"),
+            ]
+        )
+        session.commit()
+
+    callback_message = SimpleNamespace(answer=AsyncMock())
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="report_dynamics_user"),
+        message=callback_message,
+        answer=AsyncMock(),
+    )
+
+    original_datetime = handle_period_report_callback.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+
+    handle_period_report_callback.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_period_report_callback(
+            callback,
+            PeriodReportCallback(action="open_dynamics", period_days=8),
+            session_factory,
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_period_report_callback.__globals__["datetime"] = original_datetime
+
+    callback_message.answer.assert_awaited_once()
+    assert callback_message.answer.await_args.args == (
+        "Динамика: 18.05.2026-25.05.2026\n"
+        "Метрика: калории\n"
+        "Доступно: [калории], белки, жиры, углеводы, клетчатка\n"
+        "\n"
+        "18.05-21.05: 300.0 ккал (1/4 дней)\n"
+        "22.05-25.05: 500.0 ккал (1/4 дней)",
+    )
+    callback.answer.assert_awaited_once_with()
+
+
+async def test_report_dynamics_callback_cycles_metric() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "report_dynamics_cycle_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="report_dynamics_cycle_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 20, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        item = EntryItem(entry_id=entry.id, position=0, name="каша")
+        session.add(item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=item.id, metric_id=1, value=300.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=2, value=15.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=3, value=6.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=4, value=45.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=5, value=5.0, confidence="medium"),
+            ]
+        )
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="report_dynamics_cycle_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    original_datetime = handle_period_report_callback.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+
+    handle_period_report_callback.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_period_report_callback(
+            callback,
+            PeriodReportCallback(action="cycle_dynamics_metric", period_days=8, metric_code="protein"),
+            session_factory,
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_period_report_callback.__globals__["datetime"] = original_datetime
+
+    callback.message.edit_text.assert_awaited_once()
+    assert callback.message.edit_text.await_args.args == (
+        "Динамика: 18.05.2026-25.05.2026\n"
+        "Метрика: белки\n"
+        "Доступно: калории, [белки], жиры, углеводы, клетчатка\n"
+        "\n"
+        "18.05-21.05: 15.0 г (1/4 дней)\n"
+        "22.05-25.05: нет данных",
+    )
+    callback.answer.assert_awaited_once_with("Метрика переключена.")
+
+
+async def test_report_open_dynamics_shows_alert_when_no_data() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "report_dynamics_empty_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="report_dynamics_empty_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="report_dynamics_empty_user"),
+        message=SimpleNamespace(answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    original_datetime = handle_period_report_callback.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+
+    handle_period_report_callback.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_period_report_callback(
+            callback,
+            PeriodReportCallback(action="open_dynamics", period_days=8),
+            session_factory,
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_period_report_callback.__globals__["datetime"] = original_datetime
+
+    callback.answer.assert_awaited_once_with("За этот период нет данных для динамики.", show_alert=True)
+
+
+async def test_report_open_noticeable_sends_separate_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "report_noticeable_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="report_noticeable_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(UserSummaryPreference(user_id=user.id, report_noticeable_entry_percentile=95))
+
+        low_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 18, 8, 0, tzinfo=timezone.utc),
+        )
+        high_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 22, 8, 0, tzinfo=timezone.utc),
+        )
+        top_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add_all([low_entry, high_entry, top_entry])
+        session.flush()
+
+        low_item = EntryItem(entry_id=low_entry.id, position=0, name="йогурт")
+        high_item = EntryItem(entry_id=high_entry.id, position=0, name="бургер")
+        top_item = EntryItem(entry_id=top_entry.id, position=0, name="роллы")
+        session.add_all([low_item, high_item, top_item])
+        session.flush()
+
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=low_item.id, metric_id=1, value=100.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=low_item.id, metric_id=2, value=8.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=low_item.id, metric_id=3, value=4.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=low_item.id, metric_id=4, value=12.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=low_item.id, metric_id=5, value=1.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=high_item.id, metric_id=1, value=800.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=high_item.id, metric_id=2, value=35.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=high_item.id, metric_id=3, value=40.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=high_item.id, metric_id=4, value=55.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=high_item.id, metric_id=5, value=4.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=top_item.id, metric_id=1, value=950.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=top_item.id, metric_id=2, value=28.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=top_item.id, metric_id=3, value=30.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=top_item.id, metric_id=4, value=110.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=top_item.id, metric_id=5, value=6.0, confidence="medium"),
+            ]
+        )
+        session.commit()
+
+    callback_message = SimpleNamespace(answer=AsyncMock())
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="report_noticeable_user"),
+        message=callback_message,
+        answer=AsyncMock(),
+    )
+
+    original_datetime = handle_period_report_callback.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+
+    handle_period_report_callback.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_period_report_callback(
+            callback,
+            PeriodReportCallback(action="open_noticeable", period_days=8),
+            session_factory,
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_period_report_callback.__globals__["datetime"] = original_datetime
+
+    callback_message.answer.assert_awaited_once()
+    assert callback_message.answer.await_args.args == (
+        "Заметные записи пищи: 18.05.2026-25.05.2026\n"
+        "Метрика: калории\n"
+        "Доступно: [калории], белки, жиры, углеводы, клетчатка\n"
+        "\n"
+        "- 24.05 · роллы · 950.0 ккал\n"
+        "- 22.05 · бургер · 800.0 ккал",
+    )
+    callback.answer.assert_awaited_once_with()
+
+
+async def test_report_noticeable_callback_cycles_metric() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "report_noticeable_cycle_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="report_noticeable_cycle_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        first_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 20, 8, 0, tzinfo=timezone.utc),
+        )
+        second_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add_all([first_entry, second_entry])
+        session.flush()
+        first_item = EntryItem(entry_id=first_entry.id, position=0, name="салат")
+        second_item = EntryItem(entry_id=second_entry.id, position=0, name="стейк")
+        session.add_all([first_item, second_item])
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=1, value=200.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=2, value=12.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=3, value=8.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=4, value=10.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=5, value=3.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=1, value=700.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=2, value=55.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=3, value=25.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=4, value=15.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=5, value=2.0, confidence="medium"),
+            ]
+        )
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="report_noticeable_cycle_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    original_datetime = handle_period_report_callback.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+
+    handle_period_report_callback.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_period_report_callback(
+            callback,
+            PeriodReportCallback(action="cycle_noticeable_metric", period_days=8, metric_code="protein"),
+            session_factory,
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_period_report_callback.__globals__["datetime"] = original_datetime
+
+    callback.message.edit_text.assert_awaited_once()
+    assert callback.message.edit_text.await_args.args == (
+        "Заметные записи пищи: 18.05.2026-25.05.2026\n"
+        "Метрика: белки\n"
+        "Доступно: калории, [белки], жиры, углеводы, клетчатка\n"
+        "\n"
+        "- 24.05 · стейк · 55.0 г\n"
+        "- 20.05 · салат · 12.0 г",
+    )
+    callback.answer.assert_awaited_once_with("Метрика переключена.")
+
+
+async def test_report_open_noticeable_shows_alert_when_no_data() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "report_noticeable_empty_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="report_noticeable_empty_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="report_noticeable_empty_user"),
+        message=SimpleNamespace(answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    original_datetime = handle_period_report_callback.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+
+    handle_period_report_callback.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_period_report_callback(
+            callback,
+            PeriodReportCallback(action="open_noticeable", period_days=8),
+            session_factory,
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_period_report_callback.__globals__["datetime"] = original_datetime
+
+    callback.answer.assert_awaited_once_with("За этот период нет данных для заметных записей.", show_alert=True)
+
+
 async def test_today_returns_empty_enabled_metrics_message_when_calories_hidden() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "today_hidden_user")
@@ -2120,7 +2750,9 @@ async def test_settings_returns_current_summary_preferences() -> None:
         "- вода: включено\n"
         "- дельта записи: включено\n"
         "- отображение: текст\n"
-        "- начало дня: 04:00",
+        "- начало дня: 04:00\n"
+        "- допуск к цели: 10%\n"
+        "- порог заметных записей: 80%",
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Тренировки: off"
@@ -2133,6 +2765,8 @@ async def test_settings_returns_current_summary_preferences() -> None:
     assert reply_markup.inline_keyboard[7][0].text == "Дельта записи: on"
     assert reply_markup.inline_keyboard[8][0].text == "Отображение: текст"
     assert reply_markup.inline_keyboard[9][0].text == "Начало дня: 04:00"
+    assert reply_markup.inline_keyboard[10][0].text == "Допуск к цели: 10%"
+    assert reply_markup.inline_keyboard[11][0].text == "Порог заметных записей: 80%"
 
 
 async def test_toggle_summary_metric_updates_preference_and_message() -> None:
@@ -2186,7 +2820,9 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
         "- вода: включено\n"
         "- дельта записи: включено\n"
         "- отображение: текст\n"
-        "- начало дня: 04:00",
+        "- начало дня: 04:00\n"
+        "- допуск к цели: 10%\n"
+        "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[1][0].text == "Калории: on"
@@ -2244,7 +2880,9 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
         "- вода: включено\n"
         "- дельта записи: включено\n"
         "- отображение: текст\n"
-        "- начало дня: 06:00",
+        "- начало дня: 06:00\n"
+        "- допуск к цели: 10%\n"
+        "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[9][0].text == "Начало дня: 06:00"
@@ -2301,7 +2939,9 @@ async def test_cycle_summary_display_mode_updates_preference_and_message() -> No
         "- вода: включено\n"
         "- дельта записи: включено\n"
         "- отображение: бары\n"
-        "- начало дня: 04:00",
+        "- начало дня: 04:00\n"
+        "- допуск к цели: 10%\n"
+        "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[8][0].text == "Отображение: бары"
@@ -2356,10 +2996,78 @@ async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -
         "- вода: включено\n"
         "- дельта записи: выключено\n"
         "- отображение: текст\n"
-        "- начало дня: 04:00",
+        "- начало дня: 04:00\n"
+        "- допуск к цели: 10%\n"
+        "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[7][0].text == "Дельта записи: off"
+    callback.answer.assert_awaited_once_with("Сохранил настройки.")
+
+
+async def test_cycle_report_goal_tolerance_updates_preference_and_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "settings_goal_tolerance_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="settings_goal_tolerance_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(UserSummaryPreference(user_id=user.id, report_goal_tolerance_percent=10))
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="settings_goal_tolerance_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_toggle_summary_metric(
+        callback,
+        SummarySettingsCallback(action="cycle_report_goal_tolerance_percent"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_preference = session.query(UserSummaryPreference).one()
+
+    assert saved_preference.report_goal_tolerance_percent == 15
+    assert "допуск к цели: 15%" in callback.message.edit_text.await_args.args[0]
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[10][0].text == "Допуск к цели: 15%"
+    callback.answer.assert_awaited_once_with("Сохранил настройки.")
+
+
+async def test_cycle_report_noticeable_percentile_updates_preference_and_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "settings_noticeable_percentile_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="settings_noticeable_percentile_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(UserSummaryPreference(user_id=user.id, report_noticeable_entry_percentile=80))
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="settings_noticeable_percentile_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_toggle_summary_metric(
+        callback,
+        SummarySettingsCallback(action="cycle_report_noticeable_entry_percentile"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_preference = session.query(UserSummaryPreference).one()
+
+    assert saved_preference.report_noticeable_entry_percentile == 85
+    assert "порог заметных записей: 85%" in callback.message.edit_text.await_args.args[0]
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[11][0].text == "Порог заметных записей: 85%"
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -2399,7 +3107,9 @@ async def test_toggle_workout_logging_updates_user_and_message() -> None:
         "- вода: включено\n"
         "- дельта записи: включено\n"
         "- отображение: текст\n"
-        "- начало дня: 04:00",
+        "- начало дня: 04:00\n"
+        "- допуск к цели: 10%\n"
+        "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Тренировки: on"
