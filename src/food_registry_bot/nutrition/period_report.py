@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
@@ -24,6 +25,26 @@ class PeriodReport(BaseModel):
     workout_entry_count: int = Field(ge=0)
     incomplete_food_day_count: int = Field(ge=0)
     incomplete_water_day_count: int = Field(ge=0)
+
+
+class PeriodMetricDynamicsRow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary_date_from: date
+    summary_date_to: date
+    data_day_count: int = Field(ge=0)
+    average_value: Optional[float] = None
+
+
+class PeriodMetricDynamics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary_date_from: date
+    summary_date_to: date
+    period_day_count: int = Field(gt=0)
+    metric_code: str = Field(min_length=1)
+    subperiod_day_count: int = Field(gt=0)
+    rows: list[PeriodMetricDynamicsRow] = Field(min_length=1)
 
 
 class PeriodReportUseCase:
@@ -141,4 +162,78 @@ class PeriodReportUseCase:
             workout_entry_count=workout_entry_count,
             incomplete_food_day_count=incomplete_food_day_count,
             incomplete_water_day_count=incomplete_water_day_count,
+        )
+
+    def build_metric_dynamics(
+        self,
+        *,
+        user_id: int,
+        timezone_name: str,
+        summary_date_to: date,
+        period_day_count: int,
+        metric_code: str,
+        nutrition_day_start_hour: int = 4,
+        subperiod_day_count: int = 4,
+    ) -> PeriodMetricDynamics:
+        if period_day_count <= 0:
+            raise ValueError("period_day_count must be positive")
+        if subperiod_day_count <= 0:
+            raise ValueError("subperiod_day_count must be positive")
+        if period_day_count % subperiod_day_count != 0:
+            raise ValueError("period_day_count must be divisible by subperiod_day_count")
+
+        summary_date_from = summary_date_to - timedelta(days=period_day_count - 1)
+        rows: list[PeriodMetricDynamicsRow] = []
+
+        for subperiod_start_offset in range(0, period_day_count, subperiod_day_count):
+            subperiod_date_from = summary_date_from + timedelta(days=subperiod_start_offset)
+            subperiod_date_to = subperiod_date_from + timedelta(days=subperiod_day_count - 1)
+            total_value = 0.0
+            data_day_count = 0
+
+            for day_offset in range(subperiod_day_count):
+                summary_date = subperiod_date_from + timedelta(days=day_offset)
+                if metric_code == "water":
+                    water_summary = self._water_summary_use_case.run(
+                        user_id=user_id,
+                        timezone_name=timezone_name,
+                        summary_date=summary_date,
+                        nutrition_day_start_hour=nutrition_day_start_hour,
+                    )
+                    if water_summary.included_entry_count == 0 and water_summary.excluded_entry_count == 0:
+                        continue
+                    total_value += float(water_summary.total_ml)
+                    data_day_count += 1
+                    continue
+
+                nutrition_summary = self._nutrition_summary_use_case.run(
+                    user_id=user_id,
+                    timezone_name=timezone_name,
+                    summary_date=summary_date,
+                    nutrition_day_start_hour=nutrition_day_start_hour,
+                )
+                if nutrition_summary.included_entry_count == 0 and nutrition_summary.excluded_entry_count == 0:
+                    continue
+                total_value += float(getattr(nutrition_summary.totals, metric_code))
+                data_day_count += 1
+
+            average_value = None
+            if data_day_count > 0:
+                average_value = total_value / data_day_count
+            rows.append(
+                PeriodMetricDynamicsRow(
+                    summary_date_from=subperiod_date_from,
+                    summary_date_to=subperiod_date_to,
+                    data_day_count=data_day_count,
+                    average_value=average_value,
+                )
+            )
+
+        return PeriodMetricDynamics(
+            summary_date_from=summary_date_from,
+            summary_date_to=summary_date_to,
+            period_day_count=period_day_count,
+            metric_code=metric_code,
+            subperiod_day_count=subperiod_day_count,
+            rows=rows,
         )

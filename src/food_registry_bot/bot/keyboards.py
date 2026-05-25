@@ -293,6 +293,12 @@ def build_period_report_keyboard(*, period_days: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="Динамика",
+                    callback_data=PeriodReportCallback(action="open_dynamics", period_days=period_days).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="Закрыть",
                     callback_data=PeriodReportCallback(action="close", period_days=period_days).pack(),
                 )
@@ -313,6 +319,33 @@ def _format_period_days(period_days: int) -> str:
     if period_days == 32:
         return "32 дня"
     return f"{period_days} дней"
+
+
+def build_period_report_dynamics_keyboard(*, period_days: int, metric_code: str, next_metric_code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Следующая метрика",
+                    callback_data=PeriodReportCallback(
+                        action="cycle_dynamics_metric",
+                        period_days=period_days,
+                        metric_code=next_metric_code,
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Закрыть",
+                    callback_data=PeriodReportCallback(
+                        action="close",
+                        period_days=period_days,
+                        metric_code=metric_code,
+                    ).pack(),
+                )
+            ],
+        ]
+    )
 
 
 def _build_data_exchange_primary_button(exchange_file: DataExchangeFile) -> InlineKeyboardButton | None:

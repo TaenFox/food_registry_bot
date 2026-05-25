@@ -23,6 +23,7 @@ from food_registry_bot.bot.keyboards import (
     build_admin_delete_entries_confirmation_keyboard,
     build_data_exchange_files_keyboard,
     build_main_keyboard,
+    build_period_report_dynamics_keyboard,
     build_period_report_keyboard,
     build_recent_entries_delete_keyboard,
     build_recent_entry_confirmation_keyboard,
@@ -88,6 +89,7 @@ from food_registry_bot.nutrition import (
     DailyNutritionSummary,
     DailyNutritionSummaryUseCase,
     FailedNutritionEstimation,
+    PeriodMetricDynamics,
     PeriodReportUseCase,
     NutritionBackfillCompleted,
     NutritionEstimationService,
@@ -146,6 +148,7 @@ EXCHANGE_DIRECTION_LABELS = {
 }
 PERIOD_REPORT_PERIOD_SEQUENCE = (8, 16, 32)
 DEFAULT_PERIOD_REPORT_DAYS = PERIOD_REPORT_PERIOD_SEQUENCE[0]
+PERIOD_REPORT_SUBPERIOD_DAYS = 4
 
 
 class FoodWriteFlowError(RuntimeError):
@@ -1209,6 +1212,68 @@ def resolve_next_period_days(period_days: int) -> int:
     return PERIOD_REPORT_PERIOD_SEQUENCE[(current_index + 1) % len(PERIOD_REPORT_PERIOD_SEQUENCE)]
 
 
+def resolve_available_period_report_metric_codes(
+    *,
+    session: Session,
+    user_id: int,
+    timezone_name: str,
+    summary_date_to: date,
+    period_days: int,
+    summary_preference,
+) -> tuple[str, ...]:
+    enabled_metric_codes = get_enabled_summary_metric_codes(summary_preference)
+    report_use_case = PeriodReportUseCase(session)
+    available_metric_codes: list[str] = []
+    for metric_code in enabled_metric_codes:
+        dynamics = report_use_case.build_metric_dynamics(
+            user_id=user_id,
+            timezone_name=timezone_name,
+            summary_date_to=summary_date_to,
+            period_day_count=period_days,
+            metric_code=metric_code,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+            subperiod_day_count=PERIOD_REPORT_SUBPERIOD_DAYS,
+        )
+        if any(row.data_day_count > 0 for row in dynamics.rows):
+            available_metric_codes.append(metric_code)
+    return tuple(available_metric_codes)
+
+
+def resolve_next_metric_code(metric_codes: tuple[str, ...], current_metric_code: str) -> str:
+    if not metric_codes:
+        raise ValueError("metric_codes must not be empty")
+    try:
+        current_index = metric_codes.index(current_metric_code)
+    except ValueError:
+        return metric_codes[0]
+    return metric_codes[(current_index + 1) % len(metric_codes)]
+
+
+def build_period_report_dynamics_response(
+    dynamics: PeriodMetricDynamics,
+    *,
+    available_metric_codes: tuple[str, ...],
+) -> str:
+    unit_by_metric_code = {metric_code: unit for metric_code, _short_label, unit in SUMMARY_METRIC_LINES}
+    metric_labels = [f"[{GOAL_METRIC_LABELS[metric_code]}]" if metric_code == dynamics.metric_code else GOAL_METRIC_LABELS[metric_code] for metric_code in available_metric_codes]
+    lines = [
+        f"Динамика: {dynamics.summary_date_from.strftime('%d.%m.%Y')}-{dynamics.summary_date_to.strftime('%d.%m.%Y')}",
+        f"Метрика: {GOAL_METRIC_LABELS[dynamics.metric_code]}",
+        f"Доступно: {', '.join(metric_labels)}",
+        "",
+    ]
+    unit = unit_by_metric_code[dynamics.metric_code]
+    for row in dynamics.rows:
+        period_label = f"{row.summary_date_from.strftime('%d.%m')}-{row.summary_date_to.strftime('%d.%m')}"
+        if row.data_day_count == 0 or row.average_value is None:
+            lines.append(f"{period_label}: нет данных")
+            continue
+        lines.append(
+            f"{period_label}: {round(row.average_value, 1)} {unit} ({row.data_day_count}/{dynamics.subperiod_day_count} дней)"
+        )
+    return "\n".join(lines)
+
+
 def payload_contains_credit_eligible_workout_entries(payload) -> bool:
     for entry in payload.entries:
         if entry.type is not EntryType.WORKOUT:
@@ -2074,7 +2139,7 @@ async def handle_period_report_callback(
     if telegram_user is None:
         await callback.answer("Пользователь не найден.", show_alert=True)
         return
-    if callback_data.action not in {"cycle_period", "close"}:
+    if callback_data.action not in {"cycle_period", "open_dynamics", "cycle_dynamics_metric", "close"}:
         await callback.answer("Неизвестное действие.", show_alert=True)
         return
     if callback.message is None:
@@ -2103,12 +2168,61 @@ async def handle_period_report_callback(
             )
         preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user.id)
 
-        next_period_days = resolve_next_period_days(callback_data.period_days)
         summary_date_to = resolve_local_summary_date(
             reference_at=datetime.now(timezone.utc),
             timezone_name=user.timezone,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
         )
+        if callback_data.action in {"open_dynamics", "cycle_dynamics_metric"}:
+            available_metric_codes = resolve_available_period_report_metric_codes(
+                session=session,
+                user_id=user.id,
+                timezone_name=user.timezone,
+                summary_date_to=summary_date_to,
+                period_days=callback_data.period_days,
+                summary_preference=preference,
+            )
+            if not available_metric_codes:
+                await callback.answer("За этот период нет данных для динамики.", show_alert=True)
+                return
+            metric_code = callback_data.metric_code or available_metric_codes[0]
+            if metric_code not in available_metric_codes:
+                metric_code = available_metric_codes[0]
+            dynamics = PeriodReportUseCase(session).build_metric_dynamics(
+                user_id=user.id,
+                timezone_name=user.timezone,
+                summary_date_to=summary_date_to,
+                period_day_count=callback_data.period_days,
+                metric_code=metric_code,
+                nutrition_day_start_hour=preference.nutrition_day_start_hour,
+                subperiod_day_count=PERIOD_REPORT_SUBPERIOD_DAYS,
+            )
+            next_metric_code = resolve_next_metric_code(available_metric_codes, metric_code)
+            rendered_dynamics = build_period_report_dynamics_response(
+                dynamics,
+                available_metric_codes=available_metric_codes,
+            )
+            reply_markup = build_period_report_dynamics_keyboard(
+                period_days=callback_data.period_days,
+                metric_code=metric_code,
+                next_metric_code=next_metric_code,
+            )
+            if callback_data.action == "open_dynamics":
+                await callback.message.answer(
+                    rendered_dynamics,
+                    reply_markup=reply_markup,
+                )
+                await callback.answer()
+                return
+
+            await callback.message.edit_text(
+                rendered_dynamics,
+                reply_markup=reply_markup,
+            )
+            await callback.answer("Метрика переключена.")
+            return
+
+        next_period_days = resolve_next_period_days(callback_data.period_days)
         rendered_report = build_period_report(
             session=session,
             user_id=user.id,

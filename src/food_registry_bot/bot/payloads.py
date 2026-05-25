@@ -29,6 +29,7 @@ class DataExchangeFileCallback(CallbackData, prefix="data_exchange"):
 class PeriodReportCallback(CallbackData, prefix="period_report"):
     action: str
     period_days: int = 8
+    metric_code: str = ""
 
 
 class AdminDeleteEntriesCallback(CallbackData, prefix="admin_delete_entries"):
