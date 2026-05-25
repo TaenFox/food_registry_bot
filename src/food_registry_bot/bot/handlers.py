@@ -105,7 +105,9 @@ default_nutrition_service = StaticNutritionEstimationService(raw_payload="")
 default_conversation_service = DisabledConversationService()
 default_message_routing_service = RuleBasedMessageRoutingService()
 NUTRITION_COACH_DISPLAY_NAME = "Нутрициолог"
-RECENT_ENTRIES_PAGE_SIZE = 5
+RECENT_ENTRIES_DEFAULT_COUNT = 5
+RECENT_ENTRIES_MAX_COUNT = 60
+RECENT_ENTRY_LIST_TITLE_MAX_LENGTH = 48
 SUMMARY_METRIC_LINES = (
     ("calories", "К", "ккал"),
     ("protein", "Б", "г"),
@@ -705,7 +707,8 @@ def build_recent_entry_button_label(entry, timezone_name: str) -> str:
 
 
 def build_recent_entry_display_line(*, index: int, entry, timezone_name: str) -> str:
-    return f"{index}. {format_entry_timestamp(entry, timezone_name)} — {build_recent_entry_title(entry)}"
+    title = truncate_button_label(build_recent_entry_title(entry), max_length=RECENT_ENTRY_LIST_TITLE_MAX_LENGTH)
+    return f"{index}. {format_entry_timestamp(entry, timezone_name)} — {title}"
 
 
 def build_recent_entries_response(
@@ -713,13 +716,14 @@ def build_recent_entries_response(
     *,
     timezone_name: str,
     page: int,
+    count: int,
     selection_mode: bool = False,
 ) -> str:
     if not entries:
         return "Пока записей нет. Отправь еду текстом, фото блюда или нажми кнопку воды."
 
-    lines = [f"Последние записи (страница {page + 1}):"]
-    for index, entry in enumerate(entries, start=page * RECENT_ENTRIES_PAGE_SIZE + 1):
+    lines = [f"Последние записи (страница {page + 1}, по {count}):"]
+    for index, entry in enumerate(entries, start=page * count + 1):
         lines.append(build_recent_entry_display_line(index=index, entry=entry, timezone_name=timezone_name))
     if selection_mode:
         lines.extend(["", "Выбери запись, которую нужно удалить."])
@@ -1107,7 +1111,7 @@ def load_recent_entries_page(
     entry_repository: EntryRepository,
     user_id: int,
     page: int,
-    page_size: int = RECENT_ENTRIES_PAGE_SIZE,
+    page_size: int = RECENT_ENTRIES_DEFAULT_COUNT,
 ) -> tuple[int, list, bool, bool]:
     page = max(page, 0)
     while True:
@@ -1120,6 +1124,13 @@ def load_recent_entries_page(
             page_entries = entries[:page_size]
             return page, page_entries, page > 0, len(entries) > page_size
         page -= 1
+
+
+def resolve_recent_count(command: CommandObject | None) -> int | None:
+    parsed_value = parse_positive_int_arg(command)
+    if parsed_value is None:
+        return None
+    return min(parsed_value, RECENT_ENTRIES_MAX_COUNT)
 
 
 def build_goal_response(
@@ -1521,11 +1532,28 @@ async def handle_health(
 @router.message(Command("recent"))
 async def handle_recent(
     message: Message,
+    command: CommandObject,
     session_factory: sessionmaker[Session],
     admin_user_ids: tuple[int, ...] = (),
 ) -> None:
     if not await require_user_access(message, session_factory, admin_user_ids):
         return
+
+    raw_args = command.args.strip() if command.args is not None else ""
+    if raw_args and parse_positive_int_arg(command) is None:
+        await message.answer(
+            f"Использование: <code>/recent [COUNT]</code>, где COUNT от 1 до {RECENT_ENTRIES_MAX_COUNT}."
+        )
+        return
+
+    requested_count = parse_positive_int_arg(command)
+    if requested_count is not None and requested_count > RECENT_ENTRIES_MAX_COUNT:
+        await message.answer(
+            f"Для <code>/recent</code> можно запросить от 1 до {RECENT_ENTRIES_MAX_COUNT} записей."
+        )
+        return
+
+    recent_count = resolve_recent_count(command) or RECENT_ENTRIES_DEFAULT_COUNT
 
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
@@ -1536,11 +1564,13 @@ async def handle_recent(
             entry_repository=EntryRepository(session),
             user_id=user_id,
             page=0,
+            page_size=recent_count,
         )
 
     reply_markup = (
         build_recent_entries_delete_keyboard(
             page=page,
+            count=recent_count,
             has_previous_page=has_previous_page,
             has_next_page=has_next_page,
         )
@@ -1548,7 +1578,7 @@ async def handle_recent(
         else build_main_keyboard()
     )
     await message.answer(
-        build_recent_entries_response(entries, timezone_name=user.timezone, page=page),
+        build_recent_entries_response(entries, timezone_name=user.timezone, page=page, count=recent_count),
         reply_markup=reply_markup,
     )
 
@@ -1587,14 +1617,21 @@ async def handle_recent_delete_callback(
             entry_repository=entry_repository,
             user_id=user.id,
             page=callback_data.page,
+            page_size=callback_data.count,
         )
 
         if callback_data.action == "list":
             await callback.message.edit_text(
-                build_recent_entries_response(recent_entries, timezone_name=user.timezone, page=page),
+                build_recent_entries_response(
+                    recent_entries,
+                    timezone_name=user.timezone,
+                    page=page,
+                    count=callback_data.count,
+                ),
                 reply_markup=(
                     build_recent_entries_delete_keyboard(
                         page=page,
+                        count=callback_data.count,
                         has_previous_page=has_previous_page,
                         has_next_page=has_next_page,
                     )
@@ -1611,6 +1648,7 @@ async def handle_recent_delete_callback(
                     recent_entries,
                     timezone_name=user.timezone,
                     page=page,
+                    count=callback_data.count,
                     selection_mode=True,
                 ),
                 reply_markup=(
@@ -1620,6 +1658,7 @@ async def handle_recent_delete_callback(
                             for entry in recent_entries
                         ],
                         page=page,
+                        count=callback_data.count,
                         has_previous_page=has_previous_page,
                         has_next_page=has_next_page,
                     )
@@ -1642,7 +1681,11 @@ async def handle_recent_delete_callback(
         if callback_data.action == "select":
             await callback.message.edit_text(
                 build_recent_entry_delete_confirmation(entry=selected_entry, timezone_name=user.timezone),
-                reply_markup=build_recent_entry_confirmation_keyboard(entry_id=selected_entry.id, page=page),
+                reply_markup=build_recent_entry_confirmation_keyboard(
+                    entry_id=selected_entry.id,
+                    page=page,
+                    count=callback_data.count,
+                ),
             )
             await callback.answer()
             return
@@ -1656,13 +1699,20 @@ async def handle_recent_delete_callback(
             entry_repository=entry_repository,
             user_id=user.id,
             page=page,
+            page_size=callback_data.count,
         )
 
     await callback.message.edit_text(
-        build_recent_entries_response(updated_recent_entries, timezone_name=user.timezone, page=page),
+        build_recent_entries_response(
+            updated_recent_entries,
+            timezone_name=user.timezone,
+            page=page,
+            count=callback_data.count,
+        ),
         reply_markup=(
             build_recent_entries_delete_keyboard(
                 page=page,
+                count=callback_data.count,
                 has_previous_page=has_previous_page,
                 has_next_page=has_next_page,
             )

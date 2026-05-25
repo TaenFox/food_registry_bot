@@ -109,12 +109,14 @@ def build_summary_settings_keyboard(
 def build_recent_entries_delete_keyboard(
     *,
     page: int,
+    count: int,
     has_previous_page: bool,
     has_next_page: bool,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     navigation_row = _build_recent_entries_navigation_row(
         page=page,
+        count=count,
         action="list",
         has_previous_page=has_previous_page,
         has_next_page=has_next_page,
@@ -125,7 +127,7 @@ def build_recent_entries_delete_keyboard(
         [
             InlineKeyboardButton(
                 text="Выбрать для удаления",
-                callback_data=RecentEntryDeleteCallback(action="open", page=page).pack(),
+                callback_data=RecentEntryDeleteCallback(action="open", page=page, count=count).pack(),
             )
         ]
     )
@@ -136,6 +138,7 @@ def build_recent_entry_selection_keyboard(
     *,
     entry_buttons: list[tuple[str, int]],
     page: int,
+    count: int,
     has_previous_page: bool,
     has_next_page: bool,
 ) -> InlineKeyboardMarkup:
@@ -143,13 +146,19 @@ def build_recent_entry_selection_keyboard(
         [
             InlineKeyboardButton(
                 text=button_text,
-                callback_data=RecentEntryDeleteCallback(action="select", entry_id=entry_id, page=page).pack(),
+                callback_data=RecentEntryDeleteCallback(
+                    action="select",
+                    entry_id=entry_id,
+                    page=page,
+                    count=count,
+                ).pack(),
             )
         ]
         for button_text, entry_id in entry_buttons
     ]
     navigation_row = _build_recent_entries_navigation_row(
         page=page,
+        count=count,
         action="open",
         has_previous_page=has_previous_page,
         has_next_page=has_next_page,
@@ -160,24 +169,29 @@ def build_recent_entry_selection_keyboard(
         [
             InlineKeyboardButton(
                 text="Отмена",
-                callback_data=RecentEntryDeleteCallback(action="list", page=page).pack(),
+                callback_data=RecentEntryDeleteCallback(action="list", page=page, count=count).pack(),
             )
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_recent_entry_confirmation_keyboard(*, entry_id: int, page: int) -> InlineKeyboardMarkup:
+def build_recent_entry_confirmation_keyboard(*, entry_id: int, page: int, count: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="Подтвердить",
-                    callback_data=RecentEntryDeleteCallback(action="confirm", entry_id=entry_id, page=page).pack(),
+                    callback_data=RecentEntryDeleteCallback(
+                        action="confirm",
+                        entry_id=entry_id,
+                        page=page,
+                        count=count,
+                    ).pack(),
                 ),
                 InlineKeyboardButton(
                     text="Отмена",
-                    callback_data=RecentEntryDeleteCallback(action="open", page=page).pack(),
+                    callback_data=RecentEntryDeleteCallback(action="open", page=page, count=count).pack(),
                 ),
             ]
         ]
@@ -187,6 +201,7 @@ def build_recent_entry_confirmation_keyboard(*, entry_id: int, page: int) -> Inl
 def _build_recent_entries_navigation_row(
     *,
     page: int,
+    count: int,
     action: str,
     has_previous_page: bool,
     has_next_page: bool,
@@ -196,14 +211,14 @@ def _build_recent_entries_navigation_row(
         row.append(
             InlineKeyboardButton(
                 text="← Назад",
-                callback_data=RecentEntryDeleteCallback(action=action, page=page - 1).pack(),
+                callback_data=RecentEntryDeleteCallback(action=action, page=page - 1, count=count).pack(),
             )
         )
     if has_next_page:
         row.append(
             InlineKeyboardButton(
                 text="Вперёд →",
-                callback_data=RecentEntryDeleteCallback(action=action, page=page + 1).pack(),
+                callback_data=RecentEntryDeleteCallback(action=action, page=page + 1, count=count).pack(),
             )
         )
     return row
