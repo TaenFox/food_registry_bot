@@ -28,21 +28,37 @@ def get_secrets_env_file() -> Path:
     return SECRETS_ENV_FILE
 
 
-def detect_git_app_version(project_root: Path = PROJECT_ROOT) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(project_root), "describe", "--tags", "--always", "--dirty"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return None
+def resolve_default_data_exchange_dir() -> Path:
+    return Path.cwd() / "var" / "data_exchange"
 
-    version = result.stdout.strip()
-    if not version:
-        return None
-    return version
+
+def get_data_exchange_dir() -> Path:
+    return get_settings().data_exchange_dir
+
+
+def detect_git_app_version(project_root: Path = PROJECT_ROOT) -> str | None:
+    commands = (
+        ["git", "-C", str(project_root), "describe", "--exact-match", "--tags", "HEAD"],
+        ["git", "-C", str(project_root), "branch", "--show-current"],
+        ["git", "-C", str(project_root), "describe", "--tags", "--always", "--dirty"],
+    )
+
+    for command in commands:
+        try:
+            result = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            continue
+
+        version = result.stdout.strip()
+        if version:
+            return version
+
+    return None
 
 
 def resolve_app_version() -> str:
@@ -85,6 +101,10 @@ class Settings(BaseSettings):
     nutrition_model: str = Field(default="gpt-5-mini", alias="NUTRITION_MODEL")
     conversation_model: str = Field(default="gpt-5-mini", alias="CONVERSATION_MODEL")
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
+    data_exchange_dir: Path = Field(
+        default_factory=resolve_default_data_exchange_dir,
+        alias="DATA_EXCHANGE_DIR",
+    )
 
     postgres_host: str = Field(default="localhost", alias="POSTGRES_HOST")
     postgres_port: int = Field(default=5432, alias="POSTGRES_PORT")

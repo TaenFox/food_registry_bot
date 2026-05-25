@@ -1,6 +1,14 @@
+from __future__ import annotations
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
-from food_registry_bot.bot.payloads import RecentEntryDeleteCallback, SummarySettingsCallback
+from food_registry_bot.bot.payloads import (
+    AdminDeleteEntriesCallback,
+    DataExchangeFileCallback,
+    RecentEntryDeleteCallback,
+    SummarySettingsCallback,
+)
+from food_registry_bot.db.models import DataExchangeDirection, DataExchangeFile, DataExchangeStatus
 
 WATER_250_ML_BUTTON_TEXT = "Вода 250 мл"
 SUMMARY_DISPLAY_MODE_BUTTON_LABELS = {
@@ -150,3 +158,72 @@ def build_recent_entry_confirmation_keyboard(*, entry_id: int) -> InlineKeyboard
             ]
         ]
     )
+
+
+def build_admin_delete_entries_confirmation_keyboard(*, telegram_user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Подтвердить удаление",
+                    callback_data=AdminDeleteEntriesCallback(
+                        action="confirm",
+                        telegram_user_id=telegram_user_id,
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="Отмена",
+                    callback_data=AdminDeleteEntriesCallback(
+                        action="cancel",
+                        telegram_user_id=telegram_user_id,
+                    ).pack(),
+                ),
+            ]
+        ]
+    )
+
+
+def build_data_exchange_files_keyboard(*, files: list[DataExchangeFile]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text="Создать экспорт",
+                callback_data=DataExchangeFileCallback(action="create_export").pack(),
+            )
+        ]
+    ]
+
+    for exchange_file in files:
+        primary_button = _build_data_exchange_primary_button(exchange_file)
+        row = [primary_button] if primary_button is not None else []
+        row.append(
+            InlineKeyboardButton(
+                text=f"Удалить #{exchange_file.id}",
+                callback_data=DataExchangeFileCallback(action="delete", file_id=exchange_file.id).pack(),
+            )
+        )
+        rows.append(row)
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Обновить",
+                callback_data=DataExchangeFileCallback(action="refresh").pack(),
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _build_data_exchange_primary_button(exchange_file: DataExchangeFile) -> InlineKeyboardButton | None:
+    if exchange_file.direction is DataExchangeDirection.IMPORT and exchange_file.status is not DataExchangeStatus.PROCESSED:
+        return InlineKeyboardButton(
+            text=f"Импортировать #{exchange_file.id}",
+            callback_data=DataExchangeFileCallback(action="import", file_id=exchange_file.id).pack(),
+        )
+    if exchange_file.direction is DataExchangeDirection.EXPORT:
+        return InlineKeyboardButton(
+            text=f"Скачать #{exchange_file.id}",
+            callback_data=DataExchangeFileCallback(action="download", file_id=exchange_file.id).pack(),
+        )
+    return None

@@ -13,6 +13,9 @@ from food_registry_bot.db.models import (
     EntryItemMetric,
     EntryType,
     MealType,
+    DataExchangeDirection,
+    DataExchangeFile,
+    DataExchangeStatus,
     SupportedMetric,
     DailyGoalSnapshot,
     ConversationMessage,
@@ -467,6 +470,21 @@ class EntryRepository:
         self._session.delete(entry)
         self._session.flush()
 
+    def delete_all_for_user(self, *, user_id: int) -> int:
+        entries = list(
+            self._session.scalars(
+                select(Entry)
+                .where(Entry.user_id == user_id)
+                .options(selectinload(Entry.items))
+                .order_by(Entry.id.asc())
+            )
+        )
+        deleted_count = len(entries)
+        for entry in entries:
+            self._session.delete(entry)
+        self._session.flush()
+        return deleted_count
+
     def list_food_for_user_between(
         self,
         *,
@@ -804,6 +822,121 @@ class EntryItemMetricRepository:
 
         self._session.flush()
         return saved_metrics
+
+
+class DataExchangeFileRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(
+        self,
+        *,
+        user_id: int,
+        direction: DataExchangeDirection,
+        contract_type: str,
+        original_filename: str,
+        storage_path: str,
+        sha256: str,
+        row_count: int = 0,
+        food_entry_count: int = 0,
+        water_entry_count: int = 0,
+        date_from: date | None = None,
+        date_to: date | None = None,
+        validation_message: str | None = None,
+        processing_message: str | None = None,
+        status: DataExchangeStatus = DataExchangeStatus.READY,
+        processed_at: datetime | None = None,
+    ) -> DataExchangeFile:
+        exchange_file = DataExchangeFile(
+            user_id=user_id,
+            direction=direction,
+            status=status,
+            contract_type=contract_type,
+            original_filename=original_filename,
+            storage_path=storage_path,
+            sha256=sha256,
+            row_count=row_count,
+            food_entry_count=food_entry_count,
+            water_entry_count=water_entry_count,
+            date_from=date_from,
+            date_to=date_to,
+            validation_message=validation_message,
+            processing_message=processing_message,
+            processed_at=processed_at,
+        )
+        self._session.add(exchange_file)
+        self._session.flush()
+        return exchange_file
+
+    def count_for_user_and_direction(self, *, user_id: int, direction: DataExchangeDirection) -> int:
+        statement = select(DataExchangeFile).where(
+            DataExchangeFile.user_id == user_id,
+            DataExchangeFile.direction == direction,
+        )
+        return len(list(self._session.scalars(statement)))
+
+    def get_by_sha256(
+        self,
+        *,
+        user_id: int,
+        direction: DataExchangeDirection,
+        sha256: str,
+    ) -> DataExchangeFile | None:
+        statement = select(DataExchangeFile).where(
+            DataExchangeFile.user_id == user_id,
+            DataExchangeFile.direction == direction,
+            DataExchangeFile.sha256 == sha256,
+        )
+        return self._session.scalar(statement)
+
+    def list_for_user(self, *, user_id: int) -> list[DataExchangeFile]:
+        statement = (
+            select(DataExchangeFile)
+            .where(DataExchangeFile.user_id == user_id)
+            .order_by(DataExchangeFile.created_at.desc(), DataExchangeFile.id.desc())
+        )
+        return list(self._session.scalars(statement))
+
+    def get_by_id_for_user(self, *, file_id: int, user_id: int) -> DataExchangeFile | None:
+        statement = select(DataExchangeFile).where(
+            DataExchangeFile.id == file_id,
+            DataExchangeFile.user_id == user_id,
+        )
+        return self._session.scalar(statement)
+
+    def mark_processed(
+        self,
+        *,
+        file_id: int,
+        processing_message: str | None,
+        processed_at: datetime,
+    ) -> DataExchangeFile:
+        exchange_file = self._session.get(DataExchangeFile, file_id)
+        if exchange_file is None:
+            raise ValueError(f"Data exchange file {file_id} was not found")
+        exchange_file.status = DataExchangeStatus.PROCESSED
+        exchange_file.processing_message = processing_message
+        exchange_file.processed_at = processed_at
+        self._session.flush()
+        return exchange_file
+
+    def mark_error(
+        self,
+        *,
+        file_id: int,
+        processing_message: str,
+    ) -> DataExchangeFile:
+        exchange_file = self._session.get(DataExchangeFile, file_id)
+        if exchange_file is None:
+            raise ValueError(f"Data exchange file {file_id} was not found")
+        exchange_file.status = DataExchangeStatus.ERROR
+        exchange_file.processing_message = processing_message
+        self._session.flush()
+        return exchange_file
+
+    def delete(self, exchange_file: DataExchangeFile) -> None:
+        self._session.delete(exchange_file)
+        self._session.flush()
 
 
 class NutritionEstimatePersistenceService:

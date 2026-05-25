@@ -33,6 +33,17 @@ class ConversationMessageRole(str, enum.Enum):
     ASSISTANT = "assistant"
 
 
+class DataExchangeDirection(str, enum.Enum):
+    IMPORT = "import"
+    EXPORT = "export"
+
+
+class DataExchangeStatus(str, enum.Enum):
+    READY = "ready"
+    PROCESSED = "processed"
+    ERROR = "error"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -67,6 +78,10 @@ class User(Base):
         cascade="all, delete-orphan",
     )
     conversation_sessions: Mapped[list["ConversationSession"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    data_exchange_files: Mapped[list["DataExchangeFile"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
     )
@@ -273,6 +288,46 @@ class EntryItemMetric(Base):
 
     entry_item: Mapped["EntryItem"] = relationship(back_populates="metrics")
     metric: Mapped["SupportedMetric"] = relationship(back_populates="entry_item_metrics")
+
+
+class DataExchangeFile(Base):
+    __tablename__ = "data_exchange_files"
+    __table_args__ = (
+        UniqueConstraint("user_id", "direction", "sha256", name="uq_data_exchange_files_user_direction_sha256"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    direction: Mapped[DataExchangeDirection] = mapped_column(
+        Enum(DataExchangeDirection, name="data_exchange_direction", values_callable=enum_values)
+    )
+    status: Mapped[DataExchangeStatus] = mapped_column(
+        Enum(DataExchangeStatus, name="data_exchange_status", values_callable=enum_values),
+        default=DataExchangeStatus.READY,
+    )
+    contract_type: Mapped[str] = mapped_column(String(64))
+    original_filename: Mapped[str] = mapped_column(String(255))
+    storage_path: Mapped[str] = mapped_column(String(512), unique=True)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    food_entry_count: Mapped[int] = mapped_column(Integer, default=0)
+    water_entry_count: Mapped[int] = mapped_column(Integer, default=0)
+    date_from: Mapped[Optional[date]]
+    date_to: Mapped[Optional[date]]
+    validation_message: Mapped[Optional[str]] = mapped_column(Text)
+    processing_message: Mapped[Optional[str]] = mapped_column(Text)
+    processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    user: Mapped["User"] = relationship(back_populates="data_exchange_files")
 
 
 class ConversationSession(Base):
