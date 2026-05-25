@@ -12,4 +12,7 @@
 
 ## Список проектов
 
-- [Nutrition Coach Project](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/projects/01-nutrition-coach-project.md:1)
+- [Проект Nutrition Coach](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/projects/01-nutrition-coach-project.md:1)
+- [Проект Workout Layer](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/projects/02-workout-project.md:1)
+- [Проект Импорт и экспорт](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/projects/03-import-export-project.md:1)
+- [Проект Аналитические отчёты за период](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/projects/04-period-reports-project.md:1)

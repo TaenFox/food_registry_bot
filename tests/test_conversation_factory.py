@@ -214,6 +214,58 @@ def test_openai_conversation_client_serializes_recent_turns_from_dataclass_objec
     assert updated_summary == "новый summary"
 
 
+def test_openai_conversation_client_serializes_workout_entries_from_factual_context() -> None:
+    captured_kwargs = {}
+
+    def create_stub(**kwargs):
+        captured_kwargs.update(kwargs)
+        return SimpleNamespace(
+            output_text='{"reply_text":"Учитываю тренировку дня.","updated_session_summary":"обсудили питание после нагрузки"}'
+        )
+
+    sdk_client = SimpleNamespace(responses=SimpleNamespace(create=create_stub))
+    client = OpenAIResponsesConversationClient(
+        api_key="test-key",
+        model="gpt-5-mini",
+        client=sdk_client,
+    )
+
+    reply_text, updated_summary = client.generate_reply(
+        user_message="что съесть на ужин?",
+        factual_context=NutritionCoachFactualContext(
+            summary_date="2026-05-20",
+            timezone="Europe/Moscow",
+            nutrition_day_start_hour=4,
+            day_totals={"calories": 1012.0, "protein": 52.0, "fat": 40.1, "carbs": 107.9, "fiber": 21.7, "water": 750.0},
+            goal_progress={},
+            workout_entries=[
+                {
+                    "entry_id": 10,
+                    "occurred_at": datetime(2026, 5, 20, 8, 0, tzinfo=timezone.utc),
+                    "source_text": "сегодня была пробежка 40 минут",
+                    "items": [
+                        {"name": "бег", "quantity": 40, "unit": "min", "rendered_value": "бег: 40 мин"}
+                    ],
+                }
+            ],
+            recent_entries=[],
+            nutrition_summary_is_complete=True,
+            excluded_food_entry_count=0,
+            water_summary_is_complete=True,
+            excluded_water_entry_count=0,
+        ),
+        session_summary="говорили про ужин",
+        recent_turns=[],
+    )
+
+    serialized_payload = captured_kwargs["input"][0]["content"][2]["text"]
+    assert '"workout_entries"' in serialized_payload
+    assert '"source_text": "сегодня была пробежка 40 минут"' in serialized_payload
+    assert '"rendered_value": "бег: 40 мин"' in serialized_payload
+    assert reply_text == "Учитываю тренировку дня."
+    assert updated_summary == "обсудили питание после нагрузки"
+
+
 def test_openai_conversation_client_serializes_input_images_for_multimodal_coaching() -> None:
     captured_kwargs = {}
 

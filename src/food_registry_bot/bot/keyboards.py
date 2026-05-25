@@ -1,12 +1,22 @@
+from __future__ import annotations
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
-from food_registry_bot.bot.payloads import RecentEntryDeleteCallback, SummarySettingsCallback
+from food_registry_bot.bot.payloads import (
+    AdminDeleteEntriesCallback,
+    DataExchangeFileCallback,
+    PeriodReportCallback,
+    RecentEntryDeleteCallback,
+    SummarySettingsCallback,
+)
+from food_registry_bot.db.models import DataExchangeDirection, DataExchangeFile, DataExchangeStatus
 
 WATER_250_ML_BUTTON_TEXT = "Вода 250 мл"
 SUMMARY_DISPLAY_MODE_BUTTON_LABELS = {
     "text": "текст",
     "bars": "бары",
 }
+PERIOD_REPORT_PERIOD_SEQUENCE = (8, 16, 32)
 
 
 def build_main_keyboard() -> ReplyKeyboardMarkup:
@@ -21,6 +31,7 @@ def build_main_keyboard() -> ReplyKeyboardMarkup:
 
 def build_summary_settings_keyboard(
     *,
+    workout_logging_enabled: bool,
     show_calories: bool,
     show_protein: bool,
     show_fat: bool,
@@ -30,9 +41,17 @@ def build_summary_settings_keyboard(
     show_post_entry_delta_suffix: bool,
     summary_display_mode: str,
     nutrition_day_start_hour: int,
+    report_goal_tolerance_percent: int,
+    report_noticeable_entry_percentile: int,
 ) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"Тренировки: {'on' if workout_logging_enabled else 'off'}",
+                    callback_data=SummarySettingsCallback(action="toggle_workout_logging").pack(),
+                )
+            ],
             [
                 InlineKeyboardButton(
                     text=f"Калории: {'on' if show_calories else 'off'}",
@@ -86,60 +105,305 @@ def build_summary_settings_keyboard(
                     text=f"Начало дня: {nutrition_day_start_hour:02d}:00",
                     callback_data=SummarySettingsCallback(action="cycle_nutrition_day_start_hour").pack(),
                 )
-            ]
-        ]
-    )
-
-
-def build_recent_entries_delete_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+            ],
             [
                 InlineKeyboardButton(
-                    text="Выбрать для удаления",
-                    callback_data=RecentEntryDeleteCallback(action="open").pack(),
+                    text=f"Допуск к цели: {report_goal_tolerance_percent}%",
+                    callback_data=SummarySettingsCallback(action="cycle_report_goal_tolerance_percent").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Порог заметных записей: {report_noticeable_entry_percentile}%",
+                    callback_data=SummarySettingsCallback(action="cycle_report_noticeable_entry_percentile").pack(),
                 )
             ]
         ]
     )
 
 
-def build_recent_entry_selection_keyboard(
+def build_recent_entries_delete_keyboard(
     *,
-    entry_buttons: list[tuple[str, int]],
+    page: int,
+    count: int,
+    has_previous_page: bool,
+    has_next_page: bool,
 ) -> InlineKeyboardMarkup:
-    rows = [
-        [
-            InlineKeyboardButton(
-                text=button_text,
-                callback_data=RecentEntryDeleteCallback(action="select", entry_id=entry_id).pack(),
-            )
-        ]
-        for button_text, entry_id in entry_buttons
-    ]
+    rows: list[list[InlineKeyboardButton]] = []
+    navigation_row = _build_recent_entries_navigation_row(
+        page=page,
+        count=count,
+        action="list",
+        has_previous_page=has_previous_page,
+        has_next_page=has_next_page,
+    )
+    if navigation_row:
+        rows.append(navigation_row)
     rows.append(
         [
             InlineKeyboardButton(
-                text="Отмена",
-                callback_data=RecentEntryDeleteCallback(action="close").pack(),
+                text="Выбрать для удаления",
+                callback_data=RecentEntryDeleteCallback(action="open", page=page, count=count).pack(),
             )
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_recent_entry_confirmation_keyboard(*, entry_id: int) -> InlineKeyboardMarkup:
+def build_recent_entry_selection_keyboard(
+    *,
+    entry_buttons: list[tuple[str, int]],
+    page: int,
+    count: int,
+    has_previous_page: bool,
+    has_next_page: bool,
+) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=button_text,
+                callback_data=RecentEntryDeleteCallback(
+                    action="select",
+                    entry_id=entry_id,
+                    page=page,
+                    count=count,
+                ).pack(),
+            )
+        ]
+        for button_text, entry_id in entry_buttons
+    ]
+    navigation_row = _build_recent_entries_navigation_row(
+        page=page,
+        count=count,
+        action="open",
+        has_previous_page=has_previous_page,
+        has_next_page=has_next_page,
+    )
+    if navigation_row:
+        rows.append(navigation_row)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Отмена",
+                callback_data=RecentEntryDeleteCallback(action="list", page=page, count=count).pack(),
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_recent_entry_confirmation_keyboard(*, entry_id: int, page: int, count: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="Подтвердить",
-                    callback_data=RecentEntryDeleteCallback(action="confirm", entry_id=entry_id).pack(),
+                    callback_data=RecentEntryDeleteCallback(
+                        action="confirm",
+                        entry_id=entry_id,
+                        page=page,
+                        count=count,
+                    ).pack(),
                 ),
                 InlineKeyboardButton(
                     text="Отмена",
-                    callback_data=RecentEntryDeleteCallback(action="open").pack(),
+                    callback_data=RecentEntryDeleteCallback(action="open", page=page, count=count).pack(),
                 ),
             ]
         ]
     )
+
+
+def _build_recent_entries_navigation_row(
+    *,
+    page: int,
+    count: int,
+    action: str,
+    has_previous_page: bool,
+    has_next_page: bool,
+) -> list[InlineKeyboardButton]:
+    row: list[InlineKeyboardButton] = []
+    if has_previous_page:
+        row.append(
+            InlineKeyboardButton(
+                text="← Назад",
+                callback_data=RecentEntryDeleteCallback(action=action, page=page - 1, count=count).pack(),
+            )
+        )
+    if has_next_page:
+        row.append(
+            InlineKeyboardButton(
+                text="Вперёд →",
+                callback_data=RecentEntryDeleteCallback(action=action, page=page + 1, count=count).pack(),
+            )
+        )
+    return row
+
+
+def build_admin_delete_entries_confirmation_keyboard(*, telegram_user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Подтвердить удаление",
+                    callback_data=AdminDeleteEntriesCallback(
+                        action="confirm",
+                        telegram_user_id=telegram_user_id,
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="Отмена",
+                    callback_data=AdminDeleteEntriesCallback(
+                        action="cancel",
+                        telegram_user_id=telegram_user_id,
+                    ).pack(),
+                ),
+            ]
+        ]
+    )
+
+
+def build_data_exchange_files_keyboard(*, files: list[DataExchangeFile]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text="Создать экспорт",
+                callback_data=DataExchangeFileCallback(action="create_export").pack(),
+            )
+        ]
+    ]
+
+    for exchange_file in files:
+        primary_button = _build_data_exchange_primary_button(exchange_file)
+        row = [primary_button] if primary_button is not None else []
+        row.append(
+            InlineKeyboardButton(
+                text=f"Удалить #{exchange_file.id}",
+                callback_data=DataExchangeFileCallback(action="delete", file_id=exchange_file.id).pack(),
+            )
+        )
+        rows.append(row)
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Обновить",
+                callback_data=DataExchangeFileCallback(action="refresh").pack(),
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_period_report_keyboard(*, period_days: int) -> InlineKeyboardMarkup:
+    next_period_days = _resolve_next_period_days(period_days)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"Следующий период: {_format_period_days(next_period_days)}",
+                    callback_data=PeriodReportCallback(action="cycle_period", period_days=period_days).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Динамика",
+                    callback_data=PeriodReportCallback(action="open_dynamics", period_days=period_days).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Заметные записи пищи",
+                    callback_data=PeriodReportCallback(action="open_noticeable", period_days=period_days).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Закрыть",
+                    callback_data=PeriodReportCallback(action="close", period_days=period_days).pack(),
+                )
+            ],
+        ]
+    )
+
+
+def _resolve_next_period_days(period_days: int) -> int:
+    try:
+        current_index = PERIOD_REPORT_PERIOD_SEQUENCE.index(period_days)
+    except ValueError:
+        return PERIOD_REPORT_PERIOD_SEQUENCE[0]
+    return PERIOD_REPORT_PERIOD_SEQUENCE[(current_index + 1) % len(PERIOD_REPORT_PERIOD_SEQUENCE)]
+
+
+def _format_period_days(period_days: int) -> str:
+    if period_days == 32:
+        return "32 дня"
+    return f"{period_days} дней"
+
+
+def build_period_report_dynamics_keyboard(*, period_days: int, metric_code: str, next_metric_code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Следующая метрика",
+                    callback_data=PeriodReportCallback(
+                        action="cycle_dynamics_metric",
+                        period_days=period_days,
+                        metric_code=next_metric_code,
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Закрыть",
+                    callback_data=PeriodReportCallback(
+                        action="close",
+                        period_days=period_days,
+                        metric_code=metric_code,
+                    ).pack(),
+                )
+            ],
+        ]
+    )
+
+
+def build_period_report_noticeable_keyboard(*, period_days: int, metric_code: str, next_metric_code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Следующая метрика",
+                    callback_data=PeriodReportCallback(
+                        action="cycle_noticeable_metric",
+                        period_days=period_days,
+                        metric_code=next_metric_code,
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Закрыть",
+                    callback_data=PeriodReportCallback(
+                        action="close",
+                        period_days=period_days,
+                        metric_code=metric_code,
+                    ).pack(),
+                )
+            ],
+        ]
+    )
+
+
+def _build_data_exchange_primary_button(exchange_file: DataExchangeFile) -> InlineKeyboardButton | None:
+    if exchange_file.direction is DataExchangeDirection.IMPORT and exchange_file.status is not DataExchangeStatus.PROCESSED:
+        return InlineKeyboardButton(
+            text=f"Импортировать #{exchange_file.id}",
+            callback_data=DataExchangeFileCallback(action="import", file_id=exchange_file.id).pack(),
+        )
+    if exchange_file.direction is DataExchangeDirection.EXPORT:
+        return InlineKeyboardButton(
+            text=f"Скачать #{exchange_file.id}",
+            callback_data=DataExchangeFileCallback(action="download", file_id=exchange_file.id).pack(),
+        )
+    return None

@@ -13,6 +13,9 @@ from food_registry_bot.db.models import (
     EntryItemMetric,
     EntryType,
     MealType,
+    DataExchangeDirection,
+    DataExchangeFile,
+    DataExchangeStatus,
     SupportedMetric,
     DailyGoalSnapshot,
     ConversationMessage,
@@ -28,6 +31,8 @@ if TYPE_CHECKING:
 
 SUPPORTED_NUTRITION_DAY_START_HOURS = (0, 2, 4, 6)
 SUPPORTED_SUMMARY_DISPLAY_MODES = ("text", "bars")
+SUPPORTED_REPORT_GOAL_TOLERANCE_PERCENTS = (5, 10, 15, 20)
+SUPPORTED_REPORT_NOTICEABLE_ENTRY_PERCENTILES = (70, 75, 80, 85, 90, 95)
 SUPPORTED_GOAL_METRIC_CODES = ("calories", "protein", "fat", "carbs", "fiber", "water")
 DEFAULT_DAILY_GOALS = {
     "calories": 1800,
@@ -84,11 +89,13 @@ class UserRepository:
         telegram_user_id: int,
         username: str | None,
         timezone: str = "Europe/Moscow",
+        workout_logging_enabled: bool = False,
     ) -> User:
         user = User(
             telegram_user_id=telegram_user_id,
             username=username,
             timezone=timezone,
+            workout_logging_enabled=workout_logging_enabled,
         )
         self._session.add(user)
         self._session.flush()
@@ -100,6 +107,7 @@ class UserRepository:
         telegram_user_id: int,
         username: str | None,
         timezone: str = "Europe/Moscow",
+        workout_logging_enabled: bool = False,
     ) -> tuple[User, bool]:
         user = self.get_by_telegram_user_id(telegram_user_id)
         if user is not None:
@@ -109,8 +117,18 @@ class UserRepository:
             telegram_user_id=telegram_user_id,
             username=username,
             timezone=timezone,
+            workout_logging_enabled=workout_logging_enabled,
         )
         return user, True
+
+    def toggle_workout_logging_enabled(self, *, user_id: int) -> User:
+        user = self._session.get(User, user_id)
+        if user is None:
+            raise ValueError(f"User {user_id} was not found")
+
+        user.workout_logging_enabled = not user.workout_logging_enabled
+        self._session.flush()
+        return user
 
 
 class UserAccessRepository:
@@ -201,6 +219,8 @@ class UserSummaryPreferenceRepository:
             show_post_entry_delta_suffix=True,
             summary_display_mode="text",
             nutrition_day_start_hour=4,
+            report_goal_tolerance_percent=10,
+            report_noticeable_entry_percentile=80,
         )
         self._session.add(preference)
         self._session.flush()
@@ -249,6 +269,22 @@ class UserSummaryPreferenceRepository:
     def toggle_post_entry_delta_suffix(self, *, user_id: int) -> UserSummaryPreference:
         preference, _created = self.get_or_create(user_id=user_id)
         preference.show_post_entry_delta_suffix = not preference.show_post_entry_delta_suffix
+        self._session.flush()
+        return preference
+
+    def cycle_report_goal_tolerance_percent(self, *, user_id: int) -> UserSummaryPreference:
+        preference, _created = self.get_or_create(user_id=user_id)
+        current_index = SUPPORTED_REPORT_GOAL_TOLERANCE_PERCENTS.index(preference.report_goal_tolerance_percent)
+        next_index = (current_index + 1) % len(SUPPORTED_REPORT_GOAL_TOLERANCE_PERCENTS)
+        preference.report_goal_tolerance_percent = SUPPORTED_REPORT_GOAL_TOLERANCE_PERCENTS[next_index]
+        self._session.flush()
+        return preference
+
+    def cycle_report_noticeable_entry_percentile(self, *, user_id: int) -> UserSummaryPreference:
+        preference, _created = self.get_or_create(user_id=user_id)
+        current_index = SUPPORTED_REPORT_NOTICEABLE_ENTRY_PERCENTILES.index(preference.report_noticeable_entry_percentile)
+        next_index = (current_index + 1) % len(SUPPORTED_REPORT_NOTICEABLE_ENTRY_PERCENTILES)
+        preference.report_noticeable_entry_percentile = SUPPORTED_REPORT_NOTICEABLE_ENTRY_PERCENTILES[next_index]
         self._session.flush()
         return preference
 
@@ -420,12 +456,13 @@ class EntryRepository:
         self._session.flush()
         return entry
 
-    def list_recent_for_user(self, *, user_id: int, limit: int = 5) -> list[Entry]:
+    def list_recent_for_user(self, *, user_id: int, limit: int = 5, offset: int = 0) -> list[Entry]:
         statement = (
             select(Entry)
             .where(Entry.user_id == user_id)
             .options(selectinload(Entry.items))
             .order_by(Entry.occurred_at.desc(), Entry.id.desc())
+            .offset(offset)
             .limit(limit)
         )
         return list(self._session.scalars(statement))
@@ -453,6 +490,21 @@ class EntryRepository:
     def delete(self, entry: Entry) -> None:
         self._session.delete(entry)
         self._session.flush()
+
+    def delete_all_for_user(self, *, user_id: int) -> int:
+        entries = list(
+            self._session.scalars(
+                select(Entry)
+                .where(Entry.user_id == user_id)
+                .options(selectinload(Entry.items))
+                .order_by(Entry.id.asc())
+            )
+        )
+        deleted_count = len(entries)
+        for entry in entries:
+            self._session.delete(entry)
+        self._session.flush()
+        return deleted_count
 
     def list_food_for_user_between(
         self,
@@ -494,6 +546,30 @@ class EntryRepository:
                 Entry.occurred_at < occurred_at_to,
             )
             .options(selectinload(Entry.items))
+            .order_by(Entry.occurred_at.asc(), Entry.id.asc())
+        )
+        return list(self._session.scalars(statement))
+
+    def list_workout_for_user_between(
+        self,
+        *,
+        user_id: int,
+        occurred_at_from: datetime,
+        occurred_at_to: datetime,
+    ) -> list[Entry]:
+        statement = (
+            select(Entry)
+            .where(
+                Entry.user_id == user_id,
+                Entry.entry_type == EntryType.WORKOUT,
+                Entry.occurred_at >= occurred_at_from,
+                Entry.occurred_at < occurred_at_to,
+            )
+            .options(
+                selectinload(Entry.items)
+                .selectinload(EntryItem.metrics)
+                .selectinload(EntryItemMetric.metric)
+            )
             .order_by(Entry.occurred_at.asc(), Entry.id.asc())
         )
         return list(self._session.scalars(statement))
@@ -767,6 +843,121 @@ class EntryItemMetricRepository:
 
         self._session.flush()
         return saved_metrics
+
+
+class DataExchangeFileRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(
+        self,
+        *,
+        user_id: int,
+        direction: DataExchangeDirection,
+        contract_type: str,
+        original_filename: str,
+        storage_path: str,
+        sha256: str,
+        row_count: int = 0,
+        food_entry_count: int = 0,
+        water_entry_count: int = 0,
+        date_from: date | None = None,
+        date_to: date | None = None,
+        validation_message: str | None = None,
+        processing_message: str | None = None,
+        status: DataExchangeStatus = DataExchangeStatus.READY,
+        processed_at: datetime | None = None,
+    ) -> DataExchangeFile:
+        exchange_file = DataExchangeFile(
+            user_id=user_id,
+            direction=direction,
+            status=status,
+            contract_type=contract_type,
+            original_filename=original_filename,
+            storage_path=storage_path,
+            sha256=sha256,
+            row_count=row_count,
+            food_entry_count=food_entry_count,
+            water_entry_count=water_entry_count,
+            date_from=date_from,
+            date_to=date_to,
+            validation_message=validation_message,
+            processing_message=processing_message,
+            processed_at=processed_at,
+        )
+        self._session.add(exchange_file)
+        self._session.flush()
+        return exchange_file
+
+    def count_for_user_and_direction(self, *, user_id: int, direction: DataExchangeDirection) -> int:
+        statement = select(DataExchangeFile).where(
+            DataExchangeFile.user_id == user_id,
+            DataExchangeFile.direction == direction,
+        )
+        return len(list(self._session.scalars(statement)))
+
+    def get_by_sha256(
+        self,
+        *,
+        user_id: int,
+        direction: DataExchangeDirection,
+        sha256: str,
+    ) -> DataExchangeFile | None:
+        statement = select(DataExchangeFile).where(
+            DataExchangeFile.user_id == user_id,
+            DataExchangeFile.direction == direction,
+            DataExchangeFile.sha256 == sha256,
+        )
+        return self._session.scalar(statement)
+
+    def list_for_user(self, *, user_id: int) -> list[DataExchangeFile]:
+        statement = (
+            select(DataExchangeFile)
+            .where(DataExchangeFile.user_id == user_id)
+            .order_by(DataExchangeFile.created_at.desc(), DataExchangeFile.id.desc())
+        )
+        return list(self._session.scalars(statement))
+
+    def get_by_id_for_user(self, *, file_id: int, user_id: int) -> DataExchangeFile | None:
+        statement = select(DataExchangeFile).where(
+            DataExchangeFile.id == file_id,
+            DataExchangeFile.user_id == user_id,
+        )
+        return self._session.scalar(statement)
+
+    def mark_processed(
+        self,
+        *,
+        file_id: int,
+        processing_message: str | None,
+        processed_at: datetime,
+    ) -> DataExchangeFile:
+        exchange_file = self._session.get(DataExchangeFile, file_id)
+        if exchange_file is None:
+            raise ValueError(f"Data exchange file {file_id} was not found")
+        exchange_file.status = DataExchangeStatus.PROCESSED
+        exchange_file.processing_message = processing_message
+        exchange_file.processed_at = processed_at
+        self._session.flush()
+        return exchange_file
+
+    def mark_error(
+        self,
+        *,
+        file_id: int,
+        processing_message: str,
+    ) -> DataExchangeFile:
+        exchange_file = self._session.get(DataExchangeFile, file_id)
+        if exchange_file is None:
+            raise ValueError(f"Data exchange file {file_id} was not found")
+        exchange_file.status = DataExchangeStatus.ERROR
+        exchange_file.processing_message = processing_message
+        self._session.flush()
+        return exchange_file
+
+    def delete(self, exchange_file: DataExchangeFile) -> None:
+        self._session.delete(exchange_file)
+        self._session.flush()
 
 
 class NutritionEstimatePersistenceService:

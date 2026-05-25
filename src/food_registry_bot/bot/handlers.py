@@ -5,19 +5,27 @@ from contextlib import suppress
 import logging
 import html
 from io import BytesIO
+from pathlib import Path
+import tempfile
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from aiogram import Router
 from aiogram import F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, FSInputFile, Message
 from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.keyboards import (
     WATER_250_ML_BUTTON_TEXT,
+    build_admin_delete_entries_confirmation_keyboard,
+    build_data_exchange_files_keyboard,
     build_main_keyboard,
+    build_period_report_dynamics_keyboard,
+    build_period_report_keyboard,
+    build_period_report_noticeable_keyboard,
     build_recent_entries_delete_keyboard,
     build_recent_entry_confirmation_keyboard,
     build_recent_entry_selection_keyboard,
@@ -29,24 +37,35 @@ from food_registry_bot.bot.message_routing import (
     MessageRoutingService,
     RuleBasedMessageRoutingService,
 )
-from food_registry_bot.bot.payloads import RecentEntryDeleteCallback, SummarySettingsCallback
+from food_registry_bot.bot.payloads import (
+    AdminDeleteEntriesCallback,
+    DataExchangeFileCallback,
+    PeriodReportCallback,
+    RecentEntryDeleteCallback,
+    SummarySettingsCallback,
+)
 from food_registry_bot.conversation import (
     ConversationService,
     DisabledConversationService,
     NutritionCoachContextBuilder,
 )
 from food_registry_bot.db.models import ConversationMessageRole, ConversationSession, EntryType
+from food_registry_bot.db.models import DataExchangeDirection, DataExchangeFile, DataExchangeStatus
 from food_registry_bot.db.session import session_scope
 from food_registry_bot.db.repositories import (
     ConversationMessageRepository,
     ConversationSessionRepository,
+    DataExchangeFileRepository,
     EntryItemCreate,
+    EntryItemMetricRepository,
+    EntryItemMetricValue,
     EntryRepository,
     UserGoalPreferenceRepository,
     UserAccessRepository,
     UserRepository,
     UserSummaryPreferenceRepository,
 )
+from food_registry_bot.exchange import DataExchangeService, DuplicateDataRowError, DuplicateFileError, UnsupportedExchangeFileError
 from food_registry_bot.extraction import (
     ExtractionImageInput,
     InvalidExtractionPayload,
@@ -54,20 +73,30 @@ from food_registry_bot.extraction import (
     JournalExtractionRequest,
     StructuredPayloadExtractionService,
 )
+from food_registry_bot.exchange.service import FileLimitExceededError
+from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_PARTIAL
+from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_WORKOUT
+from food_registry_bot.config import get_data_exchange_dir
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
+    calculate_default_workout_calorie_credit,
     DailyNutritionGoalProgress,
     DailyNutritionGoalProgressUseCase,
     DailyNutritionGoalSnapshotUseCase,
+    DailyWorkoutCalorieCreditUseCase,
     DailyWaterSummary,
     DailyWaterSummaryUseCase,
     MetricGoalProgress,
     DailyNutritionSummary,
     DailyNutritionSummaryUseCase,
     FailedNutritionEstimation,
+    PeriodMetricDynamics,
+    PeriodReportUseCase,
     NutritionBackfillCompleted,
     NutritionEstimationService,
+    resolve_day_bounds_utc,
     resolve_local_summary_date,
+    resolve_workout_metric_value,
     SUPPORTED_NUTRITION_METRIC_CODES,
     SkippedNutritionEstimation,
     StaticNutritionEstimationService,
@@ -82,6 +111,9 @@ default_nutrition_service = StaticNutritionEstimationService(raw_payload="")
 default_conversation_service = DisabledConversationService()
 default_message_routing_service = RuleBasedMessageRoutingService()
 NUTRITION_COACH_DISPLAY_NAME = "Нутрициолог"
+RECENT_ENTRIES_DEFAULT_COUNT = 5
+RECENT_ENTRIES_MAX_COUNT = 60
+RECENT_ENTRY_LIST_TITLE_MAX_LENGTH = 48
 SUMMARY_METRIC_LINES = (
     ("calories", "К", "ккал"),
     ("protein", "Б", "г"),
@@ -106,10 +138,152 @@ BAR_MODE_LABELS = {
     "К": "Ккал",
 }
 BAR_MODE_LABEL_WIDTH = 6
+EXCHANGE_STATUS_LABELS = {
+    DataExchangeStatus.READY: "готов",
+    DataExchangeStatus.PROCESSED: "обработан",
+    DataExchangeStatus.ERROR: "ошибка",
+}
+EXCHANGE_DIRECTION_LABELS = {
+    DataExchangeDirection.IMPORT: "импорт",
+    DataExchangeDirection.EXPORT: "экспорт",
+}
+PERIOD_REPORT_PERIOD_SEQUENCE = (8, 16, 32)
+DEFAULT_PERIOD_REPORT_DAYS = PERIOD_REPORT_PERIOD_SEQUENCE[0]
+PERIOD_REPORT_SUBPERIOD_DAYS = 4
 
 
 class FoodWriteFlowError(RuntimeError):
     pass
+
+
+def describe_import_contract(contract_type: str) -> str:
+    if contract_type == CSV_CONTRACT_TYPE_WORKOUT:
+        return "тренировки"
+    if contract_type == CSV_CONTRACT_TYPE_PARTIAL:
+        return "еда и вода (неполный файл)"
+    return "еда и вода"
+
+
+def build_import_validation_response_text(validation_result) -> str:
+    contract_label = describe_import_contract(validation_result.contract_type)
+    if validation_result.contract_type == CSV_CONTRACT_TYPE_WORKOUT:
+        return (
+            "Файл принят и подготовлен к импорту.\n\n"
+            f"Распознан тип файла: {contract_label}\n\n"
+            "Будет создано:\n"
+            f"- тренировок: {validation_result.workout_entry_count}\n\n"
+            "Диапазон дат:\n"
+            f"- {validation_result.date_from.isoformat() if validation_result.date_from else '—'} — "
+            f"{validation_result.date_to.isoformat() if validation_result.date_to else '—'}\n\n"
+            "Статус файла: готов\n"
+            "Открыть список файлов: /files"
+        )
+    if validation_result.contract_type == CSV_CONTRACT_TYPE_PARTIAL:
+        return (
+            "Файл принят и подготовлен к импорту.\n\n"
+            f"Распознан тип файла: {contract_label}\n\n"
+            "Будет создано:\n"
+            f"- записей еды: {validation_result.food_entry_count}\n"
+            f"- записей воды: {validation_result.water_entry_count}\n\n"
+            "Диапазон дат:\n"
+            f"- {validation_result.date_from.isoformat() if validation_result.date_from else '—'} — "
+            f"{validation_result.date_to.isoformat() if validation_result.date_to else '—'}\n\n"
+            "Статус файла: готов\n"
+            "Файл содержит неполный набор данных.\n"
+            "После импорта часть итогов дня может быть неполной.\n"
+            "Если понадобится дозаполнение метрик, попроси администратора запустить /admin_backfill_nutrition.\n"
+            "Открыть список файлов: /files"
+        )
+    return (
+        "Файл принят и подготовлен к импорту.\n\n"
+        f"Распознан тип файла: {contract_label}\n\n"
+        "Будет создано:\n"
+        f"- записей еды: {validation_result.food_entry_count}\n"
+        f"- записей воды: {validation_result.water_entry_count}\n\n"
+        "Диапазон дат:\n"
+        f"- {validation_result.date_from.isoformat() if validation_result.date_from else '—'} — "
+        f"{validation_result.date_to.isoformat() if validation_result.date_to else '—'}\n\n"
+        "Статус файла: готов\n"
+        "Открыть список файлов: /files"
+    )
+
+
+def build_data_exchange_files_response(files: list[DataExchangeFile]) -> str:
+    if not files:
+        return (
+            "Файлов пока нет.\n"
+            "Что можно сделать:\n"
+            "- загрузить CSV-файл для проверки и подготовки импорта;\n"
+            "- создать экспорт через кнопку ниже."
+        )
+
+    lines = ["Файлы:"]
+    for index, exchange_file in enumerate(files, start=1):
+        lines.append(f"{index}. [#{exchange_file.id}] {exchange_file.original_filename}")
+        lines.append(
+            f"   {EXCHANGE_DIRECTION_LABELS[exchange_file.direction]} · статус: {EXCHANGE_STATUS_LABELS[exchange_file.status]}"
+        )
+        lines.append(f"   тип: {describe_import_contract(exchange_file.contract_type)}")
+        if exchange_file.direction is DataExchangeDirection.IMPORT:
+            if exchange_file.contract_type == CSV_CONTRACT_TYPE_WORKOUT:
+                lines.append(f"   тренировок: {exchange_file.row_count}")
+            else:
+                lines.append(
+                    f"   еда: {exchange_file.food_entry_count}, вода: {exchange_file.water_entry_count}"
+                )
+        else:
+            if exchange_file.contract_type == CSV_CONTRACT_TYPE_WORKOUT:
+                lines.append(f"   тренировок: {exchange_file.row_count}")
+            else:
+                lines.append(
+                    f"   строк: {exchange_file.row_count}, еда: {exchange_file.food_entry_count}, вода: {exchange_file.water_entry_count}"
+                )
+        if exchange_file.date_from is not None and exchange_file.date_to is not None:
+            lines.append(f"   даты: {exchange_file.date_from.isoformat()} — {exchange_file.date_to.isoformat()}")
+        if exchange_file.contract_type == CSV_CONTRACT_TYPE_PARTIAL:
+            lines.append("   после импорта часть итогов может быть неполной")
+    return "\n".join(lines)
+
+
+async def download_message_document_to_temp_file(message: Message) -> tuple[Path, str]:
+    document = getattr(message, "document", None)
+    if document is None:
+        raise ValueError("Incoming message does not contain a document")
+    original_filename = document.file_name or "upload.csv"
+    exchange_dir = get_data_exchange_dir()
+    upload_dir = exchange_dir / "_uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        prefix="upload_",
+        suffix=".csv",
+        dir=upload_dir,
+        delete=False,
+    ) as handle:
+        temp_path = Path(handle.name)
+    await message.bot.download(document, destination=temp_path)
+    return temp_path, original_filename
+
+
+async def render_data_exchange_files_message(
+    target,
+    *,
+    files: list[DataExchangeFile],
+) -> None:
+    text = build_data_exchange_files_response(files)
+    reply_markup = build_data_exchange_files_keyboard(files=files)
+    if isinstance(target, Message):
+        await target.answer(text, reply_markup=reply_markup)
+        return
+    await safe_edit_message_text(target.message, text=text, reply_markup=reply_markup)
+
+
+async def safe_edit_message_text(message: Message, *, text: str, reply_markup) -> None:
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc):
+            return
+        raise
 
 
 def build_ambiguous_message_response() -> str:
@@ -380,6 +554,7 @@ def build_admin_overview_response(
             "- /admin_users",
             "- <code>/admin_allow TELEGRAM_USER_ID</code>",
             "- <code>/admin_deny TELEGRAM_USER_ID</code>",
+            "- <code>/admin_delete_entries TELEGRAM_USER_ID</code>",
             "- <code>/admin_backfill_nutrition [LIMIT]</code>",
         ]
     )
@@ -431,6 +606,8 @@ def present_unit(unit: str | None) -> str | None:
         return "мл"
     if unit == "g":
         return "г"
+    if unit == "min":
+        return "мин"
     return unit
 
 
@@ -451,12 +628,40 @@ def build_saved_items_confirmation(items: list[EntryItemCreate]) -> str:
     return "\n".join(lines)
 
 
+def build_extracted_workout_metric_lines(payload) -> list[str]:
+    lines: list[str] = []
+    for entry in payload.entries:
+        if entry.type is not EntryType.WORKOUT:
+            continue
+        for item in entry.items:
+            for metric in item.metrics:
+                if metric.code == "workout_calories":
+                    lines.append(f"- калории тренировки: {round(metric.value, 1)} ккал")
+                    lines.append(
+                        f"- к компенсации питания: {round(calculate_default_workout_calorie_credit(metric.value), 1)} ккал"
+                    )
+    return lines
+
+
+def build_workout_entries_report(entries: list, *, timezone_name: str) -> str | None:
+    if not entries:
+        return None
+
+    lines = ["Тренировки:"]
+    for entry in entries:
+        lines.append(f"- {format_entry_timestamp(entry, timezone_name)} — {build_workout_entry_title(entry)}")
+    return "\n".join(lines)
+
+
 def build_write_confirmation_response(
     saved_items: list[EntryItemCreate],
+    extra_lines: list[str] | None = None,
     day_report: str | None = None,
     coach_comment: str | None = None,
 ) -> str:
     saved_items_confirmation = build_saved_items_confirmation(saved_items)
+    if extra_lines:
+        saved_items_confirmation = "\n".join([saved_items_confirmation, *extra_lines])
     parts = [saved_items_confirmation]
     if day_report is not None:
         parts.append(day_report)
@@ -482,6 +687,22 @@ def build_recent_entry_title(entry) -> str:
     return "запись без позиций"
 
 
+def build_workout_entry_title(entry) -> str:
+    base_title = build_recent_entry_title(entry)
+    workout_calories = resolve_workout_metric_value(entry, "workout_calories")
+    workout_credit = resolve_workout_metric_value(entry, "workout_calorie_credit")
+    if workout_calories <= 0 and workout_credit <= 0:
+        return base_title
+    details: list[str] = []
+    if workout_calories > 0:
+        details.append(f"{round(workout_calories, 1)} ккал")
+    if workout_credit > 0:
+        details.append(f"компенсация {round(workout_credit, 1)} ккал")
+    if base_title.endswith(")"):
+        return base_title[:-1] + f", {', '.join(details)})"
+    return f"{base_title} ({', '.join(details)})"
+
+
 def truncate_button_label(value: str, *, max_length: int = 28) -> str:
     if len(value) <= max_length:
         return value
@@ -495,15 +716,42 @@ def build_recent_entry_button_label(entry, timezone_name: str) -> str:
 
 
 def build_recent_entry_display_line(*, index: int, entry, timezone_name: str) -> str:
-    return f"{index}. {format_entry_timestamp(entry, timezone_name)} — {build_recent_entry_title(entry)}"
+    title = truncate_button_label(build_recent_entry_title(entry), max_length=RECENT_ENTRY_LIST_TITLE_MAX_LENGTH)
+    return f"{index}. {format_entry_timestamp(entry, timezone_name)} — {title}"
 
 
-def build_recent_entries_response(entries: list, *, timezone_name: str, selection_mode: bool = False) -> str:
+def build_recent_entries_day_heading(*, entry, timezone_name: str, nutrition_day_start_hour: int) -> str:
+    summary_date = resolve_local_summary_date(
+        reference_at=entry.occurred_at,
+        timezone_name=timezone_name,
+        nutrition_day_start_hour=nutrition_day_start_hour,
+    )
+    return summary_date.strftime("%d.%m.%Y")
+
+
+def build_recent_entries_response(
+    entries: list,
+    *,
+    timezone_name: str,
+    page: int,
+    count: int,
+    nutrition_day_start_hour: int,
+    selection_mode: bool = False,
+) -> str:
     if not entries:
         return "Пока записей нет. Отправь еду текстом, фото блюда или нажми кнопку воды."
 
-    lines = ["Последние записи:"]
-    for index, entry in enumerate(entries, start=1):
+    lines = [f"Последние записи (страница {page + 1}, по {count}):"]
+    current_heading: str | None = None
+    for index, entry in enumerate(entries, start=page * count + 1):
+        heading = build_recent_entries_day_heading(
+            entry=entry,
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
+        )
+        if heading != current_heading:
+            lines.extend(["", heading])
+            current_heading = heading
         lines.append(build_recent_entry_display_line(index=index, entry=entry, timezone_name=timezone_name))
     if selection_mode:
         lines.extend(["", "Выбери запись, которую нужно удалить."])
@@ -552,6 +800,7 @@ def build_today_summary_response_with_preferences(
     water_summary: DailyWaterSummary | None = None,
     metric_deltas: dict[str, float] | None = None,
     show_post_entry_delta_suffix: bool = True,
+    force_render_summary: bool = False,
 ) -> str:
     if (
         summary.included_entry_count == 0
@@ -559,6 +808,7 @@ def build_today_summary_response_with_preferences(
         and (water_summary is None or (
             water_summary.included_entry_count == 0 and water_summary.excluded_entry_count == 0
         ))
+        and not force_render_summary
     ):
         return "За текущий день пока нет записей. Отправь еду, фото блюда или воду."
     if not enabled_metric_codes:
@@ -629,6 +879,7 @@ def get_enabled_summary_metric_codes(preference) -> tuple[str, ...]:
 
 def build_summary_settings_response(
     *,
+    workout_logging_enabled: bool,
     show_calories: bool,
     show_protein: bool,
     show_fat: bool,
@@ -638,6 +889,8 @@ def build_summary_settings_response(
     show_post_entry_delta_suffix: bool,
     summary_display_mode: str,
     nutrition_day_start_hour: int,
+    report_goal_tolerance_percent: int,
+    report_noticeable_entry_percentile: int,
 ) -> str:
     statuses = {
         True: "включено",
@@ -646,6 +899,7 @@ def build_summary_settings_response(
     return "\n".join(
         [
             "Настройки summary:",
+            f"- тренировки: {statuses[workout_logging_enabled]}",
             f"- калории: {statuses[show_calories]}",
             f"- белки: {statuses[show_protein]}",
             f"- жиры: {statuses[show_fat]}",
@@ -655,6 +909,8 @@ def build_summary_settings_response(
             f"- дельта записи: {statuses[show_post_entry_delta_suffix]}",
             f"- отображение: {SUMMARY_DISPLAY_MODE_LABELS[summary_display_mode]}",
             f"- начало дня: {nutrition_day_start_hour:02d}:00",
+            f"- допуск к цели: {report_goal_tolerance_percent}%",
+            f"- порог заметных записей: {report_noticeable_entry_percentile}%",
         ]
     )
 
@@ -733,6 +989,14 @@ def build_saved_items_from_payload(payload) -> list[EntryItemCreate]:
     return items
 
 
+def payload_contains_workout_entries(payload) -> bool:
+    return any(entry.type is EntryType.WORKOUT for entry in payload.entries)
+
+
+def payload_contains_food_or_water_entries(payload) -> bool:
+    return any(entry.type in {EntryType.FOOD, EntryType.WATER} for entry in payload.entries)
+
+
 def resolve_metric_deltas(
     *,
     saved_items: list[EntryItemCreate],
@@ -776,9 +1040,33 @@ def build_daily_report_for_summary_date(
     user_id: int,
     timezone_name: str,
     summary_date: date,
+    workout_logging_enabled: bool,
     summary_preference,
     metric_deltas: dict[str, float] | None = None,
 ) -> str:
+    workout_entries = []
+    workout_calorie_credit_total = 0
+    if workout_logging_enabled:
+        occurred_at_from, occurred_at_to = resolve_day_bounds_utc(
+            summary_date=summary_date,
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        )
+        workout_entries = EntryRepository(session).list_workout_for_user_between(
+            user_id=user_id,
+            occurred_at_from=occurred_at_from,
+            occurred_at_to=occurred_at_to,
+        )
+        workout_calorie_credit_total = int(
+            round(
+                DailyWorkoutCalorieCreditUseCase(session).run(
+                    user_id=user_id,
+                    timezone_name=timezone_name,
+                    summary_date=summary_date,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                )
+            )
+        )
     summary = DailyNutritionSummaryUseCase(session).run(
         user_id=user_id,
         timezone_name=timezone_name,
@@ -801,8 +1089,9 @@ def build_daily_report_for_summary_date(
         summary=summary,
         water_summary=water_summary,
         snapshot=goal_snapshot,
+        calorie_goal_adjustment=workout_calorie_credit_total,
     )
-    return build_today_summary_response_with_preferences(
+    summary_report = build_today_summary_response_with_preferences(
         summary,
         enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
         summary_display_mode=summary_preference.summary_display_mode,
@@ -810,7 +1099,234 @@ def build_daily_report_for_summary_date(
         water_summary=water_summary,
         metric_deltas=metric_deltas,
         show_post_entry_delta_suffix=summary_preference.show_post_entry_delta_suffix,
+        force_render_summary=workout_calorie_credit_total > 0,
     )
+    if not workout_logging_enabled:
+        return summary_report
+    workout_report = build_workout_entries_report(workout_entries, timezone_name=timezone_name)
+    if workout_report is None:
+        return summary_report
+
+    has_nutrition_or_water_entries = not (
+        summary.included_entry_count == 0
+        and summary.excluded_entry_count == 0
+        and water_summary.included_entry_count == 0
+        and water_summary.excluded_entry_count == 0
+    )
+    if not has_nutrition_or_water_entries and workout_calorie_credit_total <= 0:
+        return workout_report
+
+    return "\n\n".join([summary_report, workout_report])
+
+
+def build_period_report_response(
+    report,
+    *,
+    enabled_metric_codes: tuple[str, ...],
+    workout_logging_enabled: bool,
+    report_goal_tolerance_percent: int,
+) -> str:
+    show_nutrition_metrics = any(metric_code != "water" for metric_code in enabled_metric_codes)
+    show_water = "water" in enabled_metric_codes
+    has_any_metric_to_render = show_nutrition_metrics or show_water
+    has_any_workout_data = workout_logging_enabled and report.workout_entry_count > 0
+    if not has_any_metric_to_render and not has_any_workout_data:
+        return "В summary сейчас всё скрыто. Включи хотя бы один показатель в /settings."
+
+    has_visible_data = (
+        (show_nutrition_metrics and report.food_data_day_count > 0)
+        or (show_water and report.water_data_day_count > 0)
+        or has_any_workout_data
+    )
+    if not has_visible_data:
+        return "За этот период пока нет данных по включённым показателям."
+
+    lines = [
+        f"Отчёт: {report.summary_date_from.strftime('%d.%m.%Y')}-{report.summary_date_to.strftime('%d.%m.%Y')}",
+        f"Дней в периоде: {report.period_day_count}",
+    ]
+    if show_nutrition_metrics:
+        lines.append(f"Дней с данными по еде: {report.food_data_day_count}")
+    if show_water:
+        lines.append(f"Дней с данными по воде: {report.water_data_day_count}")
+    if has_any_workout_data:
+        lines.append(f"Дней с тренировками: {report.workout_day_count}")
+
+    average_lines: list[str] = []
+    if show_nutrition_metrics and report.food_data_day_count > 0:
+        for metric_code, _short_label, unit in SUMMARY_METRIC_LINES:
+            if metric_code not in enabled_metric_codes or metric_code == "water":
+                continue
+            metric_value = getattr(report.average_nutrition_totals, metric_code)
+            average_lines.append(f"- {GOAL_METRIC_LABELS[metric_code]}: {round(metric_value, 1)} {unit}")
+    if show_water and report.water_data_day_count > 0:
+        average_lines.append(f"- вода: {round(report.average_water_ml, 1)} мл")
+
+    if average_lines:
+        lines.extend(["", "Среднее по дням с данными", *average_lines])
+
+    goal_lines: list[str] = []
+    for metric_code in enabled_metric_codes:
+        applicable_day_count = report.goal_applicable_day_counts.get(metric_code, 0)
+        if applicable_day_count <= 0:
+            continue
+        hit_day_count = report.goal_hit_day_counts.get(metric_code, 0)
+        goal_lines.append(f"- {GOAL_METRIC_LABELS[metric_code]}: {hit_day_count} из {applicable_day_count} дней")
+    if goal_lines:
+        lines.extend(["", f"Цели считаются с допуском {report_goal_tolerance_percent}%.", *goal_lines])
+
+    if has_any_workout_data:
+        lines.extend(
+            [
+                "",
+                "Тренировки",
+                f"- тренировок: {report.workout_entry_count}",
+            ]
+        )
+
+    notes: list[str] = []
+    if show_nutrition_metrics and report.incomplete_food_day_count > 0:
+        notes.append(f"Неполных дней по еде: {report.incomplete_food_day_count}.")
+    if show_water and report.incomplete_water_day_count > 0:
+        notes.append(f"Неполных дней по воде: {report.incomplete_water_day_count}.")
+    if notes:
+        lines.extend(["", *notes])
+
+    return "\n".join(lines)
+
+
+def build_period_report(
+    *,
+    session: Session,
+    user_id: int,
+    timezone_name: str,
+    summary_date_to: date,
+    period_days: int,
+    workout_logging_enabled: bool,
+    summary_preference,
+) -> str:
+    report = PeriodReportUseCase(session).run(
+        user_id=user_id,
+        timezone_name=timezone_name,
+        summary_date_to=summary_date_to,
+        period_day_count=period_days,
+        nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        workout_logging_enabled=workout_logging_enabled,
+        report_goal_tolerance_percent=summary_preference.report_goal_tolerance_percent,
+    )
+    return build_period_report_response(
+        report,
+        enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
+        workout_logging_enabled=workout_logging_enabled,
+        report_goal_tolerance_percent=summary_preference.report_goal_tolerance_percent,
+    )
+
+
+def resolve_next_period_days(period_days: int) -> int:
+    try:
+        current_index = PERIOD_REPORT_PERIOD_SEQUENCE.index(period_days)
+    except ValueError:
+        return DEFAULT_PERIOD_REPORT_DAYS
+    return PERIOD_REPORT_PERIOD_SEQUENCE[(current_index + 1) % len(PERIOD_REPORT_PERIOD_SEQUENCE)]
+
+
+def resolve_available_period_report_metric_codes(
+    *,
+    session: Session,
+    user_id: int,
+    timezone_name: str,
+    summary_date_to: date,
+    period_days: int,
+    summary_preference,
+) -> tuple[str, ...]:
+    enabled_metric_codes = get_enabled_summary_metric_codes(summary_preference)
+    report_use_case = PeriodReportUseCase(session)
+    available_metric_codes: list[str] = []
+    for metric_code in enabled_metric_codes:
+        dynamics = report_use_case.build_metric_dynamics(
+            user_id=user_id,
+            timezone_name=timezone_name,
+            summary_date_to=summary_date_to,
+            period_day_count=period_days,
+            metric_code=metric_code,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+            subperiod_day_count=PERIOD_REPORT_SUBPERIOD_DAYS,
+        )
+        if any(row.data_day_count > 0 for row in dynamics.rows):
+            available_metric_codes.append(metric_code)
+    return tuple(available_metric_codes)
+
+
+def resolve_next_metric_code(metric_codes: tuple[str, ...], current_metric_code: str) -> str:
+    if not metric_codes:
+        raise ValueError("metric_codes must not be empty")
+    try:
+        current_index = metric_codes.index(current_metric_code)
+    except ValueError:
+        return metric_codes[0]
+    return metric_codes[(current_index + 1) % len(metric_codes)]
+
+
+def build_period_report_dynamics_response(
+    dynamics: PeriodMetricDynamics,
+    *,
+    available_metric_codes: tuple[str, ...],
+) -> str:
+    unit_by_metric_code = {metric_code: unit for metric_code, _short_label, unit in SUMMARY_METRIC_LINES}
+    metric_labels = [f"[{GOAL_METRIC_LABELS[metric_code]}]" if metric_code == dynamics.metric_code else GOAL_METRIC_LABELS[metric_code] for metric_code in available_metric_codes]
+    lines = [
+        f"Динамика: {dynamics.summary_date_from.strftime('%d.%m.%Y')}-{dynamics.summary_date_to.strftime('%d.%m.%Y')}",
+        f"Метрика: {GOAL_METRIC_LABELS[dynamics.metric_code]}",
+        f"Доступно: {', '.join(metric_labels)}",
+        "",
+    ]
+    unit = unit_by_metric_code[dynamics.metric_code]
+    for row in dynamics.rows:
+        period_label = f"{row.summary_date_from.strftime('%d.%m')}-{row.summary_date_to.strftime('%d.%m')}"
+        if row.data_day_count == 0 or row.average_value is None:
+            lines.append(f"{period_label}: нет данных")
+            continue
+        lines.append(
+            f"{period_label}: {round(row.average_value, 1)} {unit} ({row.data_day_count}/{dynamics.subperiod_day_count} дней)"
+        )
+    return "\n".join(lines)
+
+
+def build_period_report_noticeable_response(
+    noticeable_entries,
+    *,
+    available_metric_codes: tuple[str, ...],
+) -> str:
+    unit_by_metric_code = {metric_code: unit for metric_code, _short_label, unit in SUMMARY_METRIC_LINES}
+    metric_labels = [
+        f"[{GOAL_METRIC_LABELS[metric_code]}]" if metric_code == noticeable_entries.metric_code else GOAL_METRIC_LABELS[metric_code]
+        for metric_code in available_metric_codes
+    ]
+    lines = [
+        f"Заметные записи пищи: {noticeable_entries.summary_date_from.strftime('%d.%m.%Y')}-{noticeable_entries.summary_date_to.strftime('%d.%m.%Y')}",
+        f"Метрика: {GOAL_METRIC_LABELS[noticeable_entries.metric_code]}",
+        f"Доступно: {', '.join(metric_labels)}",
+        "",
+    ]
+    unit = unit_by_metric_code[noticeable_entries.metric_code]
+    if not noticeable_entries.entries:
+        lines.append("Нет заметных записей.")
+        return "\n".join(lines)
+    for entry in noticeable_entries.entries:
+        lines.append(
+            f"- {entry.occurred_at.strftime('%d.%m')} · {entry.title} · {round(entry.metric_value, 1)} {unit}"
+        )
+    return "\n".join(lines)
+
+
+def payload_contains_credit_eligible_workout_entries(payload) -> bool:
+    for entry in payload.entries:
+        if entry.type is not EntryType.WORKOUT:
+            continue
+        for item in entry.items:
+            if any(metric.code == "workout_calories" for metric in item.metrics):
+                return True
+    return False
 
 
 def resolve_recent_entry_for_callback(
@@ -818,11 +1334,35 @@ def resolve_recent_entry_for_callback(
     entry_repository: EntryRepository,
     user_id: int,
     entry_id: int,
-    limit: int = 5,
 ):
-    recent_entries = entry_repository.list_recent_for_user(user_id=user_id, limit=limit)
-    recent_entry_by_id = {entry.id: entry for entry in recent_entries}
-    return recent_entries, recent_entry_by_id.get(entry_id)
+    return entry_repository.get_by_id_for_user(entry_id=entry_id, user_id=user_id)
+
+
+def load_recent_entries_page(
+    *,
+    entry_repository: EntryRepository,
+    user_id: int,
+    page: int,
+    page_size: int = RECENT_ENTRIES_DEFAULT_COUNT,
+) -> tuple[int, list, bool, bool]:
+    page = max(page, 0)
+    while True:
+        entries = entry_repository.list_recent_for_user(
+            user_id=user_id,
+            limit=page_size + 1,
+            offset=page * page_size,
+        )
+        if entries or page == 0:
+            page_entries = entries[:page_size]
+            return page, page_entries, page > 0, len(entries) > page_size
+        page -= 1
+
+
+def resolve_recent_count(command: CommandObject | None) -> int | None:
+    parsed_value = parse_positive_int_arg(command)
+    if parsed_value is None:
+        return None
+    return min(parsed_value, RECENT_ENTRIES_MAX_COUNT)
 
 
 def build_goal_response(
@@ -901,6 +1441,10 @@ async def build_extraction_request(message: Message) -> JournalExtractionRequest
         return JournalExtractionRequest(text=message_text)
 
     return None
+
+
+def is_photo_media_group_message(message: Message) -> bool:
+    return bool(getattr(message, "photo", None) and getattr(message, "media_group_id", None))
 
 
 async def send_typing_action(message: Message) -> None:
@@ -1005,6 +1549,83 @@ async def handle_admin_users(
     await message.answer(build_admin_users_response(known_users, admin_user_ids))
 
 
+@router.message(Command("admin_delete_entries"))
+async def handle_admin_delete_entries(
+    message: Message,
+    command: CommandObject,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = message.from_user
+    if telegram_user is None or not is_admin_user(telegram_user.id, admin_user_ids):
+        await message.answer("Команда доступна только администратору.")
+        return
+
+    target_user_id = parse_target_telegram_user_id(command)
+    if target_user_id is None:
+        await message.answer("Использование: <code>/admin_delete_entries TELEGRAM_USER_ID</code>")
+        return
+
+    with session_scope(session_factory) as session:
+        user = UserRepository(session).get_by_telegram_user_id(target_user_id)
+        if user is None:
+            await message.answer(f"Пользователь с Telegram ID {target_user_id} не найден.")
+            return
+
+        entry_count = len(EntryRepository(session).list_recent_for_user(user_id=user.id, limit=100000))
+
+    await message.answer(
+        "Подтверди удаление записей пользователя.\n"
+        f"Telegram ID: {target_user_id}\n"
+        f"Будет удалено записей: {entry_count}",
+        reply_markup=build_admin_delete_entries_confirmation_keyboard(
+            telegram_user_id=target_user_id,
+        ),
+    )
+
+
+@router.callback_query(AdminDeleteEntriesCallback.filter())
+async def handle_admin_delete_entries_callback(
+    callback: CallbackQuery,
+    callback_data: AdminDeleteEntriesCallback,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = callback.from_user
+    if telegram_user is None:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+    if callback.message is None:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    if not is_admin_user(telegram_user.id, admin_user_ids):
+        await callback.answer("Команда доступна только администратору.", show_alert=True)
+        return
+
+    if callback_data.action == "cancel":
+        await safe_edit_message_text(
+            callback.message,
+            text="Удаление записей отменено.",
+            reply_markup=None,
+        )
+        await callback.answer("Удаление отменено.")
+        return
+
+    with session_scope(session_factory) as session:
+        user = UserRepository(session).get_by_telegram_user_id(callback_data.telegram_user_id)
+        if user is None:
+            await callback.answer("Пользователь уже недоступен.", show_alert=True)
+            return
+        deleted_count = EntryRepository(session).delete_all_for_user(user_id=user.id)
+
+    await safe_edit_message_text(
+        callback.message,
+        text=f"Удалено записей пользователя {callback_data.telegram_user_id}: {deleted_count}.",
+        reply_markup=None,
+    )
+    await callback.answer("Удаление выполнено.")
+
+
 @router.message(Command("admin"))
 async def handle_admin(
     message: Message,
@@ -1101,11 +1722,14 @@ async def handle_start(
             "Что можно сделать:\n"
             "- отправить запись еды текстом или фото блюда;\n"
             "- нажать кнопку воды;\n"
+            "- при желании включить запись тренировок в /settings;\n"
             "- задать вопрос о питании;\n"
             "- посмотреть итог дня: /today;\n"
+            "- посмотреть отчёт за период: /report;\n"
             "- посмотреть и удалить последние записи: /recent;\n"
             "- посмотреть или изменить цели: /goal;\n"
-            "- настроить summary: /settings.",
+            "- настроить summary: /settings;\n"
+            "- управлять файлами импорта и экспорта: /files.",
             reply_markup=build_main_keyboard(),
         )
         return
@@ -1115,11 +1739,14 @@ async def handle_start(
         "Что можно сделать:\n"
         "- отправить запись еды текстом или фото блюда;\n"
         "- нажать кнопку воды;\n"
+        "- при желании включить запись тренировок в /settings;\n"
         "- задать вопрос о питании;\n"
         "- посмотреть итог дня: /today;\n"
+        "- посмотреть отчёт за период: /report;\n"
         "- посмотреть и удалить последние записи: /recent;\n"
         "- посмотреть или изменить цели: /goal;\n"
-        "- настроить summary: /settings.",
+        "- настроить summary: /settings;\n"
+        "- управлять файлами импорта и экспорта: /files.",
         reply_markup=build_main_keyboard(),
     )
 
@@ -1139,22 +1766,60 @@ async def handle_health(
 @router.message(Command("recent"))
 async def handle_recent(
     message: Message,
+    command: CommandObject,
     session_factory: sessionmaker[Session],
     admin_user_ids: tuple[int, ...] = (),
 ) -> None:
     if not await require_user_access(message, session_factory, admin_user_ids):
         return
 
+    raw_args = command.args.strip() if command.args is not None else ""
+    if raw_args and parse_positive_int_arg(command) is None:
+        await message.answer(
+            f"Использование: <code>/recent [COUNT]</code>, где COUNT от 1 до {RECENT_ENTRIES_MAX_COUNT}."
+        )
+        return
+
+    requested_count = parse_positive_int_arg(command)
+    if requested_count is not None and requested_count > RECENT_ENTRIES_MAX_COUNT:
+        await message.answer(
+            f"Для <code>/recent</code> можно запросить от 1 до {RECENT_ENTRIES_MAX_COUNT} записей."
+        )
+        return
+
+    recent_count = resolve_recent_count(command) or RECENT_ENTRIES_DEFAULT_COUNT
+
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
         user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
         if user is None:
             raise RuntimeError("User profile was not found after registration")
-        entries = EntryRepository(session).list_recent_for_user(user_id=user_id, limit=5)
+        summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+        page, entries, has_previous_page, has_next_page = load_recent_entries_page(
+            entry_repository=EntryRepository(session),
+            user_id=user_id,
+            page=0,
+            page_size=recent_count,
+        )
 
-    reply_markup = build_recent_entries_delete_keyboard() if entries else build_main_keyboard()
+    reply_markup = (
+        build_recent_entries_delete_keyboard(
+            page=page,
+            count=recent_count,
+            has_previous_page=has_previous_page,
+            has_next_page=has_next_page,
+        )
+        if entries
+        else build_main_keyboard()
+    )
     await message.answer(
-        build_recent_entries_response(entries, timezone_name=user.timezone),
+        build_recent_entries_response(
+            entries,
+            timezone_name=user.timezone,
+            page=page,
+            count=recent_count,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        ),
         reply_markup=reply_markup,
     )
 
@@ -1188,14 +1853,31 @@ async def handle_recent_delete_callback(
                 telegram_user_id=telegram_user.id,
                 username=telegram_user.username,
             )
+        summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user.id)
         entry_repository = EntryRepository(session)
-        recent_entries = entry_repository.list_recent_for_user(user_id=user.id, limit=5)
+        page, recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
+            entry_repository=entry_repository,
+            user_id=user.id,
+            page=callback_data.page,
+            page_size=callback_data.count,
+        )
 
-        if callback_data.action == "close":
+        if callback_data.action == "list":
             await callback.message.edit_text(
-                build_recent_entries_response(recent_entries, timezone_name=user.timezone),
+                build_recent_entries_response(
+                    recent_entries,
+                    timezone_name=user.timezone,
+                    page=page,
+                    count=callback_data.count,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                ),
                 reply_markup=(
-                    build_recent_entries_delete_keyboard()
+                    build_recent_entries_delete_keyboard(
+                        page=page,
+                        count=callback_data.count,
+                        has_previous_page=has_previous_page,
+                        has_next_page=has_next_page,
+                    )
                     if recent_entries
                     else None
                 ),
@@ -1208,6 +1890,9 @@ async def handle_recent_delete_callback(
                 build_recent_entries_response(
                     recent_entries,
                     timezone_name=user.timezone,
+                    page=page,
+                    count=callback_data.count,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                     selection_mode=True,
                 ),
                 reply_markup=(
@@ -1215,7 +1900,11 @@ async def handle_recent_delete_callback(
                         entry_buttons=[
                             (build_recent_entry_button_label(entry, user.timezone), entry.id)
                             for entry in recent_entries
-                        ]
+                        ],
+                        page=page,
+                        count=callback_data.count,
+                        has_previous_page=has_previous_page,
+                        has_next_page=has_next_page,
                     )
                     if recent_entries
                     else None
@@ -1224,7 +1913,7 @@ async def handle_recent_delete_callback(
             await callback.answer()
             return
 
-        recent_entries, selected_entry = resolve_recent_entry_for_callback(
+        selected_entry = resolve_recent_entry_for_callback(
             entry_repository=entry_repository,
             user_id=user.id,
             entry_id=callback_data.entry_id,
@@ -1236,7 +1925,11 @@ async def handle_recent_delete_callback(
         if callback_data.action == "select":
             await callback.message.edit_text(
                 build_recent_entry_delete_confirmation(entry=selected_entry, timezone_name=user.timezone),
-                reply_markup=build_recent_entry_confirmation_keyboard(entry_id=selected_entry.id),
+                reply_markup=build_recent_entry_confirmation_keyboard(
+                    entry_id=selected_entry.id,
+                    page=page,
+                    count=callback_data.count,
+                ),
             )
             await callback.answer()
             return
@@ -1246,12 +1939,28 @@ async def handle_recent_delete_callback(
             return
 
         entry_repository.delete(selected_entry)
-        updated_recent_entries = entry_repository.list_recent_for_user(user_id=user.id, limit=5)
+        page, updated_recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
+            entry_repository=entry_repository,
+            user_id=user.id,
+            page=page,
+            page_size=callback_data.count,
+        )
 
     await callback.message.edit_text(
-        build_recent_entries_response(updated_recent_entries, timezone_name=user.timezone),
+        build_recent_entries_response(
+            updated_recent_entries,
+            timezone_name=user.timezone,
+            page=page,
+            count=callback_data.count,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        ),
         reply_markup=(
-            build_recent_entries_delete_keyboard()
+            build_recent_entries_delete_keyboard(
+                page=page,
+                count=callback_data.count,
+                has_previous_page=has_previous_page,
+                has_next_page=has_next_page,
+            )
             if updated_recent_entries
             else None
         ),
@@ -1270,10 +1979,14 @@ async def handle_settings(
 
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
+        user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
+        if user is None:
+            raise RuntimeError("User profile was not found after registration")
         preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
 
     await message.answer(
         build_summary_settings_response(
+            workout_logging_enabled=user.workout_logging_enabled,
             show_calories=preference.show_calories,
             show_protein=preference.show_protein,
             show_fat=preference.show_fat,
@@ -1283,8 +1996,11 @@ async def handle_settings(
             show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
             summary_display_mode=preference.summary_display_mode,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
+            report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
+            report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
         ),
         reply_markup=build_summary_settings_keyboard(
+            workout_logging_enabled=user.workout_logging_enabled,
             show_calories=preference.show_calories,
             show_protein=preference.show_protein,
             show_fat=preference.show_fat,
@@ -1294,6 +2010,8 @@ async def handle_settings(
             show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
             summary_display_mode=preference.summary_display_mode,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
+            report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
+            report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
         ),
     )
 
@@ -1313,6 +2031,8 @@ async def handle_toggle_summary_metric(
         callback_data.action.startswith("toggle_")
         or callback_data.action == "cycle_summary_display_mode"
         or callback_data.action == "cycle_nutrition_day_start_hour"
+        or callback_data.action == "cycle_report_goal_tolerance_percent"
+        or callback_data.action == "cycle_report_noticeable_entry_percentile"
     ):
         await callback.answer("Неизвестное действие.", show_alert=True)
         return
@@ -1336,6 +2056,13 @@ async def handle_toggle_summary_metric(
             preference = preference_repository.cycle_nutrition_day_start_hour(user_id=user.id)
         elif callback_data.action == "cycle_summary_display_mode":
             preference = preference_repository.cycle_summary_display_mode(user_id=user.id)
+        elif callback_data.action == "cycle_report_goal_tolerance_percent":
+            preference = preference_repository.cycle_report_goal_tolerance_percent(user_id=user.id)
+        elif callback_data.action == "cycle_report_noticeable_entry_percentile":
+            preference = preference_repository.cycle_report_noticeable_entry_percentile(user_id=user.id)
+        elif callback_data.action == "toggle_workout_logging":
+            user = UserRepository(session).toggle_workout_logging_enabled(user_id=user.id)
+            preference, _created = preference_repository.get_or_create(user_id=user.id)
         elif callback_data.action == "toggle_post_entry_delta_suffix":
             preference = preference_repository.toggle_post_entry_delta_suffix(user_id=user.id)
         else:
@@ -1348,6 +2075,7 @@ async def handle_toggle_summary_metric(
     if callback.message is not None:
         await callback.message.edit_text(
             build_summary_settings_response(
+                workout_logging_enabled=user.workout_logging_enabled,
                 show_calories=preference.show_calories,
                 show_protein=preference.show_protein,
                 show_fat=preference.show_fat,
@@ -1357,8 +2085,11 @@ async def handle_toggle_summary_metric(
                 show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
                 summary_display_mode=preference.summary_display_mode,
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
+                report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
+                report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
             ),
             reply_markup=build_summary_settings_keyboard(
+                workout_logging_enabled=user.workout_logging_enabled,
                 show_calories=preference.show_calories,
                 show_protein=preference.show_protein,
                 show_fat=preference.show_fat,
@@ -1368,6 +2099,8 @@ async def handle_toggle_summary_metric(
                 show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
                 summary_display_mode=preference.summary_display_mode,
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
+                report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
+                report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
             ),
         )
     await callback.answer("Сохранил настройки.")
@@ -1403,6 +2136,7 @@ async def handle_today(
             user_id=user_id,
             timezone_name=user.timezone,
             summary_date=summary_date,
+            workout_logging_enabled=user.workout_logging_enabled,
             summary_preference=preference,
         )
 
@@ -1410,6 +2144,215 @@ async def handle_today(
         rendered_report,
         reply_markup=build_main_keyboard(),
     )
+
+
+@router.message(Command("report"))
+async def handle_report(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    telegram_user = message.from_user
+    if telegram_user is None:
+        raise ValueError("Incoming message does not contain Telegram user")
+
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
+        if user is None:
+            raise RuntimeError("User profile was not found after registration")
+        preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+
+        summary_date_to = resolve_local_summary_date(
+            reference_at=datetime.now(timezone.utc),
+            timezone_name=user.timezone,
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
+        )
+        rendered_report = build_period_report(
+            session=session,
+            user_id=user_id,
+            timezone_name=user.timezone,
+            summary_date_to=summary_date_to,
+            period_days=DEFAULT_PERIOD_REPORT_DAYS,
+            workout_logging_enabled=user.workout_logging_enabled,
+            summary_preference=preference,
+        )
+
+    await message.answer(
+        rendered_report,
+        reply_markup=build_period_report_keyboard(period_days=DEFAULT_PERIOD_REPORT_DAYS),
+    )
+
+
+@router.callback_query(PeriodReportCallback.filter())
+async def handle_period_report_callback(
+    callback: CallbackQuery,
+    callback_data: PeriodReportCallback,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = callback.from_user
+    if telegram_user is None:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+    if callback_data.action not in {
+        "cycle_period",
+        "open_dynamics",
+        "cycle_dynamics_metric",
+        "open_noticeable",
+        "cycle_noticeable_metric",
+        "close",
+    }:
+        await callback.answer("Неизвестное действие.", show_alert=True)
+        return
+    if callback.message is None:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+
+    if callback_data.action == "close":
+        with suppress(TelegramBadRequest):
+            await callback.message.delete()
+        await callback.answer()
+        return
+
+    with session_scope(session_factory) as session:
+        if not (
+            is_admin_user(telegram_user.id, admin_user_ids)
+            or UserAccessRepository(session).is_allowed(telegram_user.id)
+        ):
+            await callback.answer("Нет доступа к боту. Попроси администратора его выдать.", show_alert=True)
+            return
+
+        user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
+        if user is None:
+            user, _created = UserRepository(session).get_or_create(
+                telegram_user_id=telegram_user.id,
+                username=telegram_user.username,
+            )
+        preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user.id)
+
+        summary_date_to = resolve_local_summary_date(
+            reference_at=datetime.now(timezone.utc),
+            timezone_name=user.timezone,
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
+        )
+        if callback_data.action in {"open_dynamics", "cycle_dynamics_metric"}:
+            available_metric_codes = resolve_available_period_report_metric_codes(
+                session=session,
+                user_id=user.id,
+                timezone_name=user.timezone,
+                summary_date_to=summary_date_to,
+                period_days=callback_data.period_days,
+                summary_preference=preference,
+            )
+            if not available_metric_codes:
+                await callback.answer("За этот период нет данных для динамики.", show_alert=True)
+                return
+            metric_code = callback_data.metric_code or available_metric_codes[0]
+            if metric_code not in available_metric_codes:
+                metric_code = available_metric_codes[0]
+            dynamics = PeriodReportUseCase(session).build_metric_dynamics(
+                user_id=user.id,
+                timezone_name=user.timezone,
+                summary_date_to=summary_date_to,
+                period_day_count=callback_data.period_days,
+                metric_code=metric_code,
+                nutrition_day_start_hour=preference.nutrition_day_start_hour,
+                subperiod_day_count=PERIOD_REPORT_SUBPERIOD_DAYS,
+            )
+            next_metric_code = resolve_next_metric_code(available_metric_codes, metric_code)
+            rendered_dynamics = build_period_report_dynamics_response(
+                dynamics,
+                available_metric_codes=available_metric_codes,
+            )
+            reply_markup = build_period_report_dynamics_keyboard(
+                period_days=callback_data.period_days,
+                metric_code=metric_code,
+                next_metric_code=next_metric_code,
+            )
+            if callback_data.action == "open_dynamics":
+                await callback.message.answer(
+                    rendered_dynamics,
+                    reply_markup=reply_markup,
+                )
+                await callback.answer()
+                return
+
+            await callback.message.edit_text(
+                rendered_dynamics,
+                reply_markup=reply_markup,
+            )
+            await callback.answer("Метрика переключена.")
+            return
+
+        if callback_data.action in {"open_noticeable", "cycle_noticeable_metric"}:
+            available_metric_codes = resolve_available_period_report_metric_codes(
+                session=session,
+                user_id=user.id,
+                timezone_name=user.timezone,
+                summary_date_to=summary_date_to,
+                period_days=callback_data.period_days,
+                summary_preference=preference,
+            )
+            if not available_metric_codes:
+                await callback.answer("За этот период нет данных для заметных записей.", show_alert=True)
+                return
+            metric_code = callback_data.metric_code or available_metric_codes[0]
+            if metric_code not in available_metric_codes:
+                metric_code = available_metric_codes[0]
+            noticeable_entries = PeriodReportUseCase(session).build_noticeable_entries(
+                user_id=user.id,
+                timezone_name=user.timezone,
+                summary_date_to=summary_date_to,
+                period_day_count=callback_data.period_days,
+                metric_code=metric_code,
+                nutrition_day_start_hour=preference.nutrition_day_start_hour,
+                percentile=preference.report_noticeable_entry_percentile,
+            )
+            next_metric_code = resolve_next_metric_code(available_metric_codes, metric_code)
+            rendered_noticeable = build_period_report_noticeable_response(
+                noticeable_entries,
+                available_metric_codes=available_metric_codes,
+            )
+            reply_markup = build_period_report_noticeable_keyboard(
+                period_days=callback_data.period_days,
+                metric_code=metric_code,
+                next_metric_code=next_metric_code,
+            )
+            if callback_data.action == "open_noticeable":
+                await callback.message.answer(
+                    rendered_noticeable,
+                    reply_markup=reply_markup,
+                )
+                await callback.answer()
+                return
+
+            await callback.message.edit_text(
+                rendered_noticeable,
+                reply_markup=reply_markup,
+            )
+            await callback.answer("Метрика переключена.")
+            return
+
+        next_period_days = resolve_next_period_days(callback_data.period_days)
+        rendered_report = build_period_report(
+            session=session,
+            user_id=user.id,
+            timezone_name=user.timezone,
+            summary_date_to=summary_date_to,
+            period_days=next_period_days,
+            workout_logging_enabled=user.workout_logging_enabled,
+            summary_preference=preference,
+        )
+
+    await callback.message.edit_text(
+        rendered_report,
+        reply_markup=build_period_report_keyboard(period_days=next_period_days),
+    )
+    await callback.answer("Период переключён.")
 
 
 @router.message(Command("goal"))
@@ -1476,6 +2419,228 @@ async def handle_goal(
         ),
         reply_markup=build_main_keyboard(),
     )
+
+
+@router.message(Command("files"))
+async def handle_files(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        files = DataExchangeService(session).list_files(user_id=user_id)
+
+    await render_data_exchange_files_message(message, files=files)
+
+
+@router.callback_query(DataExchangeFileCallback.filter())
+async def handle_data_exchange_file_callback(
+    callback: CallbackQuery,
+    callback_data: DataExchangeFileCallback,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = callback.from_user
+    if telegram_user is None:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+    if callback.message is None:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+
+    with session_scope(session_factory) as session:
+        if not (
+            is_admin_user(telegram_user.id, admin_user_ids)
+            or UserAccessRepository(session).is_allowed(telegram_user.id)
+        ):
+            await callback.answer("Нет доступа к боту. Попроси администратора его выдать.", show_alert=True)
+            return
+
+        user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
+        if user is None:
+            user, _created = UserRepository(session).get_or_create(
+                telegram_user_id=telegram_user.id,
+                username=telegram_user.username,
+            )
+        exchange_service = DataExchangeService(session)
+
+        if callback_data.action == "refresh":
+            files = exchange_service.list_files(user_id=user.id)
+            await safe_edit_message_text(
+                callback.message,
+                text=build_data_exchange_files_response(files),
+                reply_markup=build_data_exchange_files_keyboard(files=files),
+            )
+            await callback.answer()
+            return
+
+        if callback_data.action == "create_export":
+            try:
+                export_result = exchange_service.create_export_files(user=user)
+            except FileLimitExceededError as exc:
+                await callback.answer(str(exc), show_alert=True)
+                return
+            files = exchange_service.list_files(user_id=user.id)
+            await safe_edit_message_text(
+                callback.message,
+                text=build_data_exchange_files_response(files),
+                reply_markup=build_data_exchange_files_keyboard(files=files),
+            )
+            prepared_count = len(export_result.files)
+            await callback.answer(
+                "Экспорт подготовлен." if prepared_count == 1 else "Файлы экспорта подготовлены."
+            )
+            return
+
+        exchange_file = DataExchangeFileRepository(session).get_by_id_for_user(
+            file_id=callback_data.file_id,
+            user_id=user.id,
+        )
+        if exchange_file is None:
+            await callback.answer("Файл уже удалён или недоступен.", show_alert=True)
+            return
+
+        if callback_data.action == "delete":
+            exchange_service.delete_file(exchange_file=exchange_file)
+            files = exchange_service.list_files(user_id=user.id)
+            await safe_edit_message_text(
+                callback.message,
+                text=build_data_exchange_files_response(files),
+                reply_markup=build_data_exchange_files_keyboard(files=files),
+            )
+            await callback.answer("Файл удалён.")
+            return
+
+        if callback_data.action == "import":
+            try:
+                import_result = exchange_service.import_file(exchange_file=exchange_file, user=user)
+            except DuplicateDataRowError as exc:
+                DataExchangeFileRepository(session).mark_error(
+                    file_id=exchange_file.id,
+                    processing_message=str(exc),
+                )
+                files = exchange_service.list_files(user_id=user.id)
+                await safe_edit_message_text(
+                    callback.message,
+                    text=build_data_exchange_files_response(files),
+                    reply_markup=build_data_exchange_files_keyboard(files=files),
+                )
+                await callback.answer("Импорт не выполнен.", show_alert=True)
+                await callback.message.answer(
+                    "Импорт не завершён.\n"
+                    f"Причина: {exc}"
+                )
+                return
+            except ValueError as exc:
+                await callback.answer(str(exc), show_alert=True)
+                return
+            files = exchange_service.list_files(user_id=user.id)
+            await safe_edit_message_text(
+                callback.message,
+                text=build_data_exchange_files_response(files),
+                reply_markup=build_data_exchange_files_keyboard(files=files),
+            )
+            await callback.answer("Импорт выполнен.")
+            if import_result.contract_type == CSV_CONTRACT_TYPE_WORKOUT:
+                completion_text = (
+                    "Импорт завершён.\n"
+                    f"- тренировок: {import_result.workout_entry_count}\n"
+                    "Файл помечен как обработанный."
+                )
+            else:
+                completion_text = (
+                    "Импорт завершён.\n"
+                    f"- записей еды: {import_result.food_entry_count}\n"
+                    f"- записей воды: {import_result.water_entry_count}\n"
+                    "Файл помечен как обработанный."
+                )
+            await callback.message.answer(completion_text)
+            return
+
+        if callback_data.action == "download":
+            file_path = exchange_service.get_download_path(exchange_file=exchange_file)
+            input_file = FSInputFile(file_path, filename=exchange_file.original_filename)
+            await callback.message.answer_document(input_file)
+            if exchange_file.status is not DataExchangeStatus.PROCESSED:
+                exchange_service.mark_export_downloaded(exchange_file=exchange_file)
+            files = exchange_service.list_files(user_id=user.id)
+            await safe_edit_message_text(
+                callback.message,
+                text=build_data_exchange_files_response(files),
+                reply_markup=build_data_exchange_files_keyboard(files=files),
+            )
+            await callback.answer("Файл отправлен.")
+            return
+
+        await callback.answer("Неизвестное действие.", show_alert=True)
+
+
+@router.message(F.document)
+async def handle_document_upload(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    temp_path: Path | None = None
+    try:
+        temp_path, original_filename = await download_message_document_to_temp_file(message)
+        with session_scope(session_factory) as session:
+            _, _user_id = ensure_user_registered(message, session)
+            user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
+            if user is None:
+                raise RuntimeError("User profile was not found after registration")
+            exchange_service = DataExchangeService(session)
+            try:
+                sha256, validation_result = exchange_service.validate_import_file(
+                    user=user,
+                    source_path=temp_path,
+                    original_filename=original_filename,
+                )
+                exchange_service.create_import_file(
+                    user=user,
+                    source_path=temp_path,
+                    original_filename=original_filename,
+                    sha256=sha256,
+                    validation_result=validation_result,
+                )
+            except UnsupportedExchangeFileError as exc:
+                await message.answer(str(exc), reply_markup=build_main_keyboard())
+                return
+            except DuplicateFileError as exc:
+                await message.answer(
+                    "Файл не принят.\n\n"
+                    f"{exc}",
+                    reply_markup=build_main_keyboard(),
+                )
+                return
+            except DuplicateDataRowError as exc:
+                await message.answer(
+                    "Файл не принят.\n\n"
+                    f"{exc}",
+                    reply_markup=build_main_keyboard(),
+                )
+                return
+            except FileLimitExceededError as exc:
+                await message.answer(str(exc), reply_markup=build_main_keyboard())
+                return
+
+        response_text = build_import_validation_response_text(validation_result)
+
+        await message.answer(
+            response_text,
+            reply_markup=build_main_keyboard(),
+        )
+    finally:
+        if temp_path is not None:
+            with suppress(FileNotFoundError):
+                temp_path.unlink()
  
  
 @router.message(F.text == WATER_250_ML_BUTTON_TEXT)
@@ -1513,12 +2678,13 @@ async def handle_water_250_ml(
             user_id=user_id,
             timezone_name=user.timezone,
             summary_date=summary_date,
+            workout_logging_enabled=user.workout_logging_enabled,
             summary_preference=preference,
             metric_deltas={"water": 250.0},
         )
 
     await message.answer(
-        build_write_confirmation_response(saved_items, day_report),
+        build_write_confirmation_response(saved_items, day_report=day_report),
         reply_markup=build_main_keyboard(),
     )
 
@@ -1569,6 +2735,13 @@ async def handle_message(
             )
             return
 
+        if is_photo_media_group_message(message):
+            await message.answer(
+                "Пока я умею разбирать только одно изображение за раз. Пришли одно основное фото или один скриншот.",
+                reply_markup=build_main_keyboard(),
+            )
+            return
+
         routing_decision = message_routing_service.route(
             extraction_request,
             has_active_conversation_session=active_conversation_session_id is not None,
@@ -1604,6 +2777,7 @@ async def handle_message(
                     timezone_name=user.timezone,
                     nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                     reference_at=current_time,
+                    workout_logging_enabled=user.workout_logging_enabled,
                 )
                 conversation_reply = await asyncio.to_thread(
                     conversation_service.reply,
@@ -1674,9 +2848,16 @@ async def handle_message(
                 if user is None:
                     raise RuntimeError("User profile was not found after registration")
                 summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+                if payload_contains_workout_entries(extraction_result.payload) and not user.workout_logging_enabled:
+                    await message.answer(
+                        "Запись тренировок сейчас выключена. Включи её в /settings, если хочешь сохранять такие сообщения.",
+                        reply_markup=build_main_keyboard(),
+                    )
+                    return
 
                 saved_food_entries: list = []
                 saved_items = build_saved_items_from_payload(extraction_result.payload)
+                extracted_workout_metric_lines = build_extracted_workout_metric_lines(extraction_result.payload)
                 occurred_at_values: list[datetime] = []
                 for extracted_entry in extraction_result.payload.entries:
                     occurred_at = extracted_entry.occurred_at or datetime.now(timezone.utc)
@@ -1684,7 +2865,7 @@ async def handle_message(
                         user_id=user_id,
                         entry_type=extracted_entry.type,
                         occurred_at=occurred_at,
-                        source_text=None,
+                        source_text=extraction_request.text if extracted_entry.type is EntryType.WORKOUT else None,
                         extraction_provider=extraction_result.extraction_provider,
                         extraction_model=extraction_result.extraction_model,
                         extraction_raw_payload=extraction_result.raw_payload,
@@ -1701,6 +2882,41 @@ async def handle_message(
                     occurred_at_values.append(occurred_at)
                     if extracted_entry.type is EntryType.FOOD:
                         saved_food_entries.append(saved_entry)
+                    if extracted_entry.type is EntryType.WORKOUT:
+                        persisted_items = sorted(saved_entry.items, key=lambda current: current.position)
+                        for persisted_item, extracted_item in zip(persisted_items, extracted_entry.items):
+                            if not extracted_item.metrics:
+                                continue
+                            EntryItemMetricRepository(session).upsert_metrics(
+                                entry_item_id=persisted_item.id,
+                                metric_values=[
+                                    EntryItemMetricValue(
+                                        code=metric.code,
+                                        value=metric.value,
+                                        confidence=metric.confidence,
+                                    )
+                                    for metric in extracted_item.metrics
+                                ],
+                            )
+                            workout_calories = next(
+                                (
+                                    metric
+                                    for metric in extracted_item.metrics
+                                    if metric.code == "workout_calories"
+                                ),
+                                None,
+                            )
+                            if workout_calories is not None:
+                                EntryItemMetricRepository(session).upsert_metrics(
+                                    entry_item_id=persisted_item.id,
+                                    metric_values=[
+                                        EntryItemMetricValue(
+                                            code="workout_calorie_credit",
+                                            value=calculate_default_workout_calorie_credit(workout_calories.value),
+                                            confidence=workout_calories.confidence,
+                                        )
+                                    ],
+                                )
 
                 if saved_food_entries:
                     nutrition_flow_result = StoredEntryNutritionEstimationUseCase(
@@ -1718,7 +2934,10 @@ async def handle_message(
                     timezone_name=user.timezone,
                     nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                 )
-                if len(summary_dates) == 1:
+                if len(summary_dates) == 1 and (
+                    payload_contains_food_or_water_entries(extraction_result.payload)
+                    or payload_contains_credit_eligible_workout_entries(extraction_result.payload)
+                ):
                     summary_date = next(iter(summary_dates))
                     metric_deltas = resolve_metric_deltas(
                         saved_items=saved_items,
@@ -1731,6 +2950,7 @@ async def handle_message(
                             timezone_name=user.timezone,
                             nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                             reference_at=max(occurred_at_values),
+                            workout_logging_enabled=user.workout_logging_enabled,
                         )
                         try:
                             coach_comment = await asyncio.to_thread(
@@ -1750,18 +2970,23 @@ async def handle_message(
                                 saved_food_entry.llm_comment = coach_comment
                     confirmation_text = build_write_confirmation_response(
                         saved_items,
-                        build_daily_report_for_summary_date(
+                        extra_lines=extracted_workout_metric_lines,
+                        day_report=build_daily_report_for_summary_date(
                             session=session,
                             user_id=user_id,
                             timezone_name=user.timezone,
                             summary_date=summary_date,
+                            workout_logging_enabled=user.workout_logging_enabled,
                             summary_preference=summary_preference,
                             metric_deltas=metric_deltas,
                         ),
                         coach_comment=coach_comment,
                     )
                 else:
-                    confirmation_text = build_write_confirmation_response(saved_items)
+                    confirmation_text = build_write_confirmation_response(
+                        saved_items,
+                        extra_lines=extracted_workout_metric_lines,
+                    )
         except FoodWriteFlowError as exc:
             await message.answer(str(exc), reply_markup=build_main_keyboard())
             return

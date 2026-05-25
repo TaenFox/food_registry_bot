@@ -77,7 +77,32 @@ _JOURNAL_PREFIXES = (
     "вода",
     "water",
 )
+_WORKOUT_JOURNAL_PREFIXES = (
+    "тренировка:",
+    "workout:",
+    "бег:",
+    "пробежка:",
+    "силовая:",
+    "кардио:",
+    "плавание:",
+    "растяжка:",
+)
+_WORKOUT_ACTIVITY_PATTERNS = (
+    "трениров",
+    "силов",
+    "кардио",
+    "бег",
+    "пробеж",
+    "велотрен",
+    "плаван",
+    "растяж",
+    "ходьб",
+)
 _QUANTITY_PATTERN = re.compile(r"^\s*\d+\s*(мл|ml|г|гр|кг|kg)\b", re.IGNORECASE)
+_WORKOUT_DURATION_PATTERN = re.compile(
+    r"\b\d+\s*(мин(?:ут(?:а|ы)?)?|minute|minutes|min)\b",
+    re.IGNORECASE,
+)
 _WORD_PATTERN = re.compile(r"\w+", re.UNICODE)
 
 
@@ -109,6 +134,8 @@ class RuleBasedMessageRoutingService:
                 lowered_photo_text = request.text.strip().lower()
                 if lowered_photo_text.startswith("/"):
                     return MessageRoutingDecision(route=AMBIGUOUS, reason="slash_like_photo_text")
+                if self._looks_like_explicit_photo_journal(lowered_photo_text):
+                    return MessageRoutingDecision(route=JOURNAL, reason="photo_journal_cue")
                 if self._looks_like_conversation_photo(
                     lowered_photo_text,
                 ):
@@ -126,6 +153,9 @@ class RuleBasedMessageRoutingService:
 
         if lowered_text.startswith("/"):
             return MessageRoutingDecision(route=AMBIGUOUS, reason="slash_like_text")
+
+        if self._looks_like_explicit_workout_journal(lowered_text):
+            return MessageRoutingDecision(route=JOURNAL, reason="workout_journal_cue")
 
         if self._looks_conversational(lowered_text):
             return MessageRoutingDecision(route=CONVERSATION, reason="conversation_cue")
@@ -159,6 +189,18 @@ class RuleBasedMessageRoutingService:
         return _QUANTITY_PATTERN.match(text) is not None
 
     @staticmethod
+    def _looks_like_explicit_workout_journal(text: str) -> bool:
+        if "?" in text:
+            return False
+
+        if text.startswith(_WORKOUT_JOURNAL_PREFIXES):
+            return True
+
+        return _WORKOUT_DURATION_PATTERN.search(text) is not None and any(
+            pattern in text for pattern in _WORKOUT_ACTIVITY_PATTERNS
+        )
+
+    @staticmethod
     def _looks_like_conversation_photo(
         text: str,
     ) -> bool:
@@ -169,6 +211,13 @@ class RuleBasedMessageRoutingService:
             return True
 
         return False
+
+    @staticmethod
+    def _looks_like_explicit_photo_journal(text: str) -> bool:
+        return (
+            RuleBasedMessageRoutingService._looks_like_journal(text)
+            or RuleBasedMessageRoutingService._looks_like_explicit_workout_journal(text)
+        )
 
     @staticmethod
     def _word_count(text: str) -> int:

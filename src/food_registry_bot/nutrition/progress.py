@@ -38,13 +38,14 @@ class DailyNutritionGoalProgressUseCase:
         summary: DailyNutritionSummary,
         water_summary: DailyWaterSummary,
         snapshot: DailyGoalSnapshot,
+        calorie_goal_adjustment: int = 0,
     ) -> DailyNutritionGoalProgress:
         return DailyNutritionGoalProgress(
             summary_date=summary.summary_date,
             calories=self._build_metric_progress(
                 metric_code="calories",
                 consumed_value=summary.totals.calories,
-                goal_value=snapshot.calorie_goal,
+                goal_value=snapshot.calorie_goal + calorie_goal_adjustment,
             ),
             protein=self._build_metric_progress(
                 metric_code="protein",
