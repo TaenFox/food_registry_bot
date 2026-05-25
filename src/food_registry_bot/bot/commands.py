@@ -20,10 +20,6 @@ USER_COMMAND_SPECS: tuple[tuple[str, str], ...] = (
 
 ADMIN_COMMAND_SPECS: tuple[tuple[str, str], ...] = (
     ("admin", "показать состояние системы"),
-    ("admin_users", "показать известных пользователей"),
-    ("admin_allow", "разрешить доступ пользователю"),
-    ("admin_deny", "запретить доступ пользователю"),
-    ("admin_delete_entries", "удалить все записи пользователя по Telegram ID"),
     ("admin_backfill_nutrition", "дозаполнить неполные nutrition metrics"),
 )
 

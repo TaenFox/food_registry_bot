@@ -21,6 +21,9 @@ from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.keyboards import (
     WATER_250_ML_BUTTON_TEXT,
     build_admin_delete_entries_confirmation_keyboard,
+    build_admin_overview_keyboard,
+    build_admin_user_actions_keyboard,
+    build_admin_user_list_keyboard,
     build_data_exchange_files_keyboard,
     build_goal_keyboard,
     build_main_keyboard,
@@ -39,7 +42,7 @@ from food_registry_bot.bot.message_routing import (
     RuleBasedMessageRoutingService,
 )
 from food_registry_bot.bot.payloads import (
-    AdminDeleteEntriesCallback,
+    AdminPanelCallback,
     DataExchangeFileCallback,
     GoalMessageCallback,
     PeriodReportCallback,
@@ -62,6 +65,7 @@ from food_registry_bot.db.repositories import (
     EntryItemMetricRepository,
     EntryItemMetricValue,
     EntryRepository,
+    KnownUserAccessView,
     UserGoalPreferenceRepository,
     UserAccessRepository,
     UserRepository,
@@ -152,6 +156,7 @@ EXCHANGE_DIRECTION_LABELS = {
 PERIOD_REPORT_PERIOD_SEQUENCE = (8, 16, 32)
 DEFAULT_PERIOD_REPORT_DAYS = PERIOD_REPORT_PERIOD_SEQUENCE[0]
 PERIOD_REPORT_SUBPERIOD_DAYS = 4
+ADMIN_USER_PAGE_SIZE = 10
 
 
 class FoodWriteFlowError(RuntimeError):
@@ -363,20 +368,6 @@ async def require_user_access(
     return False
 
 
-def parse_target_telegram_user_id(command: CommandObject | None) -> int | None:
-    if command is None or command.args is None:
-        return None
-
-    raw_value = command.args.strip()
-    if not raw_value:
-        return None
-
-    try:
-        return int(raw_value)
-    except ValueError:
-        return None
-
-
 def parse_positive_int_arg(command: CommandObject | None) -> int | None:
     if command is None or command.args is None:
         return None
@@ -429,38 +420,77 @@ def parse_goal_command_args(command: CommandObject | None) -> tuple[str, int] | 
     return metric_code, value
 
 
-def build_admin_users_response(
-    known_users: list,
-    admin_user_ids: tuple[int, ...],
-) -> str:
-    if not known_users and not admin_user_ids:
-        return "Пока нет известных пользователей."
-
-    lines = ["Пользователи:"]
-    rendered_ids: set[int] = set()
-
-    for known_user in known_users:
-        rendered_ids.add(known_user.telegram_user_id)
-        username_suffix = f" @{known_user.username}" if known_user.username else ""
-        if known_user.telegram_user_id in admin_user_ids:
-            lines.append(f"- {known_user.telegram_user_id}{username_suffix} [admin]")
+def build_admin_user_directory(known_users: list, admin_user_ids: tuple[int, ...]) -> list:
+    users_by_id = {known_user.telegram_user_id: known_user for known_user in known_users}
+    for admin_user_id in admin_user_ids:
+        if admin_user_id in users_by_id:
             continue
-
-        status = "доступ разрешён" if known_user.is_allowed else "доступ запрещён"
-        lines.append(f"- {known_user.telegram_user_id}{username_suffix} [{status}]")
-        next_command = (
-            f"/admin_deny {known_user.telegram_user_id}"
-            if known_user.is_allowed
-            else f"/admin_allow {known_user.telegram_user_id}"
+        users_by_id[admin_user_id] = KnownUserAccessView(
+            telegram_user_id=admin_user_id,
+            username=None,
+            has_profile=False,
+            is_allowed=False,
         )
-        lines.append(f"<code>{next_command}</code>")
+    admin_entries = [users_by_id[telegram_user_id] for telegram_user_id in sorted(admin_user_ids) if telegram_user_id in users_by_id]
+    regular_entries = [
+        users_by_id[telegram_user_id]
+        for telegram_user_id in sorted(users_by_id)
+        if telegram_user_id not in admin_user_ids
+    ]
+    return [*admin_entries, *regular_entries]
 
-    for admin_user_id in sorted(admin_user_ids):
-        if admin_user_id in rendered_ids:
-            continue
-        lines.append(f"- {admin_user_id} [admin]")
 
+def filter_manageable_known_users(known_users: list, admin_user_ids: tuple[int, ...]) -> list:
+    return [known_user for known_user in build_admin_user_directory(known_users, admin_user_ids) if known_user.telegram_user_id not in admin_user_ids]
+
+
+def build_admin_user_button_label(known_user, *, is_admin: bool) -> str:
+    username_part = f"@{known_user.username}" if known_user.username else str(known_user.telegram_user_id)
+    status_part = "admin" if is_admin else ("on" if known_user.is_allowed else "off")
+    return truncate_button_label(f"{known_user.telegram_user_id} · {username_part} · {status_part}", max_length=40)
+
+
+def build_admin_users_page_response(known_users: list, *, page: int, page_size: int, admin_user_ids: tuple[int, ...]) -> str:
+    if not known_users:
+        return "Пользователей для управления пока нет."
+
+    lines = [f"Пользователи (страница {page + 1}, по {page_size}):"]
+    for known_user in known_users:
+        username_suffix = f" @{known_user.username}" if known_user.username else ""
+        is_admin = known_user.telegram_user_id in admin_user_ids
+        status = "admin" if is_admin else ("доступ разрешён" if known_user.is_allowed else "доступ запрещён")
+        profile_status = "профиль есть" if known_user.has_profile else "профиля нет"
+        lines.append(
+            f"- {known_user.telegram_user_id}{username_suffix} [{status}; {profile_status}]"
+        )
+    lines.extend(["", "Выбери пользователя кнопкой ниже."])
     return "\n".join(lines)
+
+
+def build_admin_user_actions_response(*, known_user, entry_count: int, is_admin: bool) -> str:
+    username_suffix = f"@{known_user.username}" if known_user.username else "—"
+    access_status = "admin" if is_admin else ("разрешён" if known_user.is_allowed else "запрещён")
+    profile_status = "есть" if known_user.has_profile else "нет"
+    return "\n".join(
+        [
+            "Пользователь:",
+            f"- Telegram ID: {known_user.telegram_user_id}",
+            f"- username: {username_suffix}",
+            f"- доступ: {access_status}",
+            f"- профиль: {profile_status}",
+            f"- записей в журнале: {entry_count}",
+        ]
+    )
+
+
+def build_admin_delete_entries_prompt(*, telegram_user_id: int, entry_count: int) -> str:
+    return "\n".join(
+        [
+            "Подтверди удаление данных пользователя.",
+            f"Telegram ID: {telegram_user_id}",
+            f"Будет удалено записей: {entry_count}",
+        ]
+    )
 
 
 def build_admin_backfill_response(result: NutritionBackfillCompleted, limit: int) -> str:
@@ -534,11 +564,7 @@ def build_admin_overview_response(
     backfill_status_line: str,
     app_version: str,
 ) -> str:
-    regular_known_users = [
-        known_user
-        for known_user in known_users
-        if known_user.telegram_user_id not in admin_user_ids
-    ]
+    regular_known_users = filter_manageable_known_users(known_users, admin_user_ids)
     allowed_count = sum(1 for known_user in regular_known_users if known_user.is_allowed)
     denied_count = sum(1 for known_user in regular_known_users if not known_user.is_allowed)
     profile_count = sum(1 for known_user in regular_known_users if known_user.has_profile)
@@ -556,15 +582,35 @@ def build_admin_overview_response(
             f"- food entries без полного набора метрик: {incomplete_food_entry_count}",
             f"- дозаполнение nutrition metrics: {backfill_status_line}",
             "",
-            "Доступные команды:",
+            "Доступные действия:",
+            "- кнопка «Управление пользователями»",
             "- /admin",
-            "- /admin_users",
-            "- <code>/admin_allow TELEGRAM_USER_ID</code>",
-            "- <code>/admin_deny TELEGRAM_USER_ID</code>",
-            "- <code>/admin_delete_entries TELEGRAM_USER_ID</code>",
             "- <code>/admin_backfill_nutrition [LIMIT]</code>",
         ]
     )
+
+
+def load_admin_known_users_page(
+    *,
+    known_users: list,
+    page: int,
+    page_size: int = ADMIN_USER_PAGE_SIZE,
+) -> tuple[int, list, bool, bool]:
+    page = max(page, 0)
+    while True:
+        start = page * page_size
+        if known_users or page == 0:
+            page_entries = known_users[start:start + page_size]
+            has_next_page = start + page_size < len(known_users)
+            return page, page_entries, page > 0, has_next_page
+        page -= 1
+
+
+def find_known_user(known_users: list, *, telegram_user_id: int):
+    for known_user in known_users:
+        if known_user.telegram_user_id == telegram_user_id:
+            return known_user
+    return None
 
 
 async def run_admin_backfill_task(
@@ -1485,159 +1531,6 @@ async def start_typing_indicator(message: Message) -> asyncio.Task | None:
     return asyncio.create_task(_typing_action_loop(message=message))
 
 
-@router.message(Command("admin_allow"))
-async def handle_admin_allow(
-    message: Message,
-    command: CommandObject,
-    session_factory: sessionmaker[Session],
-    admin_user_ids: tuple[int, ...] = (),
-) -> None:
-    telegram_user = message.from_user
-    if telegram_user is None or not is_admin_user(telegram_user.id, admin_user_ids):
-        await message.answer("Команда доступна только администратору.")
-        return
-
-    target_user_id = parse_target_telegram_user_id(command)
-    if target_user_id is None:
-        await message.answer("Использование: <code>/admin_allow TELEGRAM_USER_ID</code>")
-        return
-
-    with session_scope(session_factory) as session:
-        UserAccessRepository(session).set_access(
-            telegram_user_id=target_user_id,
-            username=None,
-            is_allowed=True,
-        )
-
-    await message.answer(f"Доступ разрешён для пользователя {target_user_id}.")
-
-
-@router.message(Command("admin_deny"))
-async def handle_admin_deny(
-    message: Message,
-    command: CommandObject,
-    session_factory: sessionmaker[Session],
-    admin_user_ids: tuple[int, ...] = (),
-) -> None:
-    telegram_user = message.from_user
-    if telegram_user is None or not is_admin_user(telegram_user.id, admin_user_ids):
-        await message.answer("Команда доступна только администратору.")
-        return
-
-    target_user_id = parse_target_telegram_user_id(command)
-    if target_user_id is None:
-        await message.answer("Использование: <code>/admin_deny TELEGRAM_USER_ID</code>")
-        return
-
-    with session_scope(session_factory) as session:
-        UserAccessRepository(session).set_access(
-            telegram_user_id=target_user_id,
-            username=None,
-            is_allowed=False,
-        )
-
-    await message.answer(f"Доступ запрещён для пользователя {target_user_id}.")
-
-
-@router.message(Command("admin_users"))
-async def handle_admin_users(
-    message: Message,
-    session_factory: sessionmaker[Session],
-    admin_user_ids: tuple[int, ...] = (),
-) -> None:
-    telegram_user = message.from_user
-    if telegram_user is None or not is_admin_user(telegram_user.id, admin_user_ids):
-        await message.answer("Команда доступна только администратору.")
-        return
-
-    with session_scope(session_factory) as session:
-        known_users = UserAccessRepository(session).list_known_users()
-
-    await message.answer(build_admin_users_response(known_users, admin_user_ids))
-
-
-@router.message(Command("admin_delete_entries"))
-async def handle_admin_delete_entries(
-    message: Message,
-    command: CommandObject,
-    session_factory: sessionmaker[Session],
-    admin_user_ids: tuple[int, ...] = (),
-) -> None:
-    telegram_user = message.from_user
-    if telegram_user is None or not is_admin_user(telegram_user.id, admin_user_ids):
-        await message.answer("Команда доступна только администратору.")
-        return
-
-    target_user_id = parse_target_telegram_user_id(command)
-    if target_user_id is None:
-        await message.answer("Использование: <code>/admin_delete_entries TELEGRAM_USER_ID</code>")
-        return
-
-    with session_scope(session_factory) as session:
-        user = UserRepository(session).get_by_telegram_user_id(target_user_id)
-        if user is None:
-            await message.answer(f"Пользователь с Telegram ID {target_user_id} не найден.")
-            return
-
-        entry_count = len(EntryRepository(session).list_recent_for_user(user_id=user.id, limit=100000))
-
-    await message.answer(
-        "Подтверди удаление записей пользователя.\n"
-        f"Telegram ID: {target_user_id}\n"
-        f"Будет удалено записей: {entry_count}",
-        reply_markup=build_admin_delete_entries_confirmation_keyboard(
-            telegram_user_id=target_user_id,
-        ),
-    )
-
-
-@router.callback_query(AdminDeleteEntriesCallback.filter())
-async def handle_admin_delete_entries_callback(
-    callback: CallbackQuery,
-    callback_data: AdminDeleteEntriesCallback,
-    session_factory: sessionmaker[Session],
-    admin_user_ids: tuple[int, ...] = (),
-) -> None:
-    telegram_user = callback.from_user
-    if telegram_user is None:
-        await callback.answer("Пользователь не найден.", show_alert=True)
-        return
-    if callback.message is None:
-        await callback.answer("Сообщение недоступно.", show_alert=True)
-        return
-    if not is_admin_user(telegram_user.id, admin_user_ids):
-        await callback.answer("Команда доступна только администратору.", show_alert=True)
-        return
-
-    if callback_data.action == "close":
-        await safe_delete_message(callback.message)
-        await callback.answer()
-        return
-
-    if callback_data.action == "cancel":
-        await safe_edit_message_text(
-            callback.message,
-            text="Удаление записей отменено.",
-            reply_markup=None,
-        )
-        await callback.answer("Удаление отменено.")
-        return
-
-    with session_scope(session_factory) as session:
-        user = UserRepository(session).get_by_telegram_user_id(callback_data.telegram_user_id)
-        if user is None:
-            await callback.answer("Пользователь уже недоступен.", show_alert=True)
-            return
-        deleted_count = EntryRepository(session).delete_all_for_user(user_id=user.id)
-
-    await safe_edit_message_text(
-        callback.message,
-        text=f"Удалено записей пользователя {callback_data.telegram_user_id}: {deleted_count}.",
-        reply_markup=None,
-    )
-    await callback.answer("Удаление выполнено.")
-
-
 @router.message(Command("admin"))
 async def handle_admin(
     message: Message,
@@ -1665,8 +1558,226 @@ async def handle_admin(
             incomplete_food_entry_count=incomplete_food_entry_count,
             backfill_status_line=build_admin_backfill_status_line(backfill_tracker),
             app_version=app_version,
-        )
+        ),
+        reply_markup=build_admin_overview_keyboard(),
     )
+
+
+@router.callback_query(AdminPanelCallback.filter())
+async def handle_admin_panel_callback(
+    callback: CallbackQuery,
+    callback_data: AdminPanelCallback,
+    session_factory: sessionmaker[Session],
+    backfill_tracker: AdminBackfillTracker,
+    admin_user_ids: tuple[int, ...] = (),
+    app_version: str = "unknown",
+) -> None:
+    telegram_user = callback.from_user
+    if telegram_user is None:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+    if callback.message is None:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    if not is_admin_user(telegram_user.id, admin_user_ids):
+        await callback.answer("Команда доступна только администратору.", show_alert=True)
+        return
+
+    if callback_data.action == "close":
+        await safe_delete_message(callback.message)
+        await callback.answer()
+        return
+
+    with session_scope(session_factory) as session:
+        known_users = UserAccessRepository(session).list_known_users()
+        directory_users = build_admin_user_directory(known_users, admin_user_ids)
+        manageable_users = filter_manageable_known_users(known_users, admin_user_ids)
+
+        if callback_data.action == "overview":
+            incomplete_food_entry_count = EntryRepository(session).count_incomplete_food_entries(
+                required_metric_codes=list(SUPPORTED_NUTRITION_METRIC_CODES)
+            )
+            await safe_edit_message_text(
+                callback.message,
+                text=build_admin_overview_response(
+                    admin_user_id=telegram_user.id,
+                    admin_user_ids=admin_user_ids,
+                    known_users=known_users,
+                    incomplete_food_entry_count=incomplete_food_entry_count,
+                    backfill_status_line=build_admin_backfill_status_line(backfill_tracker),
+                    app_version=app_version,
+                ),
+                reply_markup=build_admin_overview_keyboard(),
+            )
+            await callback.answer()
+            return
+
+        if callback_data.action == "open_users":
+            page, page_users, has_previous_page, has_next_page = load_admin_known_users_page(
+                known_users=directory_users,
+                page=callback_data.page,
+                page_size=ADMIN_USER_PAGE_SIZE,
+            )
+            await safe_edit_message_text(
+                callback.message,
+                text=build_admin_users_page_response(
+                    page_users,
+                    page=page,
+                    page_size=ADMIN_USER_PAGE_SIZE,
+                    admin_user_ids=admin_user_ids,
+                ),
+                reply_markup=build_admin_user_list_keyboard(
+                    user_buttons=[
+                        (
+                            build_admin_user_button_label(
+                                known_user,
+                                is_admin=known_user.telegram_user_id in admin_user_ids,
+                            ),
+                            known_user.telegram_user_id,
+                        )
+                        for known_user in page_users
+                    ],
+                    page=page,
+                    has_previous_page=has_previous_page,
+                    has_next_page=has_next_page,
+                ),
+            )
+            await callback.answer()
+            return
+
+        known_user = find_known_user(directory_users, telegram_user_id=callback_data.telegram_user_id)
+        if known_user is None:
+            await callback.answer("Пользователь уже недоступен.", show_alert=True)
+            return
+        is_admin_target = known_user.telegram_user_id in admin_user_ids
+
+        if callback_data.action == "allow_user":
+            if is_admin_target:
+                await callback.answer("Для администратора это действие недоступно.", show_alert=True)
+                return
+            updated_access = UserAccessRepository(session).set_access(
+                telegram_user_id=known_user.telegram_user_id,
+                username=known_user.username,
+                is_allowed=True,
+            )
+            known_user = find_known_user(
+                build_admin_user_directory(UserAccessRepository(session).list_known_users(), admin_user_ids),
+                telegram_user_id=callback_data.telegram_user_id,
+            )
+            entry_owner = UserRepository(session).get_by_telegram_user_id(callback_data.telegram_user_id)
+            entry_count = 0
+            if entry_owner is not None:
+                entry_count = len(EntryRepository(session).list_recent_for_user(user_id=entry_owner.id, limit=100000))
+            await safe_edit_message_text(
+                callback.message,
+                text=build_admin_user_actions_response(
+                    known_user=known_user,
+                    entry_count=entry_count,
+                    is_admin=False,
+                ),
+                reply_markup=build_admin_user_actions_keyboard(
+                    telegram_user_id=updated_access.telegram_user_id,
+                    page=callback_data.page,
+                    is_allowed=True,
+                    is_admin=False,
+                ),
+            )
+            await callback.answer("Доступ разрешён.")
+            return
+
+        if callback_data.action == "deny_user":
+            if is_admin_target:
+                await callback.answer("Для администратора это действие недоступно.", show_alert=True)
+                return
+            updated_access = UserAccessRepository(session).set_access(
+                telegram_user_id=known_user.telegram_user_id,
+                username=known_user.username,
+                is_allowed=False,
+            )
+            known_user = find_known_user(
+                build_admin_user_directory(UserAccessRepository(session).list_known_users(), admin_user_ids),
+                telegram_user_id=callback_data.telegram_user_id,
+            )
+            entry_owner = UserRepository(session).get_by_telegram_user_id(callback_data.telegram_user_id)
+            entry_count = 0
+            if entry_owner is not None:
+                entry_count = len(EntryRepository(session).list_recent_for_user(user_id=entry_owner.id, limit=100000))
+            await safe_edit_message_text(
+                callback.message,
+                text=build_admin_user_actions_response(
+                    known_user=known_user,
+                    entry_count=entry_count,
+                    is_admin=False,
+                ),
+                reply_markup=build_admin_user_actions_keyboard(
+                    telegram_user_id=updated_access.telegram_user_id,
+                    page=callback_data.page,
+                    is_allowed=False,
+                    is_admin=False,
+                ),
+            )
+            await callback.answer("Доступ запрещён.")
+            return
+
+        entry_owner = UserRepository(session).get_by_telegram_user_id(callback_data.telegram_user_id)
+        entry_count = 0
+        if entry_owner is not None:
+            entry_count = len(EntryRepository(session).list_recent_for_user(user_id=entry_owner.id, limit=100000))
+
+        if callback_data.action == "open_user":
+            await safe_edit_message_text(
+                callback.message,
+                text=build_admin_user_actions_response(
+                    known_user=known_user,
+                    entry_count=entry_count,
+                    is_admin=is_admin_target,
+                ),
+                reply_markup=build_admin_user_actions_keyboard(
+                    telegram_user_id=known_user.telegram_user_id,
+                    page=callback_data.page,
+                    is_allowed=known_user.is_allowed,
+                    is_admin=is_admin_target,
+                ),
+            )
+            await callback.answer()
+            return
+
+        if callback_data.action == "prompt_delete_user_entries":
+            await safe_edit_message_text(
+                callback.message,
+                text=build_admin_delete_entries_prompt(
+                    telegram_user_id=known_user.telegram_user_id,
+                    entry_count=entry_count,
+                ),
+                reply_markup=build_admin_delete_entries_confirmation_keyboard(
+                    telegram_user_id=known_user.telegram_user_id,
+                    page=callback_data.page,
+                ),
+            )
+            await callback.answer()
+            return
+
+        if callback_data.action != "confirm_delete_user_entries":
+            await callback.answer("Неизвестное действие.", show_alert=True)
+            return
+
+        if entry_owner is None:
+            await safe_edit_message_text(
+                callback.message,
+                text=f"Удалено записей пользователя {callback_data.telegram_user_id}: 0.",
+                reply_markup=None,
+            )
+            await callback.answer("Удаление выполнено.")
+            return
+
+        deleted_count = EntryRepository(session).delete_all_for_user(user_id=entry_owner.id)
+
+    await safe_edit_message_text(
+        callback.message,
+        text=f"Удалено записей пользователя {callback_data.telegram_user_id}: {deleted_count}.",
+        reply_markup=None,
+    )
+    await callback.answer("Удаление выполнено.")
 
 
 @router.message(Command("admin_backfill_nutrition"))

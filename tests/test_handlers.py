@@ -16,12 +16,8 @@ from food_registry_bot.bot.handlers import (
     build_data_exchange_files_response,
     build_import_validation_response_text,
     handle_admin,
-    handle_admin_allow,
+    handle_admin_panel_callback,
     handle_admin_backfill_nutrition,
-    handle_admin_delete_entries_callback,
-    handle_admin_delete_entries,
-    handle_admin_deny,
-    handle_admin_users,
     handle_data_exchange_file_callback,
     handle_goal,
     handle_goal_message_callback,
@@ -39,7 +35,7 @@ from food_registry_bot.bot.handlers import (
 )
 from food_registry_bot.bot.message_routing import MessageRoutingDecision
 from food_registry_bot.bot.payloads import (
-    AdminDeleteEntriesCallback,
+    AdminPanelCallback,
     DataExchangeFileCallback,
     GoalMessageCallback,
     PeriodReportCallback,
@@ -247,71 +243,6 @@ async def test_health_denies_unallowed_user() -> None:
     )
 
 
-async def test_admin_allow_sets_user_access() -> None:
-    session_factory = create_session_factory()
-    message = SimpleNamespace(
-        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
-        answer=AsyncMock(),
-    )
-    command = SimpleNamespace(args=str(ALLOWED_USER_ID))
-
-    await handle_admin_allow(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
-
-    with session_factory() as session:
-        access = session.query(UserAccess).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
-
-    assert access.is_allowed is True
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == (f"Доступ разрешён для пользователя {ALLOWED_USER_ID}.",)
-
-
-async def test_admin_deny_sets_user_access_false() -> None:
-    session_factory = create_session_factory()
-    allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
-    message = SimpleNamespace(
-        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
-        answer=AsyncMock(),
-    )
-    command = SimpleNamespace(args=str(ALLOWED_USER_ID))
-
-    await handle_admin_deny(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
-
-    with session_factory() as session:
-        access = session.query(UserAccess).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
-
-    assert access.is_allowed is False
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == (f"Доступ запрещён для пользователя {ALLOWED_USER_ID}.",)
-
-
-async def test_admin_commands_are_forbidden_for_non_admin() -> None:
-    session_factory = create_session_factory()
-    message = SimpleNamespace(
-        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
-        answer=AsyncMock(),
-    )
-    command = SimpleNamespace(args=str(DENIED_USER_ID))
-
-    await handle_admin_allow(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
-
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Команда доступна только администратору.",)
-
-
-async def test_admin_allow_returns_safe_usage_text_for_missing_argument() -> None:
-    session_factory = create_session_factory()
-    message = SimpleNamespace(
-        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
-        answer=AsyncMock(),
-    )
-    command = SimpleNamespace(args=None)
-
-    await handle_admin_allow(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
-
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Использование: <code>/admin_allow TELEGRAM_USER_ID</code>",)
-
-
 async def test_admin_returns_system_overview_and_commands() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
@@ -358,15 +289,15 @@ async def test_admin_returns_system_overview_and_commands() -> None:
             "- food entries без полного набора метрик: 1\n"
             "- дозаполнение nutrition metrics: idle\n"
             "\n"
-            "Доступные команды:\n"
+            "Доступные действия:\n"
+            "- кнопка «Управление пользователями»\n"
             "- /admin\n"
-            "- /admin_users\n"
-            "- <code>/admin_allow TELEGRAM_USER_ID</code>\n"
-            "- <code>/admin_deny TELEGRAM_USER_ID</code>\n"
-            "- <code>/admin_delete_entries TELEGRAM_USER_ID</code>\n"
             "- <code>/admin_backfill_nutrition [LIMIT]</code>"
         ),
     )
+    reply_markup = message.answer.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Управление пользователями"
+    assert reply_markup.inline_keyboard[1][0].text == "Закрыть"
 
 
 async def test_admin_overview_excludes_admin_from_user_counters() -> None:
@@ -403,12 +334,9 @@ async def test_admin_overview_excludes_admin_from_user_counters() -> None:
             "- food entries без полного набора метрик: 0\n"
             "- дозаполнение nutrition metrics: idle\n"
             "\n"
-            "Доступные команды:\n"
+            "Доступные действия:\n"
+            "- кнопка «Управление пользователями»\n"
             "- /admin\n"
-            "- /admin_users\n"
-            "- <code>/admin_allow TELEGRAM_USER_ID</code>\n"
-            "- <code>/admin_deny TELEGRAM_USER_ID</code>\n"
-            "- <code>/admin_delete_entries TELEGRAM_USER_ID</code>\n"
             "- <code>/admin_backfill_nutrition [LIMIT]</code>"
         ),
     )
@@ -451,33 +379,95 @@ async def test_admin_is_forbidden_for_non_admin() -> None:
     assert message.answer.await_args.args == ("Команда доступна только администратору.",)
 
 
-async def test_admin_users_returns_known_users_with_status_and_commands() -> None:
+async def test_admin_panel_users_returns_first_page_with_buttons() -> None:
     session_factory = create_session_factory()
-    allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
     with session_factory() as session:
-        session.add(User(telegram_user_id=DENIED_USER_ID, username="denied_user", timezone="Europe/Moscow"))
-        session.add(UserAccess(telegram_user_id=DENIED_USER_ID, username="denied_user", is_allowed=False))
+        for index in range(12):
+            telegram_user_id = 3000 + index
+            username = f"user_{index}"
+            session.add(UserAccess(telegram_user_id=telegram_user_id, username=username, is_allowed=index % 2 == 0))
         session.commit()
 
-    message = SimpleNamespace(
+    callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
         answer=AsyncMock(),
     )
 
-    await handle_admin_users(message, session_factory, admin_user_ids=(ADMIN_ID,))
-
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == (
-        "Пользователи:\n"
-        f"- {ALLOWED_USER_ID} @allowed_user [доступ разрешён]\n"
-        f"<code>/admin_deny {ALLOWED_USER_ID}</code>\n"
-        f"- {DENIED_USER_ID} @denied_user [доступ запрещён]\n"
-        f"<code>/admin_allow {DENIED_USER_ID}</code>\n"
-        f"- {ADMIN_ID} [admin]",
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="open_users", page=0),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
     )
 
+    callback.message.edit_text.assert_awaited_once()
+    assert callback.message.edit_text.await_args.args == (
+        "Пользователи (страница 1, по 10):\n"
+        f"- {ADMIN_ID} [admin; профиля нет]\n"
+        "- 3000 @user_0 [доступ разрешён; профиля нет]\n"
+        "- 3001 @user_1 [доступ запрещён; профиля нет]\n"
+        "- 3002 @user_2 [доступ разрешён; профиля нет]\n"
+        "- 3003 @user_3 [доступ запрещён; профиля нет]\n"
+        "- 3004 @user_4 [доступ разрешён; профиля нет]\n"
+        "- 3005 @user_5 [доступ запрещён; профиля нет]\n"
+        "- 3006 @user_6 [доступ разрешён; профиля нет]\n"
+        "- 3007 @user_7 [доступ запрещён; профиля нет]\n"
+        "- 3008 @user_8 [доступ разрешён; профиля нет]\n"
+        "\n"
+        "Выбери пользователя кнопкой ниже.",
+    )
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text.startswith(str(ADMIN_ID))
+    assert reply_markup.inline_keyboard[9][0].text.startswith("3008")
+    assert reply_markup.inline_keyboard[10][0].text == "Вперёд →"
+    assert reply_markup.inline_keyboard[11][0].text == "К панели"
+    assert reply_markup.inline_keyboard[12][0].text == "Закрыть"
+    callback.answer.assert_awaited_once_with()
 
-async def test_admin_users_shows_new_denied_user_after_first_contact() -> None:
+
+async def test_admin_panel_users_returns_second_page() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        for index in range(12):
+            telegram_user_id = 4000 + index
+            username = f"user_{index}"
+            session.add(UserAccess(telegram_user_id=telegram_user_id, username=username, is_allowed=True))
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="open_users", page=1),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
+    )
+
+    assert callback.message.edit_text.await_args.args == (
+        "Пользователи (страница 2, по 10):\n"
+        "- 4009 @user_9 [доступ разрешён; профиля нет]\n"
+        "- 4010 @user_10 [доступ разрешён; профиля нет]\n"
+        "- 4011 @user_11 [доступ разрешён; профиля нет]\n"
+        "\n"
+        "Выбери пользователя кнопкой ниже.",
+    )
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text.startswith("4009")
+    assert reply_markup.inline_keyboard[1][0].text.startswith("4010")
+    assert reply_markup.inline_keyboard[2][0].text.startswith("4011")
+    assert reply_markup.inline_keyboard[3][0].text == "← Назад"
+
+
+async def test_admin_panel_users_shows_new_denied_user_after_first_contact() -> None:
     session_factory = create_session_factory()
     denied_message = SimpleNamespace(
         from_user=SimpleNamespace(id=LARGE_DENIED_USER_ID, username="new_user"),
@@ -486,121 +476,146 @@ async def test_admin_users_shows_new_denied_user_after_first_contact() -> None:
 
     await handle_start(denied_message, session_factory, admin_user_ids=(ADMIN_ID,))
 
-    admin_message = SimpleNamespace(
+    callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
         answer=AsyncMock(),
     )
 
-    await handle_admin_users(admin_message, session_factory, admin_user_ids=(ADMIN_ID,))
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="open_users"),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
+    )
 
-    admin_message.answer.assert_awaited_once()
-    assert admin_message.answer.await_args.args == (
-        "Пользователи:\n"
-        f"- {LARGE_DENIED_USER_ID} @new_user [доступ запрещён]\n"
-        f"<code>/admin_allow {LARGE_DENIED_USER_ID}</code>\n"
-        f"- {ADMIN_ID} [admin]",
+    callback.message.edit_text.assert_awaited_once()
+    assert callback.message.edit_text.await_args.args == (
+        "Пользователи (страница 1, по 10):\n"
+        f"- {ADMIN_ID} [admin; профиля нет]\n"
+        f"- {LARGE_DENIED_USER_ID} @new_user [доступ запрещён; профиля нет]\n"
+        "\n"
+        "Выбери пользователя кнопкой ниже.",
     )
 
 
-async def test_admin_users_is_forbidden_for_non_admin() -> None:
+async def test_admin_panel_is_forbidden_for_non_admin() -> None:
     session_factory = create_session_factory()
-    message = SimpleNamespace(
+    callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
         answer=AsyncMock(),
     )
 
-    await handle_admin_users(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="open_users"),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
+    )
 
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Команда доступна только администратору.",)
+    callback.answer.assert_awaited_once_with("Команда доступна только администратору.", show_alert=True)
 
 
-async def test_admin_delete_entries_requests_confirmation() -> None:
+async def test_admin_panel_open_user_and_toggle_access() -> None:
     session_factory = create_session_factory()
     with session_factory() as session:
-        user = User(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", timezone="Europe/Moscow")
-        session.add(user)
-        session.flush()
-        first_entry = Entry(
-            user_id=user.id,
-            entry_type=EntryType.FOOD,
-            source_text="омлет",
-            occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
-        )
-        second_entry = Entry(
-            user_id=user.id,
-            entry_type=EntryType.WATER,
-            source_text="вода",
-            occurred_at=datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc),
-        )
-        session.add_all([first_entry, second_entry])
+        session.add(UserAccess(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", is_allowed=False))
         session.commit()
 
-    message = SimpleNamespace(
+    callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
         answer=AsyncMock(),
     )
-    command = SimpleNamespace(args=str(ALLOWED_USER_ID))
 
-    await handle_admin_delete_entries(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="open_user", telegram_user_id=ALLOWED_USER_ID, page=0),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
+    )
 
     with session_factory() as session:
-        assert session.query(Entry).count() == 2
+        access = session.query(UserAccess).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
+        assert access.is_allowed is False
 
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == (
-        "Подтверди удаление записей пользователя.\n"
-        f"Telegram ID: {ALLOWED_USER_ID}\n"
-        "Будет удалено записей: 2",
+    callback.message.edit_text.assert_awaited_once()
+    assert callback.message.edit_text.await_args.args == (
+        "Пользователь:\n"
+        f"- Telegram ID: {ALLOWED_USER_ID}\n"
+        "- username: @allowed_user\n"
+        "- доступ: запрещён\n"
+        "- профиль: нет\n"
+        "- записей в журнале: 0",
     )
-    reply_markup = message.answer.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[0][0].text == "Подтвердить удаление"
-    assert reply_markup.inline_keyboard[0][1].text == "Отмена"
-    assert reply_markup.inline_keyboard[1][0].text == "Закрыть"
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Разрешить доступ"
+
+    callback.message.edit_text.reset_mock()
+    callback.answer.reset_mock()
+
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="allow_user", telegram_user_id=ALLOWED_USER_ID, page=0),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
+    )
+
+    with session_factory() as session:
+        access = session.query(UserAccess).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
+        assert access.is_allowed is True
+
+    assert callback.message.edit_text.await_args.args[0].endswith("- записей в журнале: 0")
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Запретить доступ"
+    callback.answer.assert_awaited_once_with("Доступ разрешён.")
 
 
-async def test_admin_delete_entries_returns_usage_for_missing_argument() -> None:
+async def test_admin_panel_open_admin_user_without_access_toggle() -> None:
     session_factory = create_session_factory()
-    message = SimpleNamespace(
+    callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
         answer=AsyncMock(),
     )
 
-    await handle_admin_delete_entries(
-        message,
-        SimpleNamespace(args=None),
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="open_user", telegram_user_id=ADMIN_ID, page=0),
         session_factory,
+        backfill_tracker=AdminBackfillTracker(),
         admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
     )
 
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Использование: <code>/admin_delete_entries TELEGRAM_USER_ID</code>",)
-
-
-async def test_admin_delete_entries_returns_not_found_for_unknown_user() -> None:
-    session_factory = create_session_factory()
-    message = SimpleNamespace(
-        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
-        answer=AsyncMock(),
+    assert callback.message.edit_text.await_args.args == (
+        "Пользователь:\n"
+        f"- Telegram ID: {ADMIN_ID}\n"
+        "- username: —\n"
+        "- доступ: admin\n"
+        "- профиль: нет\n"
+        "- записей в журнале: 0",
     )
-
-    await handle_admin_delete_entries(
-        message,
-        SimpleNamespace(args=str(DENIED_USER_ID)),
-        session_factory,
-        admin_user_ids=(ADMIN_ID,),
-    )
-
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == (f"Пользователь с Telegram ID {DENIED_USER_ID} не найден.",)
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Удалить данные пользователя"
 
 
-async def test_admin_delete_entries_confirm_callback_removes_entries() -> None:
+async def test_admin_panel_delete_entries_prompt_and_confirm() -> None:
     session_factory = create_session_factory()
     with session_factory() as session:
         user = User(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", timezone="Europe/Moscow")
         session.add(user)
         session.flush()
+        session.add(UserAccess(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", is_allowed=True))
         session.add_all(
             [
                 Entry(
@@ -625,11 +640,35 @@ async def test_admin_delete_entries_confirm_callback_removes_entries() -> None:
         answer=AsyncMock(),
     )
 
-    await handle_admin_delete_entries_callback(
+    await handle_admin_panel_callback(
         callback,
-        AdminDeleteEntriesCallback(action="confirm", telegram_user_id=ALLOWED_USER_ID),
+        AdminPanelCallback(action="prompt_delete_user_entries", telegram_user_id=ALLOWED_USER_ID, page=0),
         session_factory,
+        backfill_tracker=AdminBackfillTracker(),
         admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
+    )
+
+    callback.message.edit_text.assert_awaited_once_with(
+        "Подтверди удаление данных пользователя.\n"
+        f"Telegram ID: {ALLOWED_USER_ID}\n"
+        "Будет удалено записей: 2",
+        reply_markup=callback.message.edit_text.await_args.kwargs["reply_markup"],
+    )
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Подтвердить удаление"
+    assert reply_markup.inline_keyboard[0][1].text == "Назад"
+
+    callback.message.edit_text.reset_mock()
+    callback.answer.reset_mock()
+
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="confirm_delete_user_entries", telegram_user_id=ALLOWED_USER_ID, page=0),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
     )
 
     with session_factory() as session:
@@ -640,45 +679,6 @@ async def test_admin_delete_entries_confirm_callback_removes_entries() -> None:
         reply_markup=None,
     )
     callback.answer.assert_awaited_once_with("Удаление выполнено.")
-
-
-async def test_admin_delete_entries_cancel_callback_keeps_entries() -> None:
-    session_factory = create_session_factory()
-    with session_factory() as session:
-        user = User(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", timezone="Europe/Moscow")
-        session.add(user)
-        session.flush()
-        session.add(
-            Entry(
-                user_id=user.id,
-                entry_type=EntryType.FOOD,
-                source_text="омлет",
-                occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
-            )
-        )
-        session.commit()
-
-    callback = SimpleNamespace(
-        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
-        message=SimpleNamespace(edit_text=AsyncMock()),
-        answer=AsyncMock(),
-    )
-
-    await handle_admin_delete_entries_callback(
-        callback,
-        AdminDeleteEntriesCallback(action="cancel", telegram_user_id=ALLOWED_USER_ID),
-        session_factory,
-        admin_user_ids=(ADMIN_ID,),
-    )
-
-    with session_factory() as session:
-        assert session.query(Entry).count() == 1
-
-    callback.message.edit_text.assert_awaited_once_with(
-        "Удаление записей отменено.",
-        reply_markup=None,
-    )
-    callback.answer.assert_awaited_once_with("Удаление отменено.")
 
 
 async def test_admin_backfill_nutrition_recomputes_incomplete_entries() -> None:

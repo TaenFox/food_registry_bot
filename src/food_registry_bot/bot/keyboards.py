@@ -3,7 +3,7 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 from food_registry_bot.bot.payloads import (
-    AdminDeleteEntriesCallback,
+    AdminPanelCallback,
     DataExchangeFileCallback,
     GoalMessageCallback,
     PeriodReportCallback,
@@ -247,31 +247,40 @@ def _build_recent_entries_navigation_row(
     return row
 
 
-def build_admin_delete_entries_confirmation_keyboard(*, telegram_user_id: int) -> InlineKeyboardMarkup:
+def _build_admin_navigation_row(
+    *,
+    page: int,
+    has_previous_page: bool,
+    has_next_page: bool,
+) -> list[InlineKeyboardButton]:
+    row: list[InlineKeyboardButton] = []
+    if has_previous_page:
+        row.append(
+            InlineKeyboardButton(
+                text="← Назад",
+                callback_data=AdminPanelCallback(action="open_users", page=page - 1).pack(),
+            )
+        )
+    if has_next_page:
+        row.append(
+            InlineKeyboardButton(
+                text="Вперёд →",
+                callback_data=AdminPanelCallback(action="open_users", page=page + 1).pack(),
+            )
+        )
+    return row
+
+
+def build_admin_overview_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Подтвердить удаление",
-                    callback_data=AdminDeleteEntriesCallback(
-                        action="confirm",
-                        telegram_user_id=telegram_user_id,
-                    ).pack(),
-                ),
-                InlineKeyboardButton(
-                    text="Отмена",
-                    callback_data=AdminDeleteEntriesCallback(
-                        action="cancel",
-                        telegram_user_id=telegram_user_id,
-                    ).pack(),
+                    text="Управление пользователями",
+                    callback_data=AdminPanelCallback(action="open_users").pack(),
                 ),
             ],
-            _build_close_row(
-                AdminDeleteEntriesCallback(
-                    action="close",
-                    telegram_user_id=telegram_user_id,
-                ).pack()
-            ),
+            _build_close_row(AdminPanelCallback(action="close").pack()),
         ]
     )
 
@@ -280,6 +289,108 @@ def build_goal_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             _build_close_row(GoalMessageCallback(action="close").pack()),
+        ]
+    )
+
+
+def build_admin_user_list_keyboard(
+    *,
+    user_buttons: list[tuple[str, int]],
+    page: int,
+    has_previous_page: bool,
+    has_next_page: bool,
+) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=button_text,
+                callback_data=AdminPanelCallback(
+                    action="open_user",
+                    telegram_user_id=telegram_user_id,
+                    page=page,
+                ).pack(),
+            )
+        ]
+        for button_text, telegram_user_id in user_buttons
+    ]
+    navigation_row = _build_admin_navigation_row(page=page, has_previous_page=has_previous_page, has_next_page=has_next_page)
+    if navigation_row:
+        rows.append(navigation_row)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="К панели",
+                callback_data=AdminPanelCallback(action="overview").pack(),
+            )
+        ]
+    )
+    rows.append(_build_close_row(AdminPanelCallback(action="close").pack()))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_admin_user_actions_keyboard(*, telegram_user_id: int, page: int, is_allowed: bool, is_admin: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if not is_admin:
+        access_button_text = "Запретить доступ" if is_allowed else "Разрешить доступ"
+        access_action = "deny_user" if is_allowed else "allow_user"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=access_button_text,
+                    callback_data=AdminPanelCallback(
+                        action=access_action,
+                        telegram_user_id=telegram_user_id,
+                        page=page,
+                    ).pack(),
+                )
+            ]
+        )
+    rows.extend(
+        [
+            [
+                InlineKeyboardButton(
+                    text="Удалить данные пользователя",
+                    callback_data=AdminPanelCallback(
+                        action="prompt_delete_user_entries",
+                        telegram_user_id=telegram_user_id,
+                        page=page,
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="К списку пользователей",
+                    callback_data=AdminPanelCallback(action="open_users", page=page).pack(),
+                )
+            ],
+            _build_close_row(AdminPanelCallback(action="close").pack()),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_admin_delete_entries_confirmation_keyboard(*, telegram_user_id: int, page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Подтвердить удаление",
+                    callback_data=AdminPanelCallback(
+                        action="confirm_delete_user_entries",
+                        telegram_user_id=telegram_user_id,
+                        page=page,
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data=AdminPanelCallback(
+                        action="open_user",
+                        telegram_user_id=telegram_user_id,
+                        page=page,
+                    ).pack(),
+                ),
+            ],
+            _build_close_row(AdminPanelCallback(action="close").pack()),
         ]
     )
 
