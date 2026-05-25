@@ -150,7 +150,6 @@ EXCHANGE_DIRECTION_LABELS = {
 PERIOD_REPORT_PERIOD_SEQUENCE = (8, 16, 32)
 DEFAULT_PERIOD_REPORT_DAYS = PERIOD_REPORT_PERIOD_SEQUENCE[0]
 PERIOD_REPORT_SUBPERIOD_DAYS = 4
-DEFAULT_REPORT_NOTICEABLE_ENTRY_PERCENTILE = 80
 
 
 class FoodWriteFlowError(RuntimeError):
@@ -890,6 +889,8 @@ def build_summary_settings_response(
     show_post_entry_delta_suffix: bool,
     summary_display_mode: str,
     nutrition_day_start_hour: int,
+    report_goal_tolerance_percent: int,
+    report_noticeable_entry_percentile: int,
 ) -> str:
     statuses = {
         True: "включено",
@@ -908,6 +909,8 @@ def build_summary_settings_response(
             f"- дельта записи: {statuses[show_post_entry_delta_suffix]}",
             f"- отображение: {SUMMARY_DISPLAY_MODE_LABELS[summary_display_mode]}",
             f"- начало дня: {nutrition_day_start_hour:02d}:00",
+            f"- допуск к цели: {report_goal_tolerance_percent}%",
+            f"- порог заметных записей: {report_noticeable_entry_percentile}%",
         ]
     )
 
@@ -1121,6 +1124,7 @@ def build_period_report_response(
     *,
     enabled_metric_codes: tuple[str, ...],
     workout_logging_enabled: bool,
+    report_goal_tolerance_percent: int,
 ) -> str:
     show_nutrition_metrics = any(metric_code != "water" for metric_code in enabled_metric_codes)
     show_water = "water" in enabled_metric_codes
@@ -1161,6 +1165,16 @@ def build_period_report_response(
     if average_lines:
         lines.extend(["", "Среднее по дням с данными", *average_lines])
 
+    goal_lines: list[str] = []
+    for metric_code in enabled_metric_codes:
+        applicable_day_count = report.goal_applicable_day_counts.get(metric_code, 0)
+        if applicable_day_count <= 0:
+            continue
+        hit_day_count = report.goal_hit_day_counts.get(metric_code, 0)
+        goal_lines.append(f"- {GOAL_METRIC_LABELS[metric_code]}: {hit_day_count} из {applicable_day_count} дней")
+    if goal_lines:
+        lines.extend(["", f"Цели считаются с допуском {report_goal_tolerance_percent}%.", *goal_lines])
+
     if has_any_workout_data:
         lines.extend(
             [
@@ -1198,11 +1212,13 @@ def build_period_report(
         period_day_count=period_days,
         nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
         workout_logging_enabled=workout_logging_enabled,
+        report_goal_tolerance_percent=summary_preference.report_goal_tolerance_percent,
     )
     return build_period_report_response(
         report,
         enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
         workout_logging_enabled=workout_logging_enabled,
+        report_goal_tolerance_percent=summary_preference.report_goal_tolerance_percent,
     )
 
 
@@ -1980,6 +1996,8 @@ async def handle_settings(
             show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
             summary_display_mode=preference.summary_display_mode,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
+            report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
+            report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
         ),
         reply_markup=build_summary_settings_keyboard(
             workout_logging_enabled=user.workout_logging_enabled,
@@ -1992,6 +2010,8 @@ async def handle_settings(
             show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
             summary_display_mode=preference.summary_display_mode,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
+            report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
+            report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
         ),
     )
 
@@ -2011,6 +2031,8 @@ async def handle_toggle_summary_metric(
         callback_data.action.startswith("toggle_")
         or callback_data.action == "cycle_summary_display_mode"
         or callback_data.action == "cycle_nutrition_day_start_hour"
+        or callback_data.action == "cycle_report_goal_tolerance_percent"
+        or callback_data.action == "cycle_report_noticeable_entry_percentile"
     ):
         await callback.answer("Неизвестное действие.", show_alert=True)
         return
@@ -2034,6 +2056,10 @@ async def handle_toggle_summary_metric(
             preference = preference_repository.cycle_nutrition_day_start_hour(user_id=user.id)
         elif callback_data.action == "cycle_summary_display_mode":
             preference = preference_repository.cycle_summary_display_mode(user_id=user.id)
+        elif callback_data.action == "cycle_report_goal_tolerance_percent":
+            preference = preference_repository.cycle_report_goal_tolerance_percent(user_id=user.id)
+        elif callback_data.action == "cycle_report_noticeable_entry_percentile":
+            preference = preference_repository.cycle_report_noticeable_entry_percentile(user_id=user.id)
         elif callback_data.action == "toggle_workout_logging":
             user = UserRepository(session).toggle_workout_logging_enabled(user_id=user.id)
             preference, _created = preference_repository.get_or_create(user_id=user.id)
@@ -2059,6 +2085,8 @@ async def handle_toggle_summary_metric(
                 show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
                 summary_display_mode=preference.summary_display_mode,
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
+                report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
+                report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
             ),
             reply_markup=build_summary_settings_keyboard(
                 workout_logging_enabled=user.workout_logging_enabled,
@@ -2071,6 +2099,8 @@ async def handle_toggle_summary_metric(
                 show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
                 summary_display_mode=preference.summary_display_mode,
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
+                report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
+                report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
             ),
         )
     await callback.answer("Сохранил настройки.")
@@ -2280,7 +2310,7 @@ async def handle_period_report_callback(
                 period_day_count=callback_data.period_days,
                 metric_code=metric_code,
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
-                percentile=DEFAULT_REPORT_NOTICEABLE_ENTRY_PERCENTILE,
+                percentile=preference.report_noticeable_entry_percentile,
             )
             next_metric_code = resolve_next_metric_code(available_metric_codes, metric_code)
             rendered_noticeable = build_period_report_noticeable_response(

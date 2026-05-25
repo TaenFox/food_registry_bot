@@ -8,7 +8,9 @@ from sqlalchemy.orm import Session
 
 from food_registry_bot.db.repositories import EntryRepository
 from food_registry_bot.nutrition.daily_summary import DailyNutritionSummaryUseCase, DailyNutritionTotals, resolve_day_bounds_utc, resolve_local_summary_date
+from food_registry_bot.nutrition.goals import DailyNutritionGoalSnapshotUseCase
 from food_registry_bot.nutrition.water_summary import DailyWaterSummaryUseCase
+from food_registry_bot.nutrition.workout_credit import DailyWorkoutCalorieCreditUseCase
 
 
 class PeriodReport(BaseModel):
@@ -25,6 +27,8 @@ class PeriodReport(BaseModel):
     workout_entry_count: int = Field(ge=0)
     incomplete_food_day_count: int = Field(ge=0)
     incomplete_water_day_count: int = Field(ge=0)
+    goal_hit_day_counts: dict[str, int] = Field(default_factory=dict)
+    goal_applicable_day_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class PeriodMetricDynamicsRow(BaseModel):
@@ -72,6 +76,8 @@ class PeriodReportUseCase:
         self._nutrition_summary_use_case = DailyNutritionSummaryUseCase(session)
         self._water_summary_use_case = DailyWaterSummaryUseCase(session)
         self._entry_repository = EntryRepository(session)
+        self._goal_snapshot_use_case = DailyNutritionGoalSnapshotUseCase(session)
+        self._workout_calorie_credit_use_case = DailyWorkoutCalorieCreditUseCase(session)
 
     def run(
         self,
@@ -82,6 +88,7 @@ class PeriodReportUseCase:
         period_day_count: int,
         nutrition_day_start_hour: int = 4,
         workout_logging_enabled: bool = False,
+        report_goal_tolerance_percent: int = 10,
     ) -> PeriodReport:
         if period_day_count <= 0:
             raise ValueError("period_day_count must be positive")
@@ -93,6 +100,8 @@ class PeriodReportUseCase:
         water_data_day_count = 0
         incomplete_food_day_count = 0
         incomplete_water_day_count = 0
+        goal_hit_day_counts = {metric_code: 0 for metric_code in ("calories", "protein", "fat", "carbs", "fiber", "water")}
+        goal_applicable_day_counts = {metric_code: 0 for metric_code in ("calories", "protein", "fat", "carbs", "fiber", "water")}
 
         for day_offset in range(period_day_count):
             summary_date = summary_date_from + timedelta(days=day_offset)
@@ -125,6 +134,49 @@ class PeriodReportUseCase:
                 water_total_ml += water_summary.total_ml
                 if not water_summary.is_complete:
                     incomplete_water_day_count += 1
+
+            goal_snapshot = self._goal_snapshot_use_case.get_or_create(
+                user_id=user_id,
+                summary_date=summary_date,
+                timezone_name=timezone_name,
+                nutrition_day_start_hour=nutrition_day_start_hour,
+            )
+            calorie_goal_adjustment = 0
+            if workout_logging_enabled:
+                calorie_goal_adjustment = int(
+                    round(
+                        self._workout_calorie_credit_use_case.run(
+                            user_id=user_id,
+                            timezone_name=timezone_name,
+                            summary_date=summary_date,
+                            nutrition_day_start_hour=nutrition_day_start_hour,
+                        )
+                    )
+                )
+            nutrition_metrics = (
+                ("calories", nutrition_summary.totals.calories, goal_snapshot.calorie_goal + calorie_goal_adjustment),
+                ("protein", nutrition_summary.totals.protein, goal_snapshot.protein_goal),
+                ("fat", nutrition_summary.totals.fat, goal_snapshot.fat_goal),
+                ("carbs", nutrition_summary.totals.carbs, goal_snapshot.carbs_goal),
+                ("fiber", nutrition_summary.totals.fiber, goal_snapshot.fiber_goal),
+            )
+            if nutrition_summary.included_entry_count > 0 and nutrition_summary.excluded_entry_count == 0:
+                for metric_code, metric_value, goal_value in nutrition_metrics:
+                    goal_applicable_day_counts[metric_code] += 1
+                    if _is_within_goal_tolerance(
+                        metric_value=metric_value,
+                        goal_value=goal_value,
+                        tolerance_percent=report_goal_tolerance_percent,
+                    ):
+                        goal_hit_day_counts[metric_code] += 1
+            if water_summary.included_entry_count > 0 and water_summary.excluded_entry_count == 0:
+                goal_applicable_day_counts["water"] += 1
+                if _is_within_goal_tolerance(
+                    metric_value=float(water_summary.total_ml),
+                    goal_value=goal_snapshot.water_goal,
+                    tolerance_percent=report_goal_tolerance_percent,
+                ):
+                    goal_hit_day_counts["water"] += 1
 
         average_nutrition_totals = DailyNutritionTotals()
         if food_data_day_count > 0:
@@ -182,6 +234,8 @@ class PeriodReportUseCase:
             workout_entry_count=workout_entry_count,
             incomplete_food_day_count=incomplete_food_day_count,
             incomplete_water_day_count=incomplete_water_day_count,
+            goal_hit_day_counts=goal_hit_day_counts,
+            goal_applicable_day_counts=goal_applicable_day_counts,
         )
 
     def build_metric_dynamics(
@@ -346,3 +400,10 @@ def _percentile_threshold(values: list[float], percentile: int) -> float:
     index = max(int(len(sorted_values) * percentile / 100) - 1, 0)
     index = min(index, len(sorted_values) - 1)
     return sorted_values[index]
+
+
+def _is_within_goal_tolerance(*, metric_value: float, goal_value: int, tolerance_percent: int) -> bool:
+    tolerance_delta = goal_value * tolerance_percent / 100
+    lower_bound = goal_value - tolerance_delta
+    upper_bound = goal_value + tolerance_delta
+    return lower_bound <= metric_value <= upper_bound

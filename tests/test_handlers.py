@@ -1814,9 +1814,62 @@ async def test_report_returns_period_averages_by_days_with_data() -> None:
             "- клетчатка: 4.0 г\n"
             "- вода: 1000.0 мл\n"
             "\n"
+            "Цели считаются с допуском 10%.\n"
+            "- калории: 0 из 2 дней\n"
+            "- белки: 0 из 2 дней\n"
+            "- жиры: 0 из 2 дней\n"
+            "- углеводы: 0 из 2 дней\n"
+            "- клетчатка: 0 из 2 дней\n"
+            "- вода: 0 из 2 дней\n"
+            "\n"
             "Неполных дней по еде: 1."
         ),
     )
+
+
+async def test_report_uses_goal_tolerance_preference_for_goal_hits() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "report_goal_tolerance_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="report_goal_tolerance_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(UserSummaryPreference(user_id=user.id, report_goal_tolerance_percent=20))
+
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        item = EntryItem(entry_id=entry.id, position=0, name="обед")
+        session.add(item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=item.id, metric_id=1, value=1600.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=2, value=85.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=3, value=60.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=4, value=210.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=5, value=25.0, confidence="medium"),
+            ]
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="report_goal_tolerance_user"),
+        answer=AsyncMock(),
+    )
+
+    await call_handle_report_at(
+        fixed_now=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
+
+    assert "Цели считаются с допуском 20%." in message.answer.await_args.args[0]
+    assert "- калории: 1 из 1 дней" in message.answer.await_args.args[0]
 
 
 async def test_report_callback_cycles_to_next_period() -> None:
@@ -2084,6 +2137,7 @@ async def test_report_open_noticeable_sends_separate_message() -> None:
         user = User(telegram_user_id=ALLOWED_USER_ID, username="report_noticeable_user", timezone="Europe/Moscow")
         session.add(user)
         session.flush()
+        session.add(UserSummaryPreference(user_id=user.id, report_noticeable_entry_percentile=95))
 
         low_entry = Entry(
             user_id=user.id,
@@ -2696,7 +2750,9 @@ async def test_settings_returns_current_summary_preferences() -> None:
         "- вода: включено\n"
         "- дельта записи: включено\n"
         "- отображение: текст\n"
-        "- начало дня: 04:00",
+        "- начало дня: 04:00\n"
+        "- допуск к цели: 10%\n"
+        "- порог заметных записей: 80%",
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Тренировки: off"
@@ -2709,6 +2765,8 @@ async def test_settings_returns_current_summary_preferences() -> None:
     assert reply_markup.inline_keyboard[7][0].text == "Дельта записи: on"
     assert reply_markup.inline_keyboard[8][0].text == "Отображение: текст"
     assert reply_markup.inline_keyboard[9][0].text == "Начало дня: 04:00"
+    assert reply_markup.inline_keyboard[10][0].text == "Допуск к цели: 10%"
+    assert reply_markup.inline_keyboard[11][0].text == "Порог заметных записей: 80%"
 
 
 async def test_toggle_summary_metric_updates_preference_and_message() -> None:
@@ -2762,7 +2820,9 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
         "- вода: включено\n"
         "- дельта записи: включено\n"
         "- отображение: текст\n"
-        "- начало дня: 04:00",
+        "- начало дня: 04:00\n"
+        "- допуск к цели: 10%\n"
+        "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[1][0].text == "Калории: on"
@@ -2820,7 +2880,9 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
         "- вода: включено\n"
         "- дельта записи: включено\n"
         "- отображение: текст\n"
-        "- начало дня: 06:00",
+        "- начало дня: 06:00\n"
+        "- допуск к цели: 10%\n"
+        "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[9][0].text == "Начало дня: 06:00"
@@ -2877,7 +2939,9 @@ async def test_cycle_summary_display_mode_updates_preference_and_message() -> No
         "- вода: включено\n"
         "- дельта записи: включено\n"
         "- отображение: бары\n"
-        "- начало дня: 04:00",
+        "- начало дня: 04:00\n"
+        "- допуск к цели: 10%\n"
+        "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[8][0].text == "Отображение: бары"
@@ -2932,10 +2996,78 @@ async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -
         "- вода: включено\n"
         "- дельта записи: выключено\n"
         "- отображение: текст\n"
-        "- начало дня: 04:00",
+        "- начало дня: 04:00\n"
+        "- допуск к цели: 10%\n"
+        "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[7][0].text == "Дельта записи: off"
+    callback.answer.assert_awaited_once_with("Сохранил настройки.")
+
+
+async def test_cycle_report_goal_tolerance_updates_preference_and_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "settings_goal_tolerance_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="settings_goal_tolerance_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(UserSummaryPreference(user_id=user.id, report_goal_tolerance_percent=10))
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="settings_goal_tolerance_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_toggle_summary_metric(
+        callback,
+        SummarySettingsCallback(action="cycle_report_goal_tolerance_percent"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_preference = session.query(UserSummaryPreference).one()
+
+    assert saved_preference.report_goal_tolerance_percent == 15
+    assert "допуск к цели: 15%" in callback.message.edit_text.await_args.args[0]
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[10][0].text == "Допуск к цели: 15%"
+    callback.answer.assert_awaited_once_with("Сохранил настройки.")
+
+
+async def test_cycle_report_noticeable_percentile_updates_preference_and_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "settings_noticeable_percentile_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="settings_noticeable_percentile_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(UserSummaryPreference(user_id=user.id, report_noticeable_entry_percentile=80))
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="settings_noticeable_percentile_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_toggle_summary_metric(
+        callback,
+        SummarySettingsCallback(action="cycle_report_noticeable_entry_percentile"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_preference = session.query(UserSummaryPreference).one()
+
+    assert saved_preference.report_noticeable_entry_percentile == 85
+    assert "порог заметных записей: 85%" in callback.message.edit_text.await_args.args[0]
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[11][0].text == "Порог заметных записей: 85%"
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -2975,7 +3107,9 @@ async def test_toggle_workout_logging_updates_user_and_message() -> None:
         "- вода: включено\n"
         "- дельта записи: включено\n"
         "- отображение: текст\n"
-        "- начало дня: 04:00",
+        "- начало дня: 04:00\n"
+        "- допуск к цели: 10%\n"
+        "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Тренировки: on"

@@ -41,6 +41,8 @@ def build_summary_settings_keyboard(
     show_post_entry_delta_suffix: bool,
     summary_display_mode: str,
     nutrition_day_start_hour: int,
+    report_goal_tolerance_percent: int,
+    report_noticeable_entry_percentile: int,
 ) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -102,6 +104,18 @@ def build_summary_settings_keyboard(
                 InlineKeyboardButton(
                     text=f"Начало дня: {nutrition_day_start_hour:02d}:00",
                     callback_data=SummarySettingsCallback(action="cycle_nutrition_day_start_hour").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Допуск к цели: {report_goal_tolerance_percent}%",
+                    callback_data=SummarySettingsCallback(action="cycle_report_goal_tolerance_percent").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Порог заметных записей: {report_noticeable_entry_percentile}%",
+                    callback_data=SummarySettingsCallback(action="cycle_report_noticeable_entry_percentile").pack(),
                 )
             ]
         ]

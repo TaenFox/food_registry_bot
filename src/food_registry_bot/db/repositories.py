@@ -31,6 +31,8 @@ if TYPE_CHECKING:
 
 SUPPORTED_NUTRITION_DAY_START_HOURS = (0, 2, 4, 6)
 SUPPORTED_SUMMARY_DISPLAY_MODES = ("text", "bars")
+SUPPORTED_REPORT_GOAL_TOLERANCE_PERCENTS = (5, 10, 15, 20)
+SUPPORTED_REPORT_NOTICEABLE_ENTRY_PERCENTILES = (70, 75, 80, 85, 90, 95)
 SUPPORTED_GOAL_METRIC_CODES = ("calories", "protein", "fat", "carbs", "fiber", "water")
 DEFAULT_DAILY_GOALS = {
     "calories": 1800,
@@ -217,6 +219,8 @@ class UserSummaryPreferenceRepository:
             show_post_entry_delta_suffix=True,
             summary_display_mode="text",
             nutrition_day_start_hour=4,
+            report_goal_tolerance_percent=10,
+            report_noticeable_entry_percentile=80,
         )
         self._session.add(preference)
         self._session.flush()
@@ -265,6 +269,22 @@ class UserSummaryPreferenceRepository:
     def toggle_post_entry_delta_suffix(self, *, user_id: int) -> UserSummaryPreference:
         preference, _created = self.get_or_create(user_id=user_id)
         preference.show_post_entry_delta_suffix = not preference.show_post_entry_delta_suffix
+        self._session.flush()
+        return preference
+
+    def cycle_report_goal_tolerance_percent(self, *, user_id: int) -> UserSummaryPreference:
+        preference, _created = self.get_or_create(user_id=user_id)
+        current_index = SUPPORTED_REPORT_GOAL_TOLERANCE_PERCENTS.index(preference.report_goal_tolerance_percent)
+        next_index = (current_index + 1) % len(SUPPORTED_REPORT_GOAL_TOLERANCE_PERCENTS)
+        preference.report_goal_tolerance_percent = SUPPORTED_REPORT_GOAL_TOLERANCE_PERCENTS[next_index]
+        self._session.flush()
+        return preference
+
+    def cycle_report_noticeable_entry_percentile(self, *, user_id: int) -> UserSummaryPreference:
+        preference, _created = self.get_or_create(user_id=user_id)
+        current_index = SUPPORTED_REPORT_NOTICEABLE_ENTRY_PERCENTILES.index(preference.report_noticeable_entry_percentile)
+        next_index = (current_index + 1) % len(SUPPORTED_REPORT_NOTICEABLE_ENTRY_PERCENTILES)
+        preference.report_noticeable_entry_percentile = SUPPORTED_REPORT_NOTICEABLE_ENTRY_PERCENTILES[next_index]
         self._session.flush()
         return preference
 
