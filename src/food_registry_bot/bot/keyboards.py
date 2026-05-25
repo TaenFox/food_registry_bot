@@ -106,58 +106,107 @@ def build_summary_settings_keyboard(
     )
 
 
-def build_recent_entries_delete_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Выбрать для удаления",
-                    callback_data=RecentEntryDeleteCallback(action="open").pack(),
-                )
-            ]
-        ]
-    )
-
-
-def build_recent_entry_selection_keyboard(
+def build_recent_entries_delete_keyboard(
     *,
-    entry_buttons: list[tuple[str, int]],
+    page: int,
+    has_previous_page: bool,
+    has_next_page: bool,
 ) -> InlineKeyboardMarkup:
-    rows = [
-        [
-            InlineKeyboardButton(
-                text=button_text,
-                callback_data=RecentEntryDeleteCallback(action="select", entry_id=entry_id).pack(),
-            )
-        ]
-        for button_text, entry_id in entry_buttons
-    ]
+    rows: list[list[InlineKeyboardButton]] = []
+    navigation_row = _build_recent_entries_navigation_row(
+        page=page,
+        action="list",
+        has_previous_page=has_previous_page,
+        has_next_page=has_next_page,
+    )
+    if navigation_row:
+        rows.append(navigation_row)
     rows.append(
         [
             InlineKeyboardButton(
-                text="Отмена",
-                callback_data=RecentEntryDeleteCallback(action="close").pack(),
+                text="Выбрать для удаления",
+                callback_data=RecentEntryDeleteCallback(action="open", page=page).pack(),
             )
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_recent_entry_confirmation_keyboard(*, entry_id: int) -> InlineKeyboardMarkup:
+def build_recent_entry_selection_keyboard(
+    *,
+    entry_buttons: list[tuple[str, int]],
+    page: int,
+    has_previous_page: bool,
+    has_next_page: bool,
+) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=button_text,
+                callback_data=RecentEntryDeleteCallback(action="select", entry_id=entry_id, page=page).pack(),
+            )
+        ]
+        for button_text, entry_id in entry_buttons
+    ]
+    navigation_row = _build_recent_entries_navigation_row(
+        page=page,
+        action="open",
+        has_previous_page=has_previous_page,
+        has_next_page=has_next_page,
+    )
+    if navigation_row:
+        rows.append(navigation_row)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Отмена",
+                callback_data=RecentEntryDeleteCallback(action="list", page=page).pack(),
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_recent_entry_confirmation_keyboard(*, entry_id: int, page: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="Подтвердить",
-                    callback_data=RecentEntryDeleteCallback(action="confirm", entry_id=entry_id).pack(),
+                    callback_data=RecentEntryDeleteCallback(action="confirm", entry_id=entry_id, page=page).pack(),
                 ),
                 InlineKeyboardButton(
                     text="Отмена",
-                    callback_data=RecentEntryDeleteCallback(action="open").pack(),
+                    callback_data=RecentEntryDeleteCallback(action="open", page=page).pack(),
                 ),
             ]
         ]
     )
+
+
+def _build_recent_entries_navigation_row(
+    *,
+    page: int,
+    action: str,
+    has_previous_page: bool,
+    has_next_page: bool,
+) -> list[InlineKeyboardButton]:
+    row: list[InlineKeyboardButton] = []
+    if has_previous_page:
+        row.append(
+            InlineKeyboardButton(
+                text="← Назад",
+                callback_data=RecentEntryDeleteCallback(action=action, page=page - 1).pack(),
+            )
+        )
+    if has_next_page:
+        row.append(
+            InlineKeyboardButton(
+                text="Вперёд →",
+                callback_data=RecentEntryDeleteCallback(action=action, page=page + 1).pack(),
+            )
+        )
+    return row
 
 
 def build_admin_delete_entries_confirmation_keyboard(*, telegram_user_id: int) -> InlineKeyboardMarkup:

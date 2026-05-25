@@ -1038,10 +1038,50 @@ async def test_recent_returns_latest_entries_for_allowed_user() -> None:
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Последние записи:\n1. 14:00 — вода (250 мл)\n2. 13:00 — яблоко",
+        "Последние записи (страница 1):\n1. 14:00 — вода (250 мл)\n2. 13:00 — яблоко",
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Выбрать для удаления"
+
+
+async def test_recent_shows_pagination_controls_for_next_page() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_paged_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="recent_paged_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        for hour in range(6):
+            entry = Entry(
+                user_id=user.id,
+                entry_type=EntryType.FOOD,
+                source_text=f"еда {hour}",
+                occurred_at=datetime(2026, 5, 18, 10 + hour, 0, tzinfo=timezone.utc),
+            )
+            session.add(entry)
+            session.flush()
+            session.add(EntryItem(entry_id=entry.id, position=0, name=f"еда {hour}"))
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_paged_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent(message, session_factory, admin_user_ids=(ADMIN_ID,))
+
+    assert message.answer.await_args.args == (
+        "Последние записи (страница 1):\n"
+        "1. 18:00 — еда 5\n"
+        "2. 17:00 — еда 4\n"
+        "3. 16:00 — еда 3\n"
+        "4. 15:00 — еда 2\n"
+        "5. 14:00 — еда 1",
+    )
+    reply_markup = message.answer.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Вперёд →"
+    assert reply_markup.inline_keyboard[1][0].text == "Выбрать для удаления"
 
 
 async def test_recent_delete_open_shows_entry_selection_buttons() -> None:
@@ -1076,7 +1116,7 @@ async def test_recent_delete_open_shows_entry_selection_buttons() -> None:
 
     callback.message.edit_text.assert_awaited_once()
     assert callback.message.edit_text.await_args.args == (
-        "Последние записи:\n"
+        "Последние записи (страница 1):\n"
         "1. 14:00 — вода (250 мл)\n"
         "2. 13:00 — яблоко\n"
         "\n"
@@ -1117,11 +1157,58 @@ async def test_recent_delete_open_returns_selection_screen() -> None:
     )
 
     assert callback.message.edit_text.await_args.args == (
-        "Последние записи:\n"
+        "Последние записи (страница 1):\n"
         "1. 13:00 — яблоко\n"
         "\n"
         "Выбери запись, которую нужно удалить.",
     )
+
+
+async def test_recent_list_callback_opens_second_page() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_second_page_user")
+    with session_factory() as session:
+        user = User(
+            telegram_user_id=ALLOWED_USER_ID,
+            username="recent_second_page_user",
+            timezone="Europe/Moscow",
+        )
+        session.add(user)
+        session.flush()
+
+        for hour in range(7):
+            entry = Entry(
+                user_id=user.id,
+                entry_type=EntryType.FOOD,
+                source_text=f"еда {hour}",
+                occurred_at=datetime(2026, 5, 18, 10 + hour, 0, tzinfo=timezone.utc),
+            )
+            session.add(entry)
+            session.flush()
+            session.add(EntryItem(entry_id=entry.id, position=0, name=f"еда {hour}"))
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_second_page_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_delete_callback(
+        callback,
+        RecentEntryDeleteCallback(action="list", page=1),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert callback.message.edit_text.await_args.args == (
+        "Последние записи (страница 2):\n"
+        "6. 14:00 — еда 1\n"
+        "7. 13:00 — еда 0",
+    )
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "← Назад"
+    assert reply_markup.inline_keyboard[1][0].text == "Выбрать для удаления"
 
 
 async def test_recent_delete_confirm_removes_entry_and_refreshes_recent_list() -> None:
@@ -1178,7 +1265,7 @@ async def test_recent_delete_confirm_removes_entry_and_refreshes_recent_list() -
         assert session.query(Entry).count() == 1
 
     callback.message.edit_text.assert_awaited_once_with(
-        "Последние записи:\n1. 12:00 — вода (250 мл)",
+        "Последние записи (страница 1):\n1. 12:00 — вода (250 мл)",
         reply_markup=callback.message.edit_text.await_args.kwargs["reply_markup"],
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
@@ -1268,6 +1355,56 @@ async def test_recent_delete_returns_safe_error_for_stale_button() -> None:
 
     callback.message.edit_text.assert_not_awaited()
     callback.answer.assert_awaited_once_with("Эта запись уже удалена или больше недоступна.", show_alert=True)
+
+
+async def test_recent_delete_confirm_moves_to_previous_page_when_current_becomes_empty() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_delete_page_fallback_user")
+    with session_factory() as session:
+        user = User(
+            telegram_user_id=ALLOWED_USER_ID,
+            username="recent_delete_page_fallback_user",
+            timezone="Europe/Moscow",
+        )
+        session.add(user)
+        session.flush()
+
+        created_entries: list[Entry] = []
+        for hour in range(6):
+            entry = Entry(
+                user_id=user.id,
+                entry_type=EntryType.FOOD,
+                source_text=f"еда {hour}",
+                occurred_at=datetime(2026, 5, 19, 8 + hour, 0, tzinfo=timezone.utc),
+            )
+            session.add(entry)
+            session.flush()
+            session.add(EntryItem(entry_id=entry.id, position=0, name=f"еда {hour}"))
+            created_entries.append(entry)
+        session.commit()
+        oldest_entry_id = created_entries[0].id
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_delete_page_fallback_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_delete_callback(
+        callback,
+        RecentEntryDeleteCallback(action="confirm", entry_id=oldest_entry_id, page=1),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert callback.message.edit_text.await_args.args == (
+        "Последние записи (страница 1):\n"
+        "1. 16:00 — еда 5\n"
+        "2. 15:00 — еда 4\n"
+        "3. 14:00 — еда 3\n"
+        "4. 13:00 — еда 2\n"
+        "5. 12:00 — еда 1",
+    )
 
 
 async def test_today_returns_daily_nutrition_totals_for_allowed_user() -> None:

@@ -436,12 +436,13 @@ class EntryRepository:
         self._session.flush()
         return entry
 
-    def list_recent_for_user(self, *, user_id: int, limit: int = 5) -> list[Entry]:
+    def list_recent_for_user(self, *, user_id: int, limit: int = 5, offset: int = 0) -> list[Entry]:
         statement = (
             select(Entry)
             .where(Entry.user_id == user_id)
             .options(selectinload(Entry.items))
             .order_by(Entry.occurred_at.desc(), Entry.id.desc())
+            .offset(offset)
             .limit(limit)
         )
         return list(self._session.scalars(statement))

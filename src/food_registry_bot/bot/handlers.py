@@ -105,6 +105,7 @@ default_nutrition_service = StaticNutritionEstimationService(raw_payload="")
 default_conversation_service = DisabledConversationService()
 default_message_routing_service = RuleBasedMessageRoutingService()
 NUTRITION_COACH_DISPLAY_NAME = "Нутрициолог"
+RECENT_ENTRIES_PAGE_SIZE = 5
 SUMMARY_METRIC_LINES = (
     ("calories", "К", "ккал"),
     ("protein", "Б", "г"),
@@ -707,12 +708,18 @@ def build_recent_entry_display_line(*, index: int, entry, timezone_name: str) ->
     return f"{index}. {format_entry_timestamp(entry, timezone_name)} — {build_recent_entry_title(entry)}"
 
 
-def build_recent_entries_response(entries: list, *, timezone_name: str, selection_mode: bool = False) -> str:
+def build_recent_entries_response(
+    entries: list,
+    *,
+    timezone_name: str,
+    page: int,
+    selection_mode: bool = False,
+) -> str:
     if not entries:
         return "Пока записей нет. Отправь еду текстом, фото блюда или нажми кнопку воды."
 
-    lines = ["Последние записи:"]
-    for index, entry in enumerate(entries, start=1):
+    lines = [f"Последние записи (страница {page + 1}):"]
+    for index, entry in enumerate(entries, start=page * RECENT_ENTRIES_PAGE_SIZE + 1):
         lines.append(build_recent_entry_display_line(index=index, entry=entry, timezone_name=timezone_name))
     if selection_mode:
         lines.extend(["", "Выбери запись, которую нужно удалить."])
@@ -1091,11 +1098,28 @@ def resolve_recent_entry_for_callback(
     entry_repository: EntryRepository,
     user_id: int,
     entry_id: int,
-    limit: int = 5,
 ):
-    recent_entries = entry_repository.list_recent_for_user(user_id=user_id, limit=limit)
-    recent_entry_by_id = {entry.id: entry for entry in recent_entries}
-    return recent_entries, recent_entry_by_id.get(entry_id)
+    return entry_repository.get_by_id_for_user(entry_id=entry_id, user_id=user_id)
+
+
+def load_recent_entries_page(
+    *,
+    entry_repository: EntryRepository,
+    user_id: int,
+    page: int,
+    page_size: int = RECENT_ENTRIES_PAGE_SIZE,
+) -> tuple[int, list, bool, bool]:
+    page = max(page, 0)
+    while True:
+        entries = entry_repository.list_recent_for_user(
+            user_id=user_id,
+            limit=page_size + 1,
+            offset=page * page_size,
+        )
+        if entries or page == 0:
+            page_entries = entries[:page_size]
+            return page, page_entries, page > 0, len(entries) > page_size
+        page -= 1
 
 
 def build_goal_response(
@@ -1508,11 +1532,23 @@ async def handle_recent(
         user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
         if user is None:
             raise RuntimeError("User profile was not found after registration")
-        entries = EntryRepository(session).list_recent_for_user(user_id=user_id, limit=5)
+        page, entries, has_previous_page, has_next_page = load_recent_entries_page(
+            entry_repository=EntryRepository(session),
+            user_id=user_id,
+            page=0,
+        )
 
-    reply_markup = build_recent_entries_delete_keyboard() if entries else build_main_keyboard()
+    reply_markup = (
+        build_recent_entries_delete_keyboard(
+            page=page,
+            has_previous_page=has_previous_page,
+            has_next_page=has_next_page,
+        )
+        if entries
+        else build_main_keyboard()
+    )
     await message.answer(
-        build_recent_entries_response(entries, timezone_name=user.timezone),
+        build_recent_entries_response(entries, timezone_name=user.timezone, page=page),
         reply_markup=reply_markup,
     )
 
@@ -1547,13 +1583,21 @@ async def handle_recent_delete_callback(
                 username=telegram_user.username,
             )
         entry_repository = EntryRepository(session)
-        recent_entries = entry_repository.list_recent_for_user(user_id=user.id, limit=5)
+        page, recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
+            entry_repository=entry_repository,
+            user_id=user.id,
+            page=callback_data.page,
+        )
 
-        if callback_data.action == "close":
+        if callback_data.action == "list":
             await callback.message.edit_text(
-                build_recent_entries_response(recent_entries, timezone_name=user.timezone),
+                build_recent_entries_response(recent_entries, timezone_name=user.timezone, page=page),
                 reply_markup=(
-                    build_recent_entries_delete_keyboard()
+                    build_recent_entries_delete_keyboard(
+                        page=page,
+                        has_previous_page=has_previous_page,
+                        has_next_page=has_next_page,
+                    )
                     if recent_entries
                     else None
                 ),
@@ -1566,6 +1610,7 @@ async def handle_recent_delete_callback(
                 build_recent_entries_response(
                     recent_entries,
                     timezone_name=user.timezone,
+                    page=page,
                     selection_mode=True,
                 ),
                 reply_markup=(
@@ -1573,7 +1618,10 @@ async def handle_recent_delete_callback(
                         entry_buttons=[
                             (build_recent_entry_button_label(entry, user.timezone), entry.id)
                             for entry in recent_entries
-                        ]
+                        ],
+                        page=page,
+                        has_previous_page=has_previous_page,
+                        has_next_page=has_next_page,
                     )
                     if recent_entries
                     else None
@@ -1582,7 +1630,7 @@ async def handle_recent_delete_callback(
             await callback.answer()
             return
 
-        recent_entries, selected_entry = resolve_recent_entry_for_callback(
+        selected_entry = resolve_recent_entry_for_callback(
             entry_repository=entry_repository,
             user_id=user.id,
             entry_id=callback_data.entry_id,
@@ -1594,7 +1642,7 @@ async def handle_recent_delete_callback(
         if callback_data.action == "select":
             await callback.message.edit_text(
                 build_recent_entry_delete_confirmation(entry=selected_entry, timezone_name=user.timezone),
-                reply_markup=build_recent_entry_confirmation_keyboard(entry_id=selected_entry.id),
+                reply_markup=build_recent_entry_confirmation_keyboard(entry_id=selected_entry.id, page=page),
             )
             await callback.answer()
             return
@@ -1604,12 +1652,20 @@ async def handle_recent_delete_callback(
             return
 
         entry_repository.delete(selected_entry)
-        updated_recent_entries = entry_repository.list_recent_for_user(user_id=user.id, limit=5)
+        page, updated_recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
+            entry_repository=entry_repository,
+            user_id=user.id,
+            page=page,
+        )
 
     await callback.message.edit_text(
-        build_recent_entries_response(updated_recent_entries, timezone_name=user.timezone),
+        build_recent_entries_response(updated_recent_entries, timezone_name=user.timezone, page=page),
         reply_markup=(
-            build_recent_entries_delete_keyboard()
+            build_recent_entries_delete_keyboard(
+                page=page,
+                has_previous_page=has_previous_page,
+                has_next_page=has_next_page,
+            )
             if updated_recent_entries
             else None
         ),

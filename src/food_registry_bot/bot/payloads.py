@@ -17,6 +17,7 @@ class SummarySettingsCallback(CallbackData, prefix="summary_settings"):
 class RecentEntryDeleteCallback(CallbackData, prefix="recent_delete"):
     action: str
     entry_id: int = 0
+    page: int = 0
 
 
 class DataExchangeFileCallback(CallbackData, prefix="data_exchange"):
