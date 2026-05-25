@@ -5,6 +5,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 from food_registry_bot.bot.payloads import (
     AdminDeleteEntriesCallback,
     DataExchangeFileCallback,
+    GoalMessageCallback,
     PeriodReportCallback,
     RecentEntryDeleteCallback,
     SummarySettingsCallback,
@@ -117,7 +118,8 @@ def build_summary_settings_keyboard(
                     text=f"Порог заметных записей: {report_noticeable_entry_percentile}%",
                     callback_data=SummarySettingsCallback(action="cycle_report_noticeable_entry_percentile").pack(),
                 )
-            ]
+            ],
+            _build_close_row(SummarySettingsCallback(action="close").pack()),
         ]
     )
 
@@ -147,6 +149,7 @@ def build_recent_entries_delete_keyboard(
             )
         ]
     )
+    rows.append(_build_close_row(RecentEntryDeleteCallback(action="close", page=page, count=count).pack()))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -189,6 +192,7 @@ def build_recent_entry_selection_keyboard(
             )
         ]
     )
+    rows.append(_build_close_row(RecentEntryDeleteCallback(action="close", page=page, count=count).pack()))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -209,7 +213,10 @@ def build_recent_entry_confirmation_keyboard(*, entry_id: int, page: int, count:
                     text="Отмена",
                     callback_data=RecentEntryDeleteCallback(action="open", page=page, count=count).pack(),
                 ),
-            ]
+            ],
+            _build_close_row(
+                RecentEntryDeleteCallback(action="close", entry_id=entry_id, page=page, count=count).pack()
+            ),
         ]
     )
 
@@ -258,7 +265,21 @@ def build_admin_delete_entries_confirmation_keyboard(*, telegram_user_id: int) -
                         telegram_user_id=telegram_user_id,
                     ).pack(),
                 ),
-            ]
+            ],
+            _build_close_row(
+                AdminDeleteEntriesCallback(
+                    action="close",
+                    telegram_user_id=telegram_user_id,
+                ).pack()
+            ),
+        ]
+    )
+
+
+def build_goal_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            _build_close_row(GoalMessageCallback(action="close").pack()),
         ]
     )
 
@@ -292,6 +313,7 @@ def build_data_exchange_files_keyboard(*, files: list[DataExchangeFile]) -> Inli
             )
         ]
     )
+    rows.append(_build_close_row(DataExchangeFileCallback(action="close").pack()))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -407,3 +429,12 @@ def _build_data_exchange_primary_button(exchange_file: DataExchangeFile) -> Inli
             callback_data=DataExchangeFileCallback(action="download", file_id=exchange_file.id).pack(),
         )
     return None
+
+
+def _build_close_row(callback_data: str) -> list[InlineKeyboardButton]:
+    return [
+        InlineKeyboardButton(
+            text="Закрыть",
+            callback_data=callback_data,
+        )
+    ]

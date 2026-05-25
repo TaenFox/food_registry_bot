@@ -36,9 +36,14 @@ class AdminDeleteEntriesCallback(CallbackData, prefix="admin_delete_entries"):
     action: str
     telegram_user_id: int = 0
 
+
+class GoalMessageCallback(CallbackData, prefix="goal_message"):
+    action: str
+
 __all__ = [
     "AdminDeleteEntriesCallback",
     "DataExchangeFileCallback",
+    "GoalMessageCallback",
     "NormalizedEntryItemPayload",
     "NormalizedEntryPayload",
     "NormalizedJournalPayload",

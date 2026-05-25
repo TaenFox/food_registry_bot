@@ -22,6 +22,7 @@ from food_registry_bot.bot.keyboards import (
     WATER_250_ML_BUTTON_TEXT,
     build_admin_delete_entries_confirmation_keyboard,
     build_data_exchange_files_keyboard,
+    build_goal_keyboard,
     build_main_keyboard,
     build_period_report_dynamics_keyboard,
     build_period_report_keyboard,
@@ -40,6 +41,7 @@ from food_registry_bot.bot.message_routing import (
 from food_registry_bot.bot.payloads import (
     AdminDeleteEntriesCallback,
     DataExchangeFileCallback,
+    GoalMessageCallback,
     PeriodReportCallback,
     RecentEntryDeleteCallback,
     SummarySettingsCallback,
@@ -284,6 +286,11 @@ async def safe_edit_message_text(message: Message, *, text: str, reply_markup) -
         if "message is not modified" in str(exc):
             return
         raise
+
+
+async def safe_delete_message(message: Message) -> None:
+    with suppress(TelegramBadRequest):
+        await message.delete()
 
 
 def build_ambiguous_message_response() -> str:
@@ -1602,6 +1609,11 @@ async def handle_admin_delete_entries_callback(
         await callback.answer("Команда доступна только администратору.", show_alert=True)
         return
 
+    if callback_data.action == "close":
+        await safe_delete_message(callback.message)
+        await callback.answer()
+        return
+
     if callback_data.action == "cancel":
         await safe_edit_message_text(
             callback.message,
@@ -1838,6 +1850,10 @@ async def handle_recent_delete_callback(
     if callback.message is None:
         await callback.answer("Сообщение недоступно.", show_alert=True)
         return
+    if callback_data.action == "close":
+        await safe_delete_message(callback.message)
+        await callback.answer()
+        return
 
     with session_scope(session_factory) as session:
         if not (
@@ -2033,8 +2049,16 @@ async def handle_toggle_summary_metric(
         or callback_data.action == "cycle_nutrition_day_start_hour"
         or callback_data.action == "cycle_report_goal_tolerance_percent"
         or callback_data.action == "cycle_report_noticeable_entry_percentile"
+        or callback_data.action == "close"
     ):
         await callback.answer("Неизвестное действие.", show_alert=True)
+        return
+    if callback_data.action == "close":
+        if callback.message is None:
+            await callback.answer("Сообщение недоступно.", show_alert=True)
+            return
+        await safe_delete_message(callback.message)
+        await callback.answer()
         return
     with session_scope(session_factory) as session:
         if not (
@@ -2213,8 +2237,7 @@ async def handle_period_report_callback(
         return
 
     if callback_data.action == "close":
-        with suppress(TelegramBadRequest):
-            await callback.message.delete()
+        await safe_delete_message(callback.message)
         await callback.answer()
         return
 
@@ -2417,8 +2440,24 @@ async def handle_goal(
             timezone_name=timezone_name,
             nutrition_day_start_hour=nutrition_day_start_hour,
         ),
-        reply_markup=build_main_keyboard(),
+        reply_markup=build_goal_keyboard(),
     )
+
+
+@router.callback_query(GoalMessageCallback.filter())
+async def handle_goal_message_callback(
+    callback: CallbackQuery,
+    callback_data: GoalMessageCallback,
+) -> None:
+    if callback.message is None:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    if callback_data.action != "close":
+        await callback.answer("Неизвестное действие.", show_alert=True)
+        return
+
+    await safe_delete_message(callback.message)
+    await callback.answer()
 
 
 @router.message(Command("files"))
@@ -2450,6 +2489,10 @@ async def handle_data_exchange_file_callback(
         return
     if callback.message is None:
         await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    if callback_data.action == "close":
+        await safe_delete_message(callback.message)
+        await callback.answer()
         return
 
     with session_scope(session_factory) as session:

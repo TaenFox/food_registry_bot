@@ -22,7 +22,9 @@ from food_registry_bot.bot.handlers import (
     handle_admin_delete_entries,
     handle_admin_deny,
     handle_admin_users,
+    handle_data_exchange_file_callback,
     handle_goal,
+    handle_goal_message_callback,
     handle_health,
     handle_message,
     handle_period_report_callback,
@@ -36,7 +38,14 @@ from food_registry_bot.bot.handlers import (
     handle_water_250_ml,
 )
 from food_registry_bot.bot.message_routing import MessageRoutingDecision
-from food_registry_bot.bot.payloads import AdminDeleteEntriesCallback, PeriodReportCallback, RecentEntryDeleteCallback, SummarySettingsCallback
+from food_registry_bot.bot.payloads import (
+    AdminDeleteEntriesCallback,
+    DataExchangeFileCallback,
+    GoalMessageCallback,
+    PeriodReportCallback,
+    RecentEntryDeleteCallback,
+    SummarySettingsCallback,
+)
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT
 from food_registry_bot.bot.keyboards import build_data_exchange_files_keyboard
 from food_registry_bot.db.base import Base
@@ -99,6 +108,10 @@ def create_session_factory() -> sessionmaker[Session]:
         )
         session.commit()
     return factory
+
+
+def flatten_inline_button_texts(reply_markup) -> list[str]:
+    return [button.text for row in reply_markup.inline_keyboard for button in row]
 
 
 def allow_user(session_factory: sessionmaker[Session], telegram_user_id: int, username: str | None = None) -> None:
@@ -543,6 +556,7 @@ async def test_admin_delete_entries_requests_confirmation() -> None:
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Подтвердить удаление"
     assert reply_markup.inline_keyboard[0][1].text == "Отмена"
+    assert reply_markup.inline_keyboard[1][0].text == "Закрыть"
 
 
 async def test_admin_delete_entries_returns_usage_for_missing_argument() -> None:
@@ -875,6 +889,27 @@ def test_build_data_exchange_files_keyboard_uses_addressable_delete_buttons() ->
 
     button_texts = [button.text for row in keyboard.inline_keyboard for button in row]
     assert "Удалить #1" in button_texts
+    assert "Закрыть" in button_texts
+
+
+async def test_files_close_callback_deletes_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "files_close_user")
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="files_close_user"),
+        message=SimpleNamespace(delete=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_data_exchange_file_callback(
+        callback,
+        DataExchangeFileCallback(action="close"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    callback.message.delete.assert_awaited_once()
+    callback.answer.assert_awaited_once_with()
 
 
 async def test_admin_backfill_nutrition_reports_unhandled_error() -> None:
@@ -1327,6 +1362,7 @@ async def test_recent_delete_open_shows_entry_selection_buttons() -> None:
     assert reply_markup.inline_keyboard[0][0].text == "14:00 · вода (250 мл)"
     assert reply_markup.inline_keyboard[1][0].text == "13:00 · яблоко"
     assert reply_markup.inline_keyboard[2][0].text == "Отмена"
+    assert reply_markup.inline_keyboard[3][0].text == "Закрыть"
     callback.answer.assert_awaited_once_with()
 
 
@@ -1659,6 +1695,26 @@ async def test_recent_list_callback_uses_requested_count() -> None:
         "5. 15:00 — еда 2\n"
         "6. 14:00 — еда 1",
     )
+
+
+async def test_recent_close_callback_deletes_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_close_user")
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_close_user"),
+        message=SimpleNamespace(delete=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_delete_callback(
+        callback,
+        RecentEntryDeleteCallback(action="close"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    callback.message.delete.assert_awaited_once()
+    callback.answer.assert_awaited_once_with()
 
 
 async def test_today_returns_daily_nutrition_totals_for_allowed_user() -> None:
@@ -2755,18 +2811,43 @@ async def test_settings_returns_current_summary_preferences() -> None:
         "- порог заметных записей: 80%",
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[0][0].text == "Тренировки: off"
-    assert reply_markup.inline_keyboard[1][0].text == "Калории: on"
-    assert reply_markup.inline_keyboard[2][0].text == "Белки: on"
-    assert reply_markup.inline_keyboard[3][0].text == "Жиры: on"
-    assert reply_markup.inline_keyboard[4][0].text == "Углеводы: on"
-    assert reply_markup.inline_keyboard[5][0].text == "Клетчатка: on"
-    assert reply_markup.inline_keyboard[6][0].text == "Вода: on"
-    assert reply_markup.inline_keyboard[7][0].text == "Дельта записи: on"
-    assert reply_markup.inline_keyboard[8][0].text == "Отображение: текст"
-    assert reply_markup.inline_keyboard[9][0].text == "Начало дня: 04:00"
-    assert reply_markup.inline_keyboard[10][0].text == "Допуск к цели: 10%"
-    assert reply_markup.inline_keyboard[11][0].text == "Порог заметных записей: 80%"
+    assert len(reply_markup.inline_keyboard) == 13
+    assert all(len(row) == 1 for row in reply_markup.inline_keyboard)
+    assert len(reply_markup.inline_keyboard[-1]) == 1
+    button_texts = flatten_inline_button_texts(reply_markup)
+    assert "Тренировки: off" in button_texts
+    assert "Калории: on" in button_texts
+    assert "Белки: on" in button_texts
+    assert "Жиры: on" in button_texts
+    assert "Углеводы: on" in button_texts
+    assert "Клетчатка: on" in button_texts
+    assert "Вода: on" in button_texts
+    assert "Дельта записи: on" in button_texts
+    assert "Отображение: текст" in button_texts
+    assert "Начало дня: 04:00" in button_texts
+    assert "Допуск к цели: 10%" in button_texts
+    assert "Порог заметных записей: 80%" in button_texts
+    assert "Закрыть" in button_texts
+
+
+async def test_settings_close_callback_deletes_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "settings_close_user")
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="settings_close_user"),
+        message=SimpleNamespace(delete=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_toggle_summary_metric(
+        callback,
+        SummarySettingsCallback(action="close"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    callback.message.delete.assert_awaited_once()
+    callback.answer.assert_awaited_once_with()
 
 
 async def test_toggle_summary_metric_updates_preference_and_message() -> None:
@@ -2825,8 +2906,9 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
         "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[1][0].text == "Калории: on"
-    assert reply_markup.inline_keyboard[2][0].text == "Белки: off"
+    button_texts = flatten_inline_button_texts(reply_markup)
+    assert "Калории: on" in button_texts
+    assert "Белки: off" in button_texts
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -2885,7 +2967,7 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
         "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[9][0].text == "Начало дня: 06:00"
+    assert "Начало дня: 06:00" in flatten_inline_button_texts(reply_markup)
 
 
 async def test_cycle_summary_display_mode_updates_preference_and_message() -> None:
@@ -2944,7 +3026,7 @@ async def test_cycle_summary_display_mode_updates_preference_and_message() -> No
         "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[8][0].text == "Отображение: бары"
+    assert "Отображение: бары" in flatten_inline_button_texts(reply_markup)
 
 
 async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -> None:
@@ -3001,7 +3083,7 @@ async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -
         "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[7][0].text == "Дельта записи: off"
+    assert "Дельта записи: off" in flatten_inline_button_texts(reply_markup)
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -3034,7 +3116,7 @@ async def test_cycle_report_goal_tolerance_updates_preference_and_message() -> N
     assert saved_preference.report_goal_tolerance_percent == 15
     assert "допуск к цели: 15%" in callback.message.edit_text.await_args.args[0]
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[10][0].text == "Допуск к цели: 15%"
+    assert "Допуск к цели: 15%" in flatten_inline_button_texts(reply_markup)
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -3067,7 +3149,7 @@ async def test_cycle_report_noticeable_percentile_updates_preference_and_message
     assert saved_preference.report_noticeable_entry_percentile == 85
     assert "порог заметных записей: 85%" in callback.message.edit_text.await_args.args[0]
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[11][0].text == "Порог заметных записей: 85%"
+    assert "Порог заметных записей: 85%" in flatten_inline_button_texts(reply_markup)
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -3112,7 +3194,7 @@ async def test_toggle_workout_logging_updates_user_and_message() -> None:
         "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[0][0].text == "Тренировки: on"
+    assert "Тренировки: on" in flatten_inline_button_texts(reply_markup)
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -3362,6 +3444,8 @@ async def test_goal_returns_default_goals_when_preference_is_not_created() -> No
         "Часовой пояс дня: Europe/Moscow.\n"
         "Начало пищевого дня: 04:00.",
     )
+    reply_markup = message.answer.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Закрыть"
 
 
 async def test_goal_sets_preference_and_creates_snapshot_for_current_nutrition_day() -> None:
@@ -3507,6 +3591,21 @@ async def test_goal_hint_respects_enabled_summary_metrics() -> None:
     assert "<code>/goal 1800</code>" not in rendered
     assert "<code>/goal fat 60</code>" not in rendered
     assert "<code>/goal water 2000</code>" not in rendered
+
+
+async def test_goal_close_callback_deletes_message() -> None:
+    callback = SimpleNamespace(
+        message=SimpleNamespace(delete=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_goal_message_callback(
+        callback,
+        GoalMessageCallback(action="close"),
+    )
+
+    callback.message.delete.assert_awaited_once()
+    callback.answer.assert_awaited_once_with()
 
 
 async def test_water_button_creates_water_entry_for_allowed_user() -> None:
