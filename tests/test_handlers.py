@@ -1863,12 +1863,12 @@ async def test_report_returns_period_averages_by_days_with_data() -> None:
             "Дней с данными по воде: 2\n"
             "\n"
             "Среднее по дням с данными\n"
-            "- калории: 266.7 ккал\n"
-            "- белки: 26.7 г\n"
-            "- жиры: 10.0 г\n"
-            "- углеводы: 33.3 г\n"
-            "- клетчатка: 4.0 г\n"
-            "- вода: 1000.0 мл\n"
+            "📉 калории: 266.7 ккал\n"
+            "📉 белки: 26.7 г\n"
+            "📉 жиры: 10.0 г\n"
+            "📉 углеводы: 33.3 г\n"
+            "📉 клетчатка: 4.0 г\n"
+            "📉 вода: 1000.0 мл\n"
             "\n"
             "Цели считаются с допуском 10%.\n"
             "- калории: 0 из 2 дней\n"
@@ -1926,6 +1926,83 @@ async def test_report_uses_goal_tolerance_preference_for_goal_hits() -> None:
 
     assert "Цели считаются с допуском 20%." in message.answer.await_args.args[0]
     assert "- калории: 1 из 1 дней" in message.answer.await_args.args[0]
+
+
+async def test_report_uses_goal_status_prefixes_for_average_lines() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "report_status_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="report_status_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(UserSummaryPreference(user_id=user.id, report_goal_tolerance_percent=10))
+
+        first_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc),
+        )
+        second_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 25, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add_all([first_entry, second_entry])
+        session.flush()
+        first_item = EntryItem(entry_id=first_entry.id, position=0, name="день 1")
+        second_item = EntryItem(entry_id=second_entry.id, position=0, name="день 2")
+        session.add_all([first_item, second_item])
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=1, value=1700.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=2, value=90.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=3, value=70.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=4, value=210.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=5, value=25.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=1, value=1700.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=2, value=90.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=3, value=70.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=4, value=210.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=5, value=25.0, confidence="medium"),
+                Entry(
+                    user_id=user.id,
+                    entry_type=EntryType.WATER,
+                    occurred_at=datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc),
+                    source_text="вода",
+                ),
+                Entry(
+                    user_id=user.id,
+                    entry_type=EntryType.WATER,
+                    occurred_at=datetime(2026, 5, 25, 9, 0, tzinfo=timezone.utc),
+                    source_text="вода",
+                ),
+            ]
+        )
+        session.flush()
+        water_entries = session.query(Entry).filter_by(user_id=user.id, entry_type=EntryType.WATER).all()
+        for water_entry in water_entries:
+            session.add(EntryItem(entry_id=water_entry.id, position=0, name="water", quantity=2500, unit="ml"))
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="report_status_user"),
+        answer=AsyncMock(),
+    )
+
+    await call_handle_report_at(
+        fixed_now=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
+
+    rendered = message.answer.await_args.args[0]
+    assert "🎯 калории: 1700.0 ккал" in rendered
+    assert "🎯 белки: 90.0 г" in rendered
+    assert "📈 жиры: 70.0 г" in rendered
+    assert "🎯 углеводы: 210.0 г" in rendered
+    assert "🎯 клетчатка: 25.0 г" in rendered
+    assert "📈 вода: 2500.0 мл" in rendered
 
 
 async def test_report_callback_cycles_to_next_period() -> None:
@@ -2080,8 +2157,8 @@ async def test_report_open_dynamics_sends_separate_message() -> None:
         "Метрика: калории\n"
         "Доступно: [калории], белки, жиры, углеводы, клетчатка\n"
         "\n"
-        "18.05-21.05: 300.0 ккал (1/4 дней)\n"
-        "22.05-25.05: 500.0 ккал (1/4 дней)",
+        "📉 18.05-21.05: 300.0 ккал (1/4 дней)\n"
+        "📉 22.05-25.05: 500.0 ккал (1/4 дней)",
     )
     callback.answer.assert_awaited_once_with()
 
@@ -2145,10 +2222,83 @@ async def test_report_dynamics_callback_cycles_metric() -> None:
         "Метрика: белки\n"
         "Доступно: калории, [белки], жиры, углеводы, клетчатка\n"
         "\n"
-        "18.05-21.05: 15.0 г (1/4 дней)\n"
+        "📉 18.05-21.05: 15.0 г (1/4 дней)\n"
         "22.05-25.05: нет данных",
     )
     callback.answer.assert_awaited_once_with("Метрика переключена.")
+
+
+async def test_report_dynamics_uses_goal_status_prefixes() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "report_dynamics_status_user")
+    with session_factory() as session:
+        user = User(
+            telegram_user_id=ALLOWED_USER_ID,
+            username="report_dynamics_status_user",
+            timezone="Europe/Moscow",
+        )
+        session.add(user)
+        session.flush()
+        first_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 18, 8, 0, tzinfo=timezone.utc),
+        )
+        second_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 22, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add_all([first_entry, second_entry])
+        session.flush()
+        first_item = EntryItem(entry_id=first_entry.id, position=0, name="день 1")
+        second_item = EntryItem(entry_id=second_entry.id, position=0, name="день 2")
+        session.add_all([first_item, second_item])
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=1, value=1800.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=2, value=90.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=3, value=60.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=4, value=210.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=5, value=25.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=1, value=2200.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=2, value=90.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=3, value=60.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=4, value=210.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=5, value=25.0, confidence="medium"),
+            ]
+        )
+        session.commit()
+
+    callback_message = SimpleNamespace(answer=AsyncMock())
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="report_dynamics_status_user"),
+        message=callback_message,
+        answer=AsyncMock(),
+    )
+
+    original_datetime = handle_period_report_callback.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+
+    handle_period_report_callback.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_period_report_callback(
+            callback,
+            PeriodReportCallback(action="open_dynamics", period_days=8),
+            session_factory,
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_period_report_callback.__globals__["datetime"] = original_datetime
+
+    rendered = callback_message.answer.await_args.args[0]
+    assert "🎯 18.05-21.05: 1800.0 ккал (1/4 дней)" in rendered
+    assert "📈 22.05-25.05: 2200.0 ккал (1/4 дней)" in rendered
 
 
 async def test_report_open_dynamics_shows_alert_when_no_data() -> None:

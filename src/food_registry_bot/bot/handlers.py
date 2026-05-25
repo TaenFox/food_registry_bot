@@ -144,6 +144,9 @@ BAR_MODE_LABELS = {
     "К": "Ккал",
 }
 BAR_MODE_LABEL_WIDTH = 6
+GOAL_STATUS_BELOW_EMOJI = "📉"
+GOAL_STATUS_WITHIN_EMOJI = "🎯"
+GOAL_STATUS_ABOVE_EMOJI = "📈"
 EXCHANGE_STATUS_LABELS = {
     DataExchangeStatus.READY: "готов",
     DataExchangeStatus.PROCESSED: "обработан",
@@ -823,6 +826,19 @@ def build_recent_entry_delete_confirmation(*, entry, timezone_name: str) -> str:
     )
 
 
+def render_goal_status_prefix(*, metric_value: float, goal_value: float | None, tolerance_percent: int) -> str:
+    if goal_value is None or goal_value <= 0:
+        return GOAL_STATUS_BELOW_EMOJI
+    tolerance_delta = goal_value * tolerance_percent / 100
+    lower_bound = goal_value - tolerance_delta
+    upper_bound = goal_value + tolerance_delta
+    if metric_value < lower_bound:
+        return GOAL_STATUS_BELOW_EMOJI
+    if metric_value > upper_bound:
+        return GOAL_STATUS_ABOVE_EMOJI
+    return GOAL_STATUS_WITHIN_EMOJI
+
+
 def build_today_summary_response(summary: DailyNutritionSummary) -> str:
     if summary.included_entry_count == 0 and summary.excluded_entry_count == 0:
         return "За текущий день пока нет записей еды."
@@ -1211,9 +1227,20 @@ def build_period_report_response(
             if metric_code not in enabled_metric_codes or metric_code == "water":
                 continue
             metric_value = getattr(report.average_nutrition_totals, metric_code)
-            average_lines.append(f"- {GOAL_METRIC_LABELS[metric_code]}: {round(metric_value, 1)} {unit}")
+            goal_value = report.average_goal_values.get(metric_code)
+            prefix = render_goal_status_prefix(
+                metric_value=metric_value,
+                goal_value=goal_value,
+                tolerance_percent=report_goal_tolerance_percent,
+            )
+            average_lines.append(f"{prefix} {GOAL_METRIC_LABELS[metric_code]}: {round(metric_value, 1)} {unit}")
     if show_water and report.water_data_day_count > 0:
-        average_lines.append(f"- вода: {round(report.average_water_ml, 1)} мл")
+        prefix = render_goal_status_prefix(
+            metric_value=report.average_water_ml,
+            goal_value=report.average_goal_values.get("water"),
+            tolerance_percent=report_goal_tolerance_percent,
+        )
+        average_lines.append(f"{prefix} вода: {round(report.average_water_ml, 1)} мл")
 
     if average_lines:
         lines.extend(["", "Среднее по дням с данными", *average_lines])
@@ -1291,6 +1318,7 @@ def resolve_available_period_report_metric_codes(
     summary_date_to: date,
     period_days: int,
     summary_preference,
+    workout_logging_enabled: bool,
 ) -> tuple[str, ...]:
     enabled_metric_codes = get_enabled_summary_metric_codes(summary_preference)
     report_use_case = PeriodReportUseCase(session)
@@ -1304,6 +1332,7 @@ def resolve_available_period_report_metric_codes(
             metric_code=metric_code,
             nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
             subperiod_day_count=PERIOD_REPORT_SUBPERIOD_DAYS,
+            workout_logging_enabled=workout_logging_enabled,
         )
         if any(row.data_day_count > 0 for row in dynamics.rows):
             available_metric_codes.append(metric_code)
@@ -1324,6 +1353,7 @@ def build_period_report_dynamics_response(
     dynamics: PeriodMetricDynamics,
     *,
     available_metric_codes: tuple[str, ...],
+    report_goal_tolerance_percent: int,
 ) -> str:
     unit_by_metric_code = {metric_code: unit for metric_code, _short_label, unit in SUMMARY_METRIC_LINES}
     metric_labels = [f"[{GOAL_METRIC_LABELS[metric_code]}]" if metric_code == dynamics.metric_code else GOAL_METRIC_LABELS[metric_code] for metric_code in available_metric_codes]
@@ -1339,8 +1369,13 @@ def build_period_report_dynamics_response(
         if row.data_day_count == 0 or row.average_value is None:
             lines.append(f"{period_label}: нет данных")
             continue
+        prefix = render_goal_status_prefix(
+            metric_value=row.average_value,
+            goal_value=row.average_goal_value,
+            tolerance_percent=report_goal_tolerance_percent,
+        )
         lines.append(
-            f"{period_label}: {round(row.average_value, 1)} {unit} ({row.data_day_count}/{dynamics.subperiod_day_count} дней)"
+            f"{prefix} {period_label}: {round(row.average_value, 1)} {unit} ({row.data_day_count}/{dynamics.subperiod_day_count} дней)"
         )
     return "\n".join(lines)
 
@@ -2381,6 +2416,7 @@ async def handle_period_report_callback(
                 summary_date_to=summary_date_to,
                 period_days=callback_data.period_days,
                 summary_preference=preference,
+                workout_logging_enabled=user.workout_logging_enabled,
             )
             if not available_metric_codes:
                 await callback.answer("За этот период нет данных для динамики.", show_alert=True)
@@ -2396,11 +2432,13 @@ async def handle_period_report_callback(
                 metric_code=metric_code,
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
                 subperiod_day_count=PERIOD_REPORT_SUBPERIOD_DAYS,
+                workout_logging_enabled=user.workout_logging_enabled,
             )
             next_metric_code = resolve_next_metric_code(available_metric_codes, metric_code)
             rendered_dynamics = build_period_report_dynamics_response(
                 dynamics,
                 available_metric_codes=available_metric_codes,
+                report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
             )
             reply_markup = build_period_report_dynamics_keyboard(
                 period_days=callback_data.period_days,
@@ -2430,6 +2468,7 @@ async def handle_period_report_callback(
                 summary_date_to=summary_date_to,
                 period_days=callback_data.period_days,
                 summary_preference=preference,
+                workout_logging_enabled=user.workout_logging_enabled,
             )
             if not available_metric_codes:
                 await callback.answer("За этот период нет данных для заметных записей.", show_alert=True)
