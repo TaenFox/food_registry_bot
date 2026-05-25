@@ -299,6 +299,12 @@ def build_period_report_keyboard(*, period_days: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="Заметные записи пищи",
+                    callback_data=PeriodReportCallback(action="open_noticeable", period_days=period_days).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="Закрыть",
                     callback_data=PeriodReportCallback(action="close", period_days=period_days).pack(),
                 )
@@ -329,6 +335,33 @@ def build_period_report_dynamics_keyboard(*, period_days: int, metric_code: str,
                     text="Следующая метрика",
                     callback_data=PeriodReportCallback(
                         action="cycle_dynamics_metric",
+                        period_days=period_days,
+                        metric_code=next_metric_code,
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Закрыть",
+                    callback_data=PeriodReportCallback(
+                        action="close",
+                        period_days=period_days,
+                        metric_code=metric_code,
+                    ).pack(),
+                )
+            ],
+        ]
+    )
+
+
+def build_period_report_noticeable_keyboard(*, period_days: int, metric_code: str, next_metric_code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Следующая метрика",
+                    callback_data=PeriodReportCallback(
+                        action="cycle_noticeable_metric",
                         period_days=period_days,
                         metric_code=next_metric_code,
                     ).pack(),

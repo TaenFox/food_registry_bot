@@ -47,6 +47,26 @@ class PeriodMetricDynamics(BaseModel):
     rows: list[PeriodMetricDynamicsRow] = Field(min_length=1)
 
 
+class PeriodNoticeableEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entry_id: int = Field(gt=0)
+    occurred_at: date
+    title: str = Field(min_length=1)
+    metric_value: float = Field(ge=0)
+
+
+class PeriodNoticeableEntries(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary_date_from: date
+    summary_date_to: date
+    period_day_count: int = Field(gt=0)
+    metric_code: str = Field(min_length=1)
+    percentile: int = Field(ge=0, le=100)
+    entries: list[PeriodNoticeableEntry] = Field(default_factory=list)
+
+
 class PeriodReportUseCase:
     def __init__(self, session: Session) -> None:
         self._nutrition_summary_use_case = DailyNutritionSummaryUseCase(session)
@@ -237,3 +257,92 @@ class PeriodReportUseCase:
             subperiod_day_count=subperiod_day_count,
             rows=rows,
         )
+
+    def build_noticeable_entries(
+        self,
+        *,
+        user_id: int,
+        timezone_name: str,
+        summary_date_to: date,
+        period_day_count: int,
+        metric_code: str,
+        nutrition_day_start_hour: int = 4,
+        percentile: int = 80,
+        limit: int = 10,
+    ) -> PeriodNoticeableEntries:
+        if period_day_count <= 0:
+            raise ValueError("period_day_count must be positive")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        summary_date_from = summary_date_to - timedelta(days=period_day_count - 1)
+        occurred_at_from, _ignored = resolve_day_bounds_utc(
+            summary_date=summary_date_from,
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
+        )
+        _ignored_from, occurred_at_to = resolve_day_bounds_utc(
+            summary_date=summary_date_to + timedelta(days=1),
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
+        )
+        entries = self._entry_repository.list_food_for_user_between(
+            user_id=user_id,
+            occurred_at_from=occurred_at_from,
+            occurred_at_to=occurred_at_to,
+        )
+        candidates: list[PeriodNoticeableEntry] = []
+        metric_values: list[float] = []
+        for entry in entries:
+            entry_total_value = 0.0
+            has_metric = False
+            for item in entry.items:
+                metric_map = {
+                    metric.metric.code: metric.value
+                    for metric in item.metrics
+                    if metric.metric is not None
+                }
+                metric_value = metric_map.get(metric_code)
+                if metric_value is None:
+                    continue
+                entry_total_value += float(metric_value)
+                has_metric = True
+            if not has_metric:
+                continue
+            metric_values.append(entry_total_value)
+            title_parts = [item.name for item in sorted(entry.items, key=lambda current: current.position) if item.name]
+            candidates.append(
+                PeriodNoticeableEntry(
+                    entry_id=entry.id,
+                    occurred_at=resolve_local_summary_date(
+                        reference_at=entry.occurred_at,
+                        timezone_name=timezone_name,
+                        nutrition_day_start_hour=nutrition_day_start_hour,
+                    ),
+                    title=", ".join(title_parts[:3]) if title_parts else "запись",
+                    metric_value=entry_total_value,
+                )
+            )
+
+        threshold = _percentile_threshold(metric_values, percentile)
+        noticeable_entries = sorted(
+            [entry for entry in candidates if entry.metric_value >= threshold],
+            key=lambda current: (current.metric_value, current.entry_id),
+            reverse=True,
+        )[:limit]
+        return PeriodNoticeableEntries(
+            summary_date_from=summary_date_from,
+            summary_date_to=summary_date_to,
+            period_day_count=period_day_count,
+            metric_code=metric_code,
+            percentile=percentile,
+            entries=noticeable_entries,
+        )
+
+
+def _percentile_threshold(values: list[float], percentile: int) -> float:
+    if not values:
+        return float("inf")
+    sorted_values = sorted(values)
+    index = max(int(len(sorted_values) * percentile / 100) - 1, 0)
+    index = min(index, len(sorted_values) - 1)
+    return sorted_values[index]

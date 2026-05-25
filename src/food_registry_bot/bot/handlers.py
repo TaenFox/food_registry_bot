@@ -25,6 +25,7 @@ from food_registry_bot.bot.keyboards import (
     build_main_keyboard,
     build_period_report_dynamics_keyboard,
     build_period_report_keyboard,
+    build_period_report_noticeable_keyboard,
     build_recent_entries_delete_keyboard,
     build_recent_entry_confirmation_keyboard,
     build_recent_entry_selection_keyboard,
@@ -149,6 +150,7 @@ EXCHANGE_DIRECTION_LABELS = {
 PERIOD_REPORT_PERIOD_SEQUENCE = (8, 16, 32)
 DEFAULT_PERIOD_REPORT_DAYS = PERIOD_REPORT_PERIOD_SEQUENCE[0]
 PERIOD_REPORT_SUBPERIOD_DAYS = 4
+DEFAULT_REPORT_NOTICEABLE_ENTRY_PERCENTILE = 80
 
 
 class FoodWriteFlowError(RuntimeError):
@@ -1274,6 +1276,33 @@ def build_period_report_dynamics_response(
     return "\n".join(lines)
 
 
+def build_period_report_noticeable_response(
+    noticeable_entries,
+    *,
+    available_metric_codes: tuple[str, ...],
+) -> str:
+    unit_by_metric_code = {metric_code: unit for metric_code, _short_label, unit in SUMMARY_METRIC_LINES}
+    metric_labels = [
+        f"[{GOAL_METRIC_LABELS[metric_code]}]" if metric_code == noticeable_entries.metric_code else GOAL_METRIC_LABELS[metric_code]
+        for metric_code in available_metric_codes
+    ]
+    lines = [
+        f"Заметные записи пищи: {noticeable_entries.summary_date_from.strftime('%d.%m.%Y')}-{noticeable_entries.summary_date_to.strftime('%d.%m.%Y')}",
+        f"Метрика: {GOAL_METRIC_LABELS[noticeable_entries.metric_code]}",
+        f"Доступно: {', '.join(metric_labels)}",
+        "",
+    ]
+    unit = unit_by_metric_code[noticeable_entries.metric_code]
+    if not noticeable_entries.entries:
+        lines.append("Нет заметных записей.")
+        return "\n".join(lines)
+    for entry in noticeable_entries.entries:
+        lines.append(
+            f"- {entry.occurred_at.strftime('%d.%m')} · {entry.title} · {round(entry.metric_value, 1)} {unit}"
+        )
+    return "\n".join(lines)
+
+
 def payload_contains_credit_eligible_workout_entries(payload) -> bool:
     for entry in payload.entries:
         if entry.type is not EntryType.WORKOUT:
@@ -2139,7 +2168,14 @@ async def handle_period_report_callback(
     if telegram_user is None:
         await callback.answer("Пользователь не найден.", show_alert=True)
         return
-    if callback_data.action not in {"cycle_period", "open_dynamics", "cycle_dynamics_metric", "close"}:
+    if callback_data.action not in {
+        "cycle_period",
+        "open_dynamics",
+        "cycle_dynamics_metric",
+        "open_noticeable",
+        "cycle_noticeable_metric",
+        "close",
+    }:
         await callback.answer("Неизвестное действие.", show_alert=True)
         return
     if callback.message is None:
@@ -2217,6 +2253,55 @@ async def handle_period_report_callback(
 
             await callback.message.edit_text(
                 rendered_dynamics,
+                reply_markup=reply_markup,
+            )
+            await callback.answer("Метрика переключена.")
+            return
+
+        if callback_data.action in {"open_noticeable", "cycle_noticeable_metric"}:
+            available_metric_codes = resolve_available_period_report_metric_codes(
+                session=session,
+                user_id=user.id,
+                timezone_name=user.timezone,
+                summary_date_to=summary_date_to,
+                period_days=callback_data.period_days,
+                summary_preference=preference,
+            )
+            if not available_metric_codes:
+                await callback.answer("За этот период нет данных для заметных записей.", show_alert=True)
+                return
+            metric_code = callback_data.metric_code or available_metric_codes[0]
+            if metric_code not in available_metric_codes:
+                metric_code = available_metric_codes[0]
+            noticeable_entries = PeriodReportUseCase(session).build_noticeable_entries(
+                user_id=user.id,
+                timezone_name=user.timezone,
+                summary_date_to=summary_date_to,
+                period_day_count=callback_data.period_days,
+                metric_code=metric_code,
+                nutrition_day_start_hour=preference.nutrition_day_start_hour,
+                percentile=DEFAULT_REPORT_NOTICEABLE_ENTRY_PERCENTILE,
+            )
+            next_metric_code = resolve_next_metric_code(available_metric_codes, metric_code)
+            rendered_noticeable = build_period_report_noticeable_response(
+                noticeable_entries,
+                available_metric_codes=available_metric_codes,
+            )
+            reply_markup = build_period_report_noticeable_keyboard(
+                period_days=callback_data.period_days,
+                metric_code=metric_code,
+                next_metric_code=next_metric_code,
+            )
+            if callback_data.action == "open_noticeable":
+                await callback.message.answer(
+                    rendered_noticeable,
+                    reply_markup=reply_markup,
+                )
+                await callback.answer()
+                return
+
+            await callback.message.edit_text(
+                rendered_noticeable,
                 reply_markup=reply_markup,
             )
             await callback.answer("Метрика переключена.")
