@@ -16,13 +16,11 @@ from food_registry_bot.bot.handlers import (
     build_data_exchange_files_response,
     build_import_validation_response_text,
     handle_admin,
-    handle_admin_allow,
+    handle_admin_panel_callback,
     handle_admin_backfill_nutrition,
-    handle_admin_delete_entries_callback,
-    handle_admin_delete_entries,
-    handle_admin_deny,
-    handle_admin_users,
+    handle_data_exchange_file_callback,
     handle_goal,
+    handle_goal_message_callback,
     handle_health,
     handle_message,
     handle_period_report_callback,
@@ -36,7 +34,14 @@ from food_registry_bot.bot.handlers import (
     handle_water_250_ml,
 )
 from food_registry_bot.bot.message_routing import MessageRoutingDecision
-from food_registry_bot.bot.payloads import AdminDeleteEntriesCallback, PeriodReportCallback, RecentEntryDeleteCallback, SummarySettingsCallback
+from food_registry_bot.bot.payloads import (
+    AdminPanelCallback,
+    DataExchangeFileCallback,
+    GoalMessageCallback,
+    PeriodReportCallback,
+    RecentEntryDeleteCallback,
+    SummarySettingsCallback,
+)
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT
 from food_registry_bot.bot.keyboards import build_data_exchange_files_keyboard
 from food_registry_bot.db.base import Base
@@ -99,6 +104,10 @@ def create_session_factory() -> sessionmaker[Session]:
         )
         session.commit()
     return factory
+
+
+def flatten_inline_button_texts(reply_markup) -> list[str]:
+    return [button.text for row in reply_markup.inline_keyboard for button in row]
 
 
 def allow_user(session_factory: sessionmaker[Session], telegram_user_id: int, username: str | None = None) -> None:
@@ -234,71 +243,6 @@ async def test_health_denies_unallowed_user() -> None:
     )
 
 
-async def test_admin_allow_sets_user_access() -> None:
-    session_factory = create_session_factory()
-    message = SimpleNamespace(
-        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
-        answer=AsyncMock(),
-    )
-    command = SimpleNamespace(args=str(ALLOWED_USER_ID))
-
-    await handle_admin_allow(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
-
-    with session_factory() as session:
-        access = session.query(UserAccess).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
-
-    assert access.is_allowed is True
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == (f"Доступ разрешён для пользователя {ALLOWED_USER_ID}.",)
-
-
-async def test_admin_deny_sets_user_access_false() -> None:
-    session_factory = create_session_factory()
-    allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
-    message = SimpleNamespace(
-        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
-        answer=AsyncMock(),
-    )
-    command = SimpleNamespace(args=str(ALLOWED_USER_ID))
-
-    await handle_admin_deny(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
-
-    with session_factory() as session:
-        access = session.query(UserAccess).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
-
-    assert access.is_allowed is False
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == (f"Доступ запрещён для пользователя {ALLOWED_USER_ID}.",)
-
-
-async def test_admin_commands_are_forbidden_for_non_admin() -> None:
-    session_factory = create_session_factory()
-    message = SimpleNamespace(
-        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
-        answer=AsyncMock(),
-    )
-    command = SimpleNamespace(args=str(DENIED_USER_ID))
-
-    await handle_admin_allow(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
-
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Команда доступна только администратору.",)
-
-
-async def test_admin_allow_returns_safe_usage_text_for_missing_argument() -> None:
-    session_factory = create_session_factory()
-    message = SimpleNamespace(
-        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
-        answer=AsyncMock(),
-    )
-    command = SimpleNamespace(args=None)
-
-    await handle_admin_allow(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
-
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Использование: <code>/admin_allow TELEGRAM_USER_ID</code>",)
-
-
 async def test_admin_returns_system_overview_and_commands() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
@@ -345,15 +289,15 @@ async def test_admin_returns_system_overview_and_commands() -> None:
             "- food entries без полного набора метрик: 1\n"
             "- дозаполнение nutrition metrics: idle\n"
             "\n"
-            "Доступные команды:\n"
+            "Доступные действия:\n"
+            "- кнопка «Управление пользователями»\n"
             "- /admin\n"
-            "- /admin_users\n"
-            "- <code>/admin_allow TELEGRAM_USER_ID</code>\n"
-            "- <code>/admin_deny TELEGRAM_USER_ID</code>\n"
-            "- <code>/admin_delete_entries TELEGRAM_USER_ID</code>\n"
             "- <code>/admin_backfill_nutrition [LIMIT]</code>"
         ),
     )
+    reply_markup = message.answer.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Управление пользователями"
+    assert reply_markup.inline_keyboard[1][0].text == "Закрыть"
 
 
 async def test_admin_overview_excludes_admin_from_user_counters() -> None:
@@ -390,12 +334,9 @@ async def test_admin_overview_excludes_admin_from_user_counters() -> None:
             "- food entries без полного набора метрик: 0\n"
             "- дозаполнение nutrition metrics: idle\n"
             "\n"
-            "Доступные команды:\n"
+            "Доступные действия:\n"
+            "- кнопка «Управление пользователями»\n"
             "- /admin\n"
-            "- /admin_users\n"
-            "- <code>/admin_allow TELEGRAM_USER_ID</code>\n"
-            "- <code>/admin_deny TELEGRAM_USER_ID</code>\n"
-            "- <code>/admin_delete_entries TELEGRAM_USER_ID</code>\n"
             "- <code>/admin_backfill_nutrition [LIMIT]</code>"
         ),
     )
@@ -438,33 +379,95 @@ async def test_admin_is_forbidden_for_non_admin() -> None:
     assert message.answer.await_args.args == ("Команда доступна только администратору.",)
 
 
-async def test_admin_users_returns_known_users_with_status_and_commands() -> None:
+async def test_admin_panel_users_returns_first_page_with_buttons() -> None:
     session_factory = create_session_factory()
-    allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
     with session_factory() as session:
-        session.add(User(telegram_user_id=DENIED_USER_ID, username="denied_user", timezone="Europe/Moscow"))
-        session.add(UserAccess(telegram_user_id=DENIED_USER_ID, username="denied_user", is_allowed=False))
+        for index in range(12):
+            telegram_user_id = 3000 + index
+            username = f"user_{index}"
+            session.add(UserAccess(telegram_user_id=telegram_user_id, username=username, is_allowed=index % 2 == 0))
         session.commit()
 
-    message = SimpleNamespace(
+    callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
         answer=AsyncMock(),
     )
 
-    await handle_admin_users(message, session_factory, admin_user_ids=(ADMIN_ID,))
-
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == (
-        "Пользователи:\n"
-        f"- {ALLOWED_USER_ID} @allowed_user [доступ разрешён]\n"
-        f"<code>/admin_deny {ALLOWED_USER_ID}</code>\n"
-        f"- {DENIED_USER_ID} @denied_user [доступ запрещён]\n"
-        f"<code>/admin_allow {DENIED_USER_ID}</code>\n"
-        f"- {ADMIN_ID} [admin]",
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="open_users", page=0),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
     )
 
+    callback.message.edit_text.assert_awaited_once()
+    assert callback.message.edit_text.await_args.args == (
+        "Пользователи (страница 1, по 10):\n"
+        f"- {ADMIN_ID} [admin; профиля нет]\n"
+        "- 3000 @user_0 [доступ разрешён; профиля нет]\n"
+        "- 3001 @user_1 [доступ запрещён; профиля нет]\n"
+        "- 3002 @user_2 [доступ разрешён; профиля нет]\n"
+        "- 3003 @user_3 [доступ запрещён; профиля нет]\n"
+        "- 3004 @user_4 [доступ разрешён; профиля нет]\n"
+        "- 3005 @user_5 [доступ запрещён; профиля нет]\n"
+        "- 3006 @user_6 [доступ разрешён; профиля нет]\n"
+        "- 3007 @user_7 [доступ запрещён; профиля нет]\n"
+        "- 3008 @user_8 [доступ разрешён; профиля нет]\n"
+        "\n"
+        "Выбери пользователя кнопкой ниже.",
+    )
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text.startswith(str(ADMIN_ID))
+    assert reply_markup.inline_keyboard[9][0].text.startswith("3008")
+    assert reply_markup.inline_keyboard[10][0].text == "Вперёд →"
+    assert reply_markup.inline_keyboard[11][0].text == "К панели"
+    assert reply_markup.inline_keyboard[12][0].text == "Закрыть"
+    callback.answer.assert_awaited_once_with()
 
-async def test_admin_users_shows_new_denied_user_after_first_contact() -> None:
+
+async def test_admin_panel_users_returns_second_page() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        for index in range(12):
+            telegram_user_id = 4000 + index
+            username = f"user_{index}"
+            session.add(UserAccess(telegram_user_id=telegram_user_id, username=username, is_allowed=True))
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="open_users", page=1),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
+    )
+
+    assert callback.message.edit_text.await_args.args == (
+        "Пользователи (страница 2, по 10):\n"
+        "- 4009 @user_9 [доступ разрешён; профиля нет]\n"
+        "- 4010 @user_10 [доступ разрешён; профиля нет]\n"
+        "- 4011 @user_11 [доступ разрешён; профиля нет]\n"
+        "\n"
+        "Выбери пользователя кнопкой ниже.",
+    )
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text.startswith("4009")
+    assert reply_markup.inline_keyboard[1][0].text.startswith("4010")
+    assert reply_markup.inline_keyboard[2][0].text.startswith("4011")
+    assert reply_markup.inline_keyboard[3][0].text == "← Назад"
+
+
+async def test_admin_panel_users_shows_new_denied_user_after_first_contact() -> None:
     session_factory = create_session_factory()
     denied_message = SimpleNamespace(
         from_user=SimpleNamespace(id=LARGE_DENIED_USER_ID, username="new_user"),
@@ -473,120 +476,146 @@ async def test_admin_users_shows_new_denied_user_after_first_contact() -> None:
 
     await handle_start(denied_message, session_factory, admin_user_ids=(ADMIN_ID,))
 
-    admin_message = SimpleNamespace(
+    callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
         answer=AsyncMock(),
     )
 
-    await handle_admin_users(admin_message, session_factory, admin_user_ids=(ADMIN_ID,))
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="open_users"),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
+    )
 
-    admin_message.answer.assert_awaited_once()
-    assert admin_message.answer.await_args.args == (
-        "Пользователи:\n"
-        f"- {LARGE_DENIED_USER_ID} @new_user [доступ запрещён]\n"
-        f"<code>/admin_allow {LARGE_DENIED_USER_ID}</code>\n"
-        f"- {ADMIN_ID} [admin]",
+    callback.message.edit_text.assert_awaited_once()
+    assert callback.message.edit_text.await_args.args == (
+        "Пользователи (страница 1, по 10):\n"
+        f"- {ADMIN_ID} [admin; профиля нет]\n"
+        f"- {LARGE_DENIED_USER_ID} @new_user [доступ запрещён; профиля нет]\n"
+        "\n"
+        "Выбери пользователя кнопкой ниже.",
     )
 
 
-async def test_admin_users_is_forbidden_for_non_admin() -> None:
+async def test_admin_panel_is_forbidden_for_non_admin() -> None:
     session_factory = create_session_factory()
-    message = SimpleNamespace(
+    callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
         answer=AsyncMock(),
     )
 
-    await handle_admin_users(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="open_users"),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
+    )
 
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Команда доступна только администратору.",)
+    callback.answer.assert_awaited_once_with("Команда доступна только администратору.", show_alert=True)
 
 
-async def test_admin_delete_entries_requests_confirmation() -> None:
+async def test_admin_panel_open_user_and_toggle_access() -> None:
     session_factory = create_session_factory()
     with session_factory() as session:
-        user = User(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", timezone="Europe/Moscow")
-        session.add(user)
-        session.flush()
-        first_entry = Entry(
-            user_id=user.id,
-            entry_type=EntryType.FOOD,
-            source_text="омлет",
-            occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
-        )
-        second_entry = Entry(
-            user_id=user.id,
-            entry_type=EntryType.WATER,
-            source_text="вода",
-            occurred_at=datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc),
-        )
-        session.add_all([first_entry, second_entry])
+        session.add(UserAccess(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", is_allowed=False))
         session.commit()
 
-    message = SimpleNamespace(
+    callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
         answer=AsyncMock(),
     )
-    command = SimpleNamespace(args=str(ALLOWED_USER_ID))
 
-    await handle_admin_delete_entries(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="open_user", telegram_user_id=ALLOWED_USER_ID, page=0),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
+    )
 
     with session_factory() as session:
-        assert session.query(Entry).count() == 2
+        access = session.query(UserAccess).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
+        assert access.is_allowed is False
 
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == (
-        "Подтверди удаление записей пользователя.\n"
-        f"Telegram ID: {ALLOWED_USER_ID}\n"
-        "Будет удалено записей: 2",
+    callback.message.edit_text.assert_awaited_once()
+    assert callback.message.edit_text.await_args.args == (
+        "Пользователь:\n"
+        f"- Telegram ID: {ALLOWED_USER_ID}\n"
+        "- username: @allowed_user\n"
+        "- доступ: запрещён\n"
+        "- профиль: нет\n"
+        "- записей в журнале: 0",
     )
-    reply_markup = message.answer.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[0][0].text == "Подтвердить удаление"
-    assert reply_markup.inline_keyboard[0][1].text == "Отмена"
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Разрешить доступ"
+
+    callback.message.edit_text.reset_mock()
+    callback.answer.reset_mock()
+
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="allow_user", telegram_user_id=ALLOWED_USER_ID, page=0),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
+    )
+
+    with session_factory() as session:
+        access = session.query(UserAccess).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
+        assert access.is_allowed is True
+
+    assert callback.message.edit_text.await_args.args[0].endswith("- записей в журнале: 0")
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Запретить доступ"
+    callback.answer.assert_awaited_once_with("Доступ разрешён.")
 
 
-async def test_admin_delete_entries_returns_usage_for_missing_argument() -> None:
+async def test_admin_panel_open_admin_user_without_access_toggle() -> None:
     session_factory = create_session_factory()
-    message = SimpleNamespace(
+    callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
         answer=AsyncMock(),
     )
 
-    await handle_admin_delete_entries(
-        message,
-        SimpleNamespace(args=None),
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="open_user", telegram_user_id=ADMIN_ID, page=0),
         session_factory,
+        backfill_tracker=AdminBackfillTracker(),
         admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
     )
 
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == ("Использование: <code>/admin_delete_entries TELEGRAM_USER_ID</code>",)
-
-
-async def test_admin_delete_entries_returns_not_found_for_unknown_user() -> None:
-    session_factory = create_session_factory()
-    message = SimpleNamespace(
-        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
-        answer=AsyncMock(),
+    assert callback.message.edit_text.await_args.args == (
+        "Пользователь:\n"
+        f"- Telegram ID: {ADMIN_ID}\n"
+        "- username: —\n"
+        "- доступ: admin\n"
+        "- профиль: нет\n"
+        "- записей в журнале: 0",
     )
-
-    await handle_admin_delete_entries(
-        message,
-        SimpleNamespace(args=str(DENIED_USER_ID)),
-        session_factory,
-        admin_user_ids=(ADMIN_ID,),
-    )
-
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == (f"Пользователь с Telegram ID {DENIED_USER_ID} не найден.",)
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Удалить данные пользователя"
 
 
-async def test_admin_delete_entries_confirm_callback_removes_entries() -> None:
+async def test_admin_panel_delete_entries_prompt_and_confirm() -> None:
     session_factory = create_session_factory()
     with session_factory() as session:
         user = User(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", timezone="Europe/Moscow")
         session.add(user)
         session.flush()
+        session.add(UserAccess(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", is_allowed=True))
         session.add_all(
             [
                 Entry(
@@ -611,11 +640,35 @@ async def test_admin_delete_entries_confirm_callback_removes_entries() -> None:
         answer=AsyncMock(),
     )
 
-    await handle_admin_delete_entries_callback(
+    await handle_admin_panel_callback(
         callback,
-        AdminDeleteEntriesCallback(action="confirm", telegram_user_id=ALLOWED_USER_ID),
+        AdminPanelCallback(action="prompt_delete_user_entries", telegram_user_id=ALLOWED_USER_ID, page=0),
         session_factory,
+        backfill_tracker=AdminBackfillTracker(),
         admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
+    )
+
+    callback.message.edit_text.assert_awaited_once_with(
+        "Подтверди удаление данных пользователя.\n"
+        f"Telegram ID: {ALLOWED_USER_ID}\n"
+        "Будет удалено записей: 2",
+        reply_markup=callback.message.edit_text.await_args.kwargs["reply_markup"],
+    )
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Подтвердить удаление"
+    assert reply_markup.inline_keyboard[0][1].text == "Назад"
+
+    callback.message.edit_text.reset_mock()
+    callback.answer.reset_mock()
+
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="confirm_delete_user_entries", telegram_user_id=ALLOWED_USER_ID, page=0),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
     )
 
     with session_factory() as session:
@@ -626,45 +679,6 @@ async def test_admin_delete_entries_confirm_callback_removes_entries() -> None:
         reply_markup=None,
     )
     callback.answer.assert_awaited_once_with("Удаление выполнено.")
-
-
-async def test_admin_delete_entries_cancel_callback_keeps_entries() -> None:
-    session_factory = create_session_factory()
-    with session_factory() as session:
-        user = User(telegram_user_id=ALLOWED_USER_ID, username="allowed_user", timezone="Europe/Moscow")
-        session.add(user)
-        session.flush()
-        session.add(
-            Entry(
-                user_id=user.id,
-                entry_type=EntryType.FOOD,
-                source_text="омлет",
-                occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
-            )
-        )
-        session.commit()
-
-    callback = SimpleNamespace(
-        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
-        message=SimpleNamespace(edit_text=AsyncMock()),
-        answer=AsyncMock(),
-    )
-
-    await handle_admin_delete_entries_callback(
-        callback,
-        AdminDeleteEntriesCallback(action="cancel", telegram_user_id=ALLOWED_USER_ID),
-        session_factory,
-        admin_user_ids=(ADMIN_ID,),
-    )
-
-    with session_factory() as session:
-        assert session.query(Entry).count() == 1
-
-    callback.message.edit_text.assert_awaited_once_with(
-        "Удаление записей отменено.",
-        reply_markup=None,
-    )
-    callback.answer.assert_awaited_once_with("Удаление отменено.")
 
 
 async def test_admin_backfill_nutrition_recomputes_incomplete_entries() -> None:
@@ -875,6 +889,27 @@ def test_build_data_exchange_files_keyboard_uses_addressable_delete_buttons() ->
 
     button_texts = [button.text for row in keyboard.inline_keyboard for button in row]
     assert "Удалить #1" in button_texts
+    assert "Закрыть" in button_texts
+
+
+async def test_files_close_callback_deletes_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "files_close_user")
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="files_close_user"),
+        message=SimpleNamespace(delete=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_data_exchange_file_callback(
+        callback,
+        DataExchangeFileCallback(action="close"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    callback.message.delete.assert_awaited_once()
+    callback.answer.assert_awaited_once_with()
 
 
 async def test_admin_backfill_nutrition_reports_unhandled_error() -> None:
@@ -1327,6 +1362,7 @@ async def test_recent_delete_open_shows_entry_selection_buttons() -> None:
     assert reply_markup.inline_keyboard[0][0].text == "14:00 · вода (250 мл)"
     assert reply_markup.inline_keyboard[1][0].text == "13:00 · яблоко"
     assert reply_markup.inline_keyboard[2][0].text == "Отмена"
+    assert reply_markup.inline_keyboard[3][0].text == "Закрыть"
     callback.answer.assert_awaited_once_with()
 
 
@@ -1661,6 +1697,26 @@ async def test_recent_list_callback_uses_requested_count() -> None:
     )
 
 
+async def test_recent_close_callback_deletes_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_close_user")
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_close_user"),
+        message=SimpleNamespace(delete=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_delete_callback(
+        callback,
+        RecentEntryDeleteCallback(action="close"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    callback.message.delete.assert_awaited_once()
+    callback.answer.assert_awaited_once_with()
+
+
 async def test_today_returns_daily_nutrition_totals_for_allowed_user() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "today_user")
@@ -1807,12 +1863,12 @@ async def test_report_returns_period_averages_by_days_with_data() -> None:
             "Дней с данными по воде: 2\n"
             "\n"
             "Среднее по дням с данными\n"
-            "- калории: 266.7 ккал\n"
-            "- белки: 26.7 г\n"
-            "- жиры: 10.0 г\n"
-            "- углеводы: 33.3 г\n"
-            "- клетчатка: 4.0 г\n"
-            "- вода: 1000.0 мл\n"
+            "📉 калории: 266.7 ккал\n"
+            "📉 белки: 26.7 г\n"
+            "📉 жиры: 10.0 г\n"
+            "📉 углеводы: 33.3 г\n"
+            "📉 клетчатка: 4.0 г\n"
+            "📉 вода: 1000.0 мл\n"
             "\n"
             "Цели считаются с допуском 10%.\n"
             "- калории: 0 из 2 дней\n"
@@ -1870,6 +1926,83 @@ async def test_report_uses_goal_tolerance_preference_for_goal_hits() -> None:
 
     assert "Цели считаются с допуском 20%." in message.answer.await_args.args[0]
     assert "- калории: 1 из 1 дней" in message.answer.await_args.args[0]
+
+
+async def test_report_uses_goal_status_prefixes_for_average_lines() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "report_status_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="report_status_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(UserSummaryPreference(user_id=user.id, report_goal_tolerance_percent=10))
+
+        first_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc),
+        )
+        second_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 25, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add_all([first_entry, second_entry])
+        session.flush()
+        first_item = EntryItem(entry_id=first_entry.id, position=0, name="день 1")
+        second_item = EntryItem(entry_id=second_entry.id, position=0, name="день 2")
+        session.add_all([first_item, second_item])
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=1, value=1700.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=2, value=90.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=3, value=70.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=4, value=210.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=5, value=25.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=1, value=1700.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=2, value=90.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=3, value=70.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=4, value=210.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=5, value=25.0, confidence="medium"),
+                Entry(
+                    user_id=user.id,
+                    entry_type=EntryType.WATER,
+                    occurred_at=datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc),
+                    source_text="вода",
+                ),
+                Entry(
+                    user_id=user.id,
+                    entry_type=EntryType.WATER,
+                    occurred_at=datetime(2026, 5, 25, 9, 0, tzinfo=timezone.utc),
+                    source_text="вода",
+                ),
+            ]
+        )
+        session.flush()
+        water_entries = session.query(Entry).filter_by(user_id=user.id, entry_type=EntryType.WATER).all()
+        for water_entry in water_entries:
+            session.add(EntryItem(entry_id=water_entry.id, position=0, name="water", quantity=2500, unit="ml"))
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="report_status_user"),
+        answer=AsyncMock(),
+    )
+
+    await call_handle_report_at(
+        fixed_now=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
+
+    rendered = message.answer.await_args.args[0]
+    assert "🎯 калории: 1700.0 ккал" in rendered
+    assert "🎯 белки: 90.0 г" in rendered
+    assert "📈 жиры: 70.0 г" in rendered
+    assert "🎯 углеводы: 210.0 г" in rendered
+    assert "🎯 клетчатка: 25.0 г" in rendered
+    assert "📈 вода: 2500.0 мл" in rendered
 
 
 async def test_report_callback_cycles_to_next_period() -> None:
@@ -2024,8 +2157,8 @@ async def test_report_open_dynamics_sends_separate_message() -> None:
         "Метрика: калории\n"
         "Доступно: [калории], белки, жиры, углеводы, клетчатка\n"
         "\n"
-        "18.05-21.05: 300.0 ккал (1/4 дней)\n"
-        "22.05-25.05: 500.0 ккал (1/4 дней)",
+        "📉 18.05-21.05: 300.0 ккал (1/4 дней)\n"
+        "📉 22.05-25.05: 500.0 ккал (1/4 дней)",
     )
     callback.answer.assert_awaited_once_with()
 
@@ -2089,10 +2222,83 @@ async def test_report_dynamics_callback_cycles_metric() -> None:
         "Метрика: белки\n"
         "Доступно: калории, [белки], жиры, углеводы, клетчатка\n"
         "\n"
-        "18.05-21.05: 15.0 г (1/4 дней)\n"
+        "📉 18.05-21.05: 15.0 г (1/4 дней)\n"
         "22.05-25.05: нет данных",
     )
     callback.answer.assert_awaited_once_with("Метрика переключена.")
+
+
+async def test_report_dynamics_uses_goal_status_prefixes() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "report_dynamics_status_user")
+    with session_factory() as session:
+        user = User(
+            telegram_user_id=ALLOWED_USER_ID,
+            username="report_dynamics_status_user",
+            timezone="Europe/Moscow",
+        )
+        session.add(user)
+        session.flush()
+        first_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 18, 8, 0, tzinfo=timezone.utc),
+        )
+        second_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 22, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add_all([first_entry, second_entry])
+        session.flush()
+        first_item = EntryItem(entry_id=first_entry.id, position=0, name="день 1")
+        second_item = EntryItem(entry_id=second_entry.id, position=0, name="день 2")
+        session.add_all([first_item, second_item])
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=1, value=1800.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=2, value=90.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=3, value=60.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=4, value=210.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=5, value=25.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=1, value=2200.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=2, value=90.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=3, value=60.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=4, value=210.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=5, value=25.0, confidence="medium"),
+            ]
+        )
+        session.commit()
+
+    callback_message = SimpleNamespace(answer=AsyncMock())
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="report_dynamics_status_user"),
+        message=callback_message,
+        answer=AsyncMock(),
+    )
+
+    original_datetime = handle_period_report_callback.__globals__["datetime"]
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+
+    handle_period_report_callback.__globals__["datetime"] = FixedDateTime
+    try:
+        await handle_period_report_callback(
+            callback,
+            PeriodReportCallback(action="open_dynamics", period_days=8),
+            session_factory,
+            admin_user_ids=(ADMIN_ID,),
+        )
+    finally:
+        handle_period_report_callback.__globals__["datetime"] = original_datetime
+
+    rendered = callback_message.answer.await_args.args[0]
+    assert "🎯 18.05-21.05: 1800.0 ккал (1/4 дней)" in rendered
+    assert "📈 22.05-25.05: 2200.0 ккал (1/4 дней)" in rendered
 
 
 async def test_report_open_dynamics_shows_alert_when_no_data() -> None:
@@ -2755,18 +2961,43 @@ async def test_settings_returns_current_summary_preferences() -> None:
         "- порог заметных записей: 80%",
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[0][0].text == "Тренировки: off"
-    assert reply_markup.inline_keyboard[1][0].text == "Калории: on"
-    assert reply_markup.inline_keyboard[2][0].text == "Белки: on"
-    assert reply_markup.inline_keyboard[3][0].text == "Жиры: on"
-    assert reply_markup.inline_keyboard[4][0].text == "Углеводы: on"
-    assert reply_markup.inline_keyboard[5][0].text == "Клетчатка: on"
-    assert reply_markup.inline_keyboard[6][0].text == "Вода: on"
-    assert reply_markup.inline_keyboard[7][0].text == "Дельта записи: on"
-    assert reply_markup.inline_keyboard[8][0].text == "Отображение: текст"
-    assert reply_markup.inline_keyboard[9][0].text == "Начало дня: 04:00"
-    assert reply_markup.inline_keyboard[10][0].text == "Допуск к цели: 10%"
-    assert reply_markup.inline_keyboard[11][0].text == "Порог заметных записей: 80%"
+    assert len(reply_markup.inline_keyboard) == 13
+    assert all(len(row) == 1 for row in reply_markup.inline_keyboard)
+    assert len(reply_markup.inline_keyboard[-1]) == 1
+    button_texts = flatten_inline_button_texts(reply_markup)
+    assert "Тренировки: off" in button_texts
+    assert "Калории: on" in button_texts
+    assert "Белки: on" in button_texts
+    assert "Жиры: on" in button_texts
+    assert "Углеводы: on" in button_texts
+    assert "Клетчатка: on" in button_texts
+    assert "Вода: on" in button_texts
+    assert "Дельта записи: on" in button_texts
+    assert "Отображение: текст" in button_texts
+    assert "Начало дня: 04:00" in button_texts
+    assert "Допуск к цели: 10%" in button_texts
+    assert "Порог заметных записей: 80%" in button_texts
+    assert "Закрыть" in button_texts
+
+
+async def test_settings_close_callback_deletes_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "settings_close_user")
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="settings_close_user"),
+        message=SimpleNamespace(delete=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_toggle_summary_metric(
+        callback,
+        SummarySettingsCallback(action="close"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    callback.message.delete.assert_awaited_once()
+    callback.answer.assert_awaited_once_with()
 
 
 async def test_toggle_summary_metric_updates_preference_and_message() -> None:
@@ -2825,8 +3056,9 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
         "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[1][0].text == "Калории: on"
-    assert reply_markup.inline_keyboard[2][0].text == "Белки: off"
+    button_texts = flatten_inline_button_texts(reply_markup)
+    assert "Калории: on" in button_texts
+    assert "Белки: off" in button_texts
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -2885,7 +3117,7 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
         "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[9][0].text == "Начало дня: 06:00"
+    assert "Начало дня: 06:00" in flatten_inline_button_texts(reply_markup)
 
 
 async def test_cycle_summary_display_mode_updates_preference_and_message() -> None:
@@ -2944,7 +3176,7 @@ async def test_cycle_summary_display_mode_updates_preference_and_message() -> No
         "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[8][0].text == "Отображение: бары"
+    assert "Отображение: бары" in flatten_inline_button_texts(reply_markup)
 
 
 async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -> None:
@@ -3001,7 +3233,7 @@ async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -
         "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[7][0].text == "Дельта записи: off"
+    assert "Дельта записи: off" in flatten_inline_button_texts(reply_markup)
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -3034,7 +3266,7 @@ async def test_cycle_report_goal_tolerance_updates_preference_and_message() -> N
     assert saved_preference.report_goal_tolerance_percent == 15
     assert "допуск к цели: 15%" in callback.message.edit_text.await_args.args[0]
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[10][0].text == "Допуск к цели: 15%"
+    assert "Допуск к цели: 15%" in flatten_inline_button_texts(reply_markup)
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -3067,7 +3299,7 @@ async def test_cycle_report_noticeable_percentile_updates_preference_and_message
     assert saved_preference.report_noticeable_entry_percentile == 85
     assert "порог заметных записей: 85%" in callback.message.edit_text.await_args.args[0]
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[11][0].text == "Порог заметных записей: 85%"
+    assert "Порог заметных записей: 85%" in flatten_inline_button_texts(reply_markup)
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -3112,7 +3344,7 @@ async def test_toggle_workout_logging_updates_user_and_message() -> None:
         "- порог заметных записей: 80%",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[0][0].text == "Тренировки: on"
+    assert "Тренировки: on" in flatten_inline_button_texts(reply_markup)
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -3362,6 +3594,8 @@ async def test_goal_returns_default_goals_when_preference_is_not_created() -> No
         "Часовой пояс дня: Europe/Moscow.\n"
         "Начало пищевого дня: 04:00.",
     )
+    reply_markup = message.answer.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Закрыть"
 
 
 async def test_goal_sets_preference_and_creates_snapshot_for_current_nutrition_day() -> None:
@@ -3507,6 +3741,21 @@ async def test_goal_hint_respects_enabled_summary_metrics() -> None:
     assert "<code>/goal 1800</code>" not in rendered
     assert "<code>/goal fat 60</code>" not in rendered
     assert "<code>/goal water 2000</code>" not in rendered
+
+
+async def test_goal_close_callback_deletes_message() -> None:
+    callback = SimpleNamespace(
+        message=SimpleNamespace(delete=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_goal_message_callback(
+        callback,
+        GoalMessageCallback(action="close"),
+    )
+
+    callback.message.delete.assert_awaited_once()
+    callback.answer.assert_awaited_once_with()
 
 
 async def test_water_button_creates_water_entry_for_allowed_user() -> None:

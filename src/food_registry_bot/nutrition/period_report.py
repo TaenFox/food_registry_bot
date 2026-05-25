@@ -27,6 +27,7 @@ class PeriodReport(BaseModel):
     workout_entry_count: int = Field(ge=0)
     incomplete_food_day_count: int = Field(ge=0)
     incomplete_water_day_count: int = Field(ge=0)
+    average_goal_values: dict[str, float] = Field(default_factory=dict)
     goal_hit_day_counts: dict[str, int] = Field(default_factory=dict)
     goal_applicable_day_counts: dict[str, int] = Field(default_factory=dict)
 
@@ -38,6 +39,7 @@ class PeriodMetricDynamicsRow(BaseModel):
     summary_date_to: date
     data_day_count: int = Field(ge=0)
     average_value: Optional[float] = None
+    average_goal_value: Optional[float] = None
 
 
 class PeriodMetricDynamics(BaseModel):
@@ -100,6 +102,8 @@ class PeriodReportUseCase:
         water_data_day_count = 0
         incomplete_food_day_count = 0
         incomplete_water_day_count = 0
+        goal_value_sums = {metric_code: 0.0 for metric_code in ("calories", "protein", "fat", "carbs", "fiber", "water")}
+        goal_value_day_counts = {metric_code: 0 for metric_code in ("calories", "protein", "fat", "carbs", "fiber", "water")}
         goal_hit_day_counts = {metric_code: 0 for metric_code in ("calories", "protein", "fat", "carbs", "fiber", "water")}
         goal_applicable_day_counts = {metric_code: 0 for metric_code in ("calories", "protein", "fat", "carbs", "fiber", "water")}
 
@@ -160,6 +164,10 @@ class PeriodReportUseCase:
                 ("carbs", nutrition_summary.totals.carbs, goal_snapshot.carbs_goal),
                 ("fiber", nutrition_summary.totals.fiber, goal_snapshot.fiber_goal),
             )
+            if nutrition_summary.included_entry_count > 0 or nutrition_summary.excluded_entry_count > 0:
+                for metric_code, _metric_value, goal_value in nutrition_metrics:
+                    goal_value_sums[metric_code] += float(goal_value)
+                    goal_value_day_counts[metric_code] += 1
             if nutrition_summary.included_entry_count > 0 and nutrition_summary.excluded_entry_count == 0:
                 for metric_code, metric_value, goal_value in nutrition_metrics:
                     goal_applicable_day_counts[metric_code] += 1
@@ -177,6 +185,9 @@ class PeriodReportUseCase:
                     tolerance_percent=report_goal_tolerance_percent,
                 ):
                     goal_hit_day_counts["water"] += 1
+            if water_summary.included_entry_count > 0 or water_summary.excluded_entry_count > 0:
+                goal_value_sums["water"] += float(goal_snapshot.water_goal)
+                goal_value_day_counts["water"] += 1
 
         average_nutrition_totals = DailyNutritionTotals()
         if food_data_day_count > 0:
@@ -191,6 +202,11 @@ class PeriodReportUseCase:
         average_water_ml = 0.0
         if water_data_day_count > 0:
             average_water_ml = water_total_ml / water_data_day_count
+        average_goal_values = {
+            metric_code: goal_value_sums[metric_code] / goal_value_day_counts[metric_code]
+            for metric_code in goal_value_sums
+            if goal_value_day_counts[metric_code] > 0
+        }
 
         workout_day_count = 0
         workout_entry_count = 0
@@ -234,6 +250,7 @@ class PeriodReportUseCase:
             workout_entry_count=workout_entry_count,
             incomplete_food_day_count=incomplete_food_day_count,
             incomplete_water_day_count=incomplete_water_day_count,
+            average_goal_values=average_goal_values,
             goal_hit_day_counts=goal_hit_day_counts,
             goal_applicable_day_counts=goal_applicable_day_counts,
         )
@@ -248,6 +265,7 @@ class PeriodReportUseCase:
         metric_code: str,
         nutrition_day_start_hour: int = 4,
         subperiod_day_count: int = 4,
+        workout_logging_enabled: bool = False,
     ) -> PeriodMetricDynamics:
         if period_day_count <= 0:
             raise ValueError("period_day_count must be positive")
@@ -263,10 +281,29 @@ class PeriodReportUseCase:
             subperiod_date_from = summary_date_from + timedelta(days=subperiod_start_offset)
             subperiod_date_to = subperiod_date_from + timedelta(days=subperiod_day_count - 1)
             total_value = 0.0
+            total_goal_value = 0.0
             data_day_count = 0
 
             for day_offset in range(subperiod_day_count):
                 summary_date = subperiod_date_from + timedelta(days=day_offset)
+                goal_snapshot = self._goal_snapshot_use_case.get_or_create(
+                    user_id=user_id,
+                    summary_date=summary_date,
+                    timezone_name=timezone_name,
+                    nutrition_day_start_hour=nutrition_day_start_hour,
+                )
+                calorie_goal_adjustment = 0
+                if workout_logging_enabled and metric_code == "calories":
+                    calorie_goal_adjustment = int(
+                        round(
+                            self._workout_calorie_credit_use_case.run(
+                                user_id=user_id,
+                                timezone_name=timezone_name,
+                                summary_date=summary_date,
+                                nutrition_day_start_hour=nutrition_day_start_hour,
+                            )
+                        )
+                    )
                 if metric_code == "water":
                     water_summary = self._water_summary_use_case.run(
                         user_id=user_id,
@@ -277,6 +314,7 @@ class PeriodReportUseCase:
                     if water_summary.included_entry_count == 0 and water_summary.excluded_entry_count == 0:
                         continue
                     total_value += float(water_summary.total_ml)
+                    total_goal_value += float(goal_snapshot.water_goal)
                     data_day_count += 1
                     continue
 
@@ -289,17 +327,24 @@ class PeriodReportUseCase:
                 if nutrition_summary.included_entry_count == 0 and nutrition_summary.excluded_entry_count == 0:
                     continue
                 total_value += float(getattr(nutrition_summary.totals, metric_code))
+                if metric_code == "calories":
+                    total_goal_value += float(goal_snapshot.calorie_goal + calorie_goal_adjustment)
+                else:
+                    total_goal_value += float(getattr(goal_snapshot, f"{metric_code}_goal"))
                 data_day_count += 1
 
             average_value = None
+            average_goal_value = None
             if data_day_count > 0:
                 average_value = total_value / data_day_count
+                average_goal_value = total_goal_value / data_day_count
             rows.append(
                 PeriodMetricDynamicsRow(
                     summary_date_from=subperiod_date_from,
                     summary_date_to=subperiod_date_to,
                     data_day_count=data_day_count,
                     average_value=average_value,
+                    average_goal_value=average_goal_value,
                 )
             )
 

@@ -32,13 +32,19 @@ class PeriodReportCallback(CallbackData, prefix="period_report"):
     metric_code: str = ""
 
 
-class AdminDeleteEntriesCallback(CallbackData, prefix="admin_delete_entries"):
+class AdminPanelCallback(CallbackData, prefix="admin_panel"):
     action: str
     telegram_user_id: int = 0
+    page: int = 0
+
+
+class GoalMessageCallback(CallbackData, prefix="goal_message"):
+    action: str
 
 __all__ = [
-    "AdminDeleteEntriesCallback",
+    "AdminPanelCallback",
     "DataExchangeFileCallback",
+    "GoalMessageCallback",
     "NormalizedEntryItemPayload",
     "NormalizedEntryPayload",
     "NormalizedJournalPayload",

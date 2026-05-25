@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+from food_registry_bot.bot.commands import setup_bot_commands
 from food_registry_bot.bot.factory import create_bot, create_dispatcher
 from food_registry_bot.conversation.factory import create_conversation_service
 from food_registry_bot.config import get_settings
@@ -38,6 +39,7 @@ async def run() -> None:
         raise RuntimeError("BOT_TOKEN is not configured")
 
     bot = create_bot(settings.bot_token)
+    await setup_bot_commands(bot, admin_user_ids=settings.admin_user_ids)
     dispatcher = create_dispatcher(
         create_session_factory(),
         extraction_service=create_extraction_service(settings),
