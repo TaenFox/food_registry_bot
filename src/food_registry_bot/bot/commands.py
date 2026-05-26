@@ -28,7 +28,13 @@ def build_user_bot_commands() -> list[BotCommand]:
 
 
 def build_admin_bot_commands() -> list[BotCommand]:
-    return [BotCommand(command=command, description=description) for command, description in ADMIN_COMMAND_SPECS]
+    commands_by_name = {
+        command.command: command
+        for command in build_user_bot_commands()
+    }
+    for command_name, description in ADMIN_COMMAND_SPECS:
+        commands_by_name[command_name] = BotCommand(command=command_name, description=description)
+    return list(commands_by_name.values())
 
 
 async def setup_bot_commands(bot: Bot, *, admin_user_ids: tuple[int, ...]) -> None:

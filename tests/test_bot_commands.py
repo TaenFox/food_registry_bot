@@ -22,7 +22,10 @@ def test_build_user_bot_commands_matches_documented_commands() -> None:
 def test_build_admin_bot_commands_matches_documented_commands() -> None:
     commands = build_admin_bot_commands()
 
-    assert [(command.command, command.description) for command in commands] == list(ADMIN_COMMAND_SPECS)
+    assert [(command.command, command.description) for command in commands] == [
+        *list(USER_COMMAND_SPECS),
+        *list(ADMIN_COMMAND_SPECS),
+    ]
 
 
 async def test_setup_bot_commands_registers_default_and_admin_scopes() -> None:
