@@ -89,6 +89,12 @@ class OpenAIResponsesNutritionClient:
             "Calories must be in kcal as a non-negative number and the other metrics must be non-negative numbers in grams. "
             "Return confidence for every metric using only low, medium, or high. "
             "Use the provided quantity and unit as the basis for the estimate when they are present. "
+            "If nutrition_label is present for an item, treat it as structured label data extracted from the user's text or photo and use it as the primary factual source. "
+            "When nutrition_label.basis is per_100g or per_100ml, convert it to the actual item quantity when quantity and unit are present. "
+            "When nutrition_label.basis is per_serving, use serving_quantity and serving_unit from nutrition_label to scale the metrics if needed. "
+            "When nutrition_label.basis is unknown, prefer the most plausible packaged-food convention from context, usually per 100 g for solid foods and per 100 ml for drinks, and lower confidence if you had to infer the basis. "
+            "If nutrition_label provides calories, protein, fat, carbs, or fiber, do not overwrite those facts with unrelated generic estimates. "
+            "If nutrition_label is missing fiber, estimate only the missing fiber value from the item context. "
             "If quantity and unit are missing, still estimate the metrics from the item name and use low confidence when the estimate is rough. "
             "Do not add explanations, ranges, or extra fields."
         )

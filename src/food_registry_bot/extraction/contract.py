@@ -6,6 +6,7 @@ from typing import List, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from food_registry_bot.db.models import EntryType
+from food_registry_bot.nutrition_label import NutritionLabelData
 
 
 class ExtractedJournalItem(BaseModel):
@@ -15,6 +16,7 @@ class ExtractedJournalItem(BaseModel):
     quantity: Optional[int] = Field(default=None, gt=0)
     unit: Optional[str] = Field(default=None, min_length=1, max_length=32)
     metrics: List["ExtractedJournalMetric"] = Field(default_factory=list)
+    nutrition_label: Optional[NutritionLabelData] = None
 
     @field_validator("name")
     @classmethod
@@ -91,6 +93,8 @@ class ExtractedJournalEntry(BaseModel):
                 raise ValueError(f"unit {item.unit!r} is not allowed for entry type {self.type.value}")
             if self.type is not EntryType.WORKOUT and item.metrics:
                 raise ValueError(f"metrics are not allowed for entry type {self.type.value}")
+            if self.type is not EntryType.FOOD and item.nutrition_label is not None:
+                raise ValueError(f"nutrition_label is not allowed for entry type {self.type.value}")
             if self.type is EntryType.WORKOUT:
                 for metric in item.metrics:
                     if metric.code != "workout_calories":

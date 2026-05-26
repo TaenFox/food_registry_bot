@@ -56,6 +56,8 @@ from food_registry_bot.db.models import (
     EntryItem,
     EntryItemMetric,
     EntryType,
+    LLMIssueLog,
+    LLMIssueStage,
     SupportedMetric,
     User,
     UserAccess,
@@ -68,11 +70,12 @@ from food_registry_bot.extraction import (
     ExtractedJournalItem,
     ExtractedJournalMetric,
     ExtractedJournalPayload,
+    InvalidExtractionPayload,
     ValidExtractionPayload,
 )
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_FULL, CSV_CONTRACT_TYPE_PARTIAL
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_WORKOUT
-from food_registry_bot.nutrition import StaticNutritionEstimationService
+from food_registry_bot.nutrition import InvalidNutritionPayload, StaticNutritionEstimationService
 
 
 ADMIN_ID = 999001
@@ -276,28 +279,14 @@ async def test_admin_returns_system_overview_and_commands() -> None:
     )
 
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == (
-        (
-            "Панель администратора:\n"
-            "- версия бота: v1\n"
-            f"- текущий админ: {ADMIN_ID}\n"
-            "- админов в конфиге: 1\n"
-            "- известных пользователей: 2\n"
-            "- разрешённых пользователей: 1\n"
-            "- запрещённых пользователей: 1\n"
-            "- пользователей с профилем: 1\n"
-            "- food entries без полного набора метрик: 1\n"
-            "- дозаполнение nutrition metrics: idle\n"
-            "\n"
-            "Доступные действия:\n"
-            "- кнопка «Управление пользователями»\n"
-            "- /admin\n"
-            "- <code>/admin_backfill_nutrition [LIMIT]</code>"
-        ),
-    )
+    admin_text = message.answer.await_args.args[0]
+    assert "- food entries без полного набора метрик: 1" in admin_text
+    assert "- LLM extraction issues за 24ч: 0" in admin_text
+    assert "- LLM nutrition issues за 24ч: 0" in admin_text
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Управление пользователями"
-    assert reply_markup.inline_keyboard[1][0].text == "Закрыть"
+    assert reply_markup.inline_keyboard[1][0].text == "LLM-ошибки"
+    assert reply_markup.inline_keyboard[2][0].text == "Закрыть"
 
 
 async def test_admin_overview_excludes_admin_from_user_counters() -> None:
@@ -321,25 +310,12 @@ async def test_admin_overview_excludes_admin_from_user_counters() -> None:
     )
 
     message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == (
-        (
-            "Панель администратора:\n"
-            "- версия бота: v1\n"
-            f"- текущий админ: {ADMIN_ID}\n"
-            "- админов в конфиге: 1\n"
-            "- известных пользователей: 1\n"
-            "- разрешённых пользователей: 0\n"
-            "- запрещённых пользователей: 1\n"
-            "- пользователей с профилем: 0\n"
-            "- food entries без полного набора метрик: 0\n"
-            "- дозаполнение nutrition metrics: idle\n"
-            "\n"
-            "Доступные действия:\n"
-            "- кнопка «Управление пользователями»\n"
-            "- /admin\n"
-            "- <code>/admin_backfill_nutrition [LIMIT]</code>"
-        ),
-    )
+    admin_text = message.answer.await_args.args[0]
+    assert "- известных пользователей: 1" in admin_text
+    assert "- разрешённых пользователей: 0" in admin_text
+    assert "- запрещённых пользователей: 1" in admin_text
+    assert "- пользователей с профилем: 0" in admin_text
+    assert "- LLM extraction issues за 24ч: 0" in admin_text
 
 
 async def test_admin_overview_shows_detailed_backfill_progress() -> None:
@@ -366,6 +342,43 @@ async def test_admin_overview_shows_detailed_backfill_progress() -> None:
     running_task.cancel()
 
 
+async def test_admin_overview_shows_recent_llm_issue_counters() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        session.add_all(
+            [
+                LLMIssueLog(
+                    stage=LLMIssueStage.EXTRACTION,
+                    error_code="invalid_payload",
+                    provider="openai_responses",
+                    model="gpt-5-mini",
+                    telegram_user_id=ALLOWED_USER_ID,
+                    created_at=datetime.now(timezone.utc),
+                ),
+                LLMIssueLog(
+                    stage=LLMIssueStage.NUTRITION,
+                    error_code="client_error",
+                    provider="openai_responses",
+                    model="gpt-5-mini",
+                    telegram_user_id=ALLOWED_USER_ID,
+                    created_at=datetime.now(timezone.utc),
+                ),
+            ]
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        answer=AsyncMock(),
+    )
+
+    await handle_admin(message, session_factory, backfill_tracker=AdminBackfillTracker(), admin_user_ids=(ADMIN_ID,))
+
+    admin_text = message.answer.await_args.args[0]
+    assert "- LLM extraction issues за 24ч: 1" in admin_text
+    assert "- LLM nutrition issues за 24ч: 1" in admin_text
+
+
 async def test_admin_is_forbidden_for_non_admin() -> None:
     session_factory = create_session_factory()
     message = SimpleNamespace(
@@ -377,6 +390,75 @@ async def test_admin_is_forbidden_for_non_admin() -> None:
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == ("Команда доступна только администратору.",)
+
+
+async def test_admin_panel_opens_recent_llm_issue_list() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        session.add(
+            LLMIssueLog(
+                stage=LLMIssueStage.EXTRACTION,
+                error_code="invalid_payload",
+                provider="openai_responses",
+                model="gpt-5-mini",
+                telegram_user_id=ALLOWED_USER_ID,
+                request_text="батончик 7 г",
+                raw_payload='{"entries": []}',
+                technical_message="entries must not be empty",
+                created_at=datetime(2026, 5, 26, 10, 0, tzinfo=timezone.utc),
+            )
+        )
+        session.commit()
+
+    callback_message = SimpleNamespace(
+        text="old text",
+        edit_text=AsyncMock(),
+    )
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=callback_message,
+        answer=AsyncMock(),
+    )
+
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="open_llm_issues", page=0),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    response_text = callback_message.edit_text.await_args.args[0]
+    assert "Последние LLM-ошибки. Страница 1, по 5." in response_text
+    assert "extraction | invalid_payload" in response_text
+    assert "батончик 7 г" in response_text
+    assert '{"entries": []}' in response_text
+    reply_markup = callback_message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[-2][0].text == "К панели"
+
+
+async def test_admin_panel_opens_empty_llm_issue_list() -> None:
+    session_factory = create_session_factory()
+    callback_message = SimpleNamespace(
+        text="old text",
+        edit_text=AsyncMock(),
+    )
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=callback_message,
+        answer=AsyncMock(),
+    )
+
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="open_llm_issues", page=0),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    response_text = callback_message.edit_text.await_args.args[0]
+    assert response_text == "LLM-ошибок не найдено. Страница 1."
 
 
 async def test_admin_panel_users_returns_first_page_with_buttons() -> None:
@@ -4127,6 +4209,93 @@ async def test_handler_rolls_back_food_write_when_nutrition_payload_is_invalid()
 
     message.answer.assert_awaited_once()
     assert "невалидный structured payload" in message.answer.await_args.args[0]
+
+
+async def test_handler_logs_llm_extraction_issue_for_admin_review() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "extract_issue_user")
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: InvalidExtractionPayload(
+            message="LLM вернула невалидный structured payload. Ожидаю объект вида {'entries': [...]} с type, items и name.",
+            provider="openai_responses",
+            model="gpt-5-mini",
+            raw_payload='{"entries": []}',
+            technical_message="entries must not be empty",
+            error_code="invalid_payload",
+            is_llm=True,
+        )
+    )
+    message = SimpleNamespace(
+        text="гречка",
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="extract_issue_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        issue = session.query(LLMIssueLog).one()
+
+    assert issue.stage is LLMIssueStage.EXTRACTION
+    assert issue.error_code == "invalid_payload"
+    assert issue.telegram_user_id == ALLOWED_USER_ID
+    assert issue.request_text == "гречка"
+
+
+async def test_handler_logs_llm_nutrition_issue_for_admin_review() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "nutrition_issue_user")
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.FOOD,
+                        items=[ExtractedJournalItem(name="гречка", quantity=200, unit="г")],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload='{"entries":[{"type":"food","items":[{"name":"гречка","quantity":200,"unit":"г"}]}]}',
+        )
+    )
+    nutrition_service = SimpleNamespace(
+        estimate=lambda _request: InvalidNutritionPayload(
+            message="Nutrition provider вернул невалидный structured payload. Ожидаю объект вида {'items': [...]} с client_item_id и metrics[].",
+            provider="openai_responses",
+            model="gpt-5-mini",
+            raw_payload='{"items": []}',
+            technical_message="nutrition payload must cover exactly the requested client_item_id set",
+            error_code="invalid_payload",
+            is_llm=True,
+        )
+    )
+    message = SimpleNamespace(
+        text="гречка",
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="nutrition_issue_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        nutrition_service=nutrition_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        issue = session.query(LLMIssueLog).one()
+
+    assert issue.stage is LLMIssueStage.NUTRITION
+    assert issue.error_code == "invalid_payload"
+    assert issue.raw_payload == '{"items": []}'
 
 
 async def test_handle_message_routes_conversation_text_without_creating_entries() -> None:

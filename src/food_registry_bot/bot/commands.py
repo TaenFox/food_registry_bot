@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import Bot
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat, BotCommandScopeDefault
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,6 @@ USER_COMMAND_SPECS: tuple[tuple[str, str], ...] = (
 
 ADMIN_COMMAND_SPECS: tuple[tuple[str, str], ...] = (
     ("admin", "показать состояние системы"),
-    ("admin_backfill_nutrition", "дозаполнить неполные nutrition metrics"),
 )
 
 
@@ -29,13 +28,27 @@ def build_user_bot_commands() -> list[BotCommand]:
 
 
 def build_admin_bot_commands() -> list[BotCommand]:
-    return [BotCommand(command=command, description=description) for command, description in ADMIN_COMMAND_SPECS]
+    commands_by_name = {
+        command.command: command
+        for command in build_user_bot_commands()
+    }
+    for command_name, description in ADMIN_COMMAND_SPECS:
+        commands_by_name[command_name] = BotCommand(command=command_name, description=description)
+    return list(commands_by_name.values())
 
 
 async def setup_bot_commands(bot: Bot, *, admin_user_ids: tuple[int, ...]) -> None:
-    del admin_user_ids
-
     try:
-        await bot.set_my_commands(build_user_bot_commands())
+        user_commands = build_user_bot_commands()
+        admin_commands = build_admin_bot_commands()
+
+        await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+        await bot.set_my_commands(user_commands, scope=BotCommandScopeAllPrivateChats())
+
+        for admin_user_id in admin_user_ids:
+            await bot.set_my_commands(
+                admin_commands,
+                scope=BotCommandScopeChat(chat_id=admin_user_id),
+            )
     except Exception:
         logger.exception("Failed to register bot commands")
