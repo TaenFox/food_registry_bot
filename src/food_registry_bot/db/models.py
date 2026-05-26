@@ -49,6 +49,28 @@ class LLMIssueStage(str, enum.Enum):
     NUTRITION = "nutrition"
 
 
+class AccountCategory(str, enum.Enum):
+    UNASSIGNED = "unassigned"
+    INTERNAL = "internal"
+    EXTERNAL = "external"
+
+
+class UserLLMSelectionMode(str, enum.Enum):
+    PROJECT = "project"
+    PERSONAL = "personal"
+
+
+class LLMProvider(str, enum.Enum):
+    OPENAI = "openai"
+    MISTRAL = "mistral"
+
+
+class LLMConnectionValidationStatus(str, enum.Enum):
+    UNKNOWN = "unknown"
+    VALID = "valid"
+    INVALID = "invalid"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -90,6 +112,15 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    llm_profile: Mapped[Optional["UserLLMProfile"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    llm_connections: Mapped[list["UserLLMConnection"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 
 class UserAccess(Base):
@@ -99,6 +130,10 @@ class UserAccess(Base):
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     username: Mapped[Optional[str]] = mapped_column(String(255))
     is_allowed: Mapped[bool] = mapped_column(default=True)
+    account_category: Mapped[AccountCategory] = mapped_column(
+        Enum(AccountCategory, name="account_category", values_callable=enum_values),
+        default=AccountCategory.UNASSIGNED,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -108,6 +143,66 @@ class UserAccess(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class UserLLMProfile(Base):
+    __tablename__ = "user_llm_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+    selection_mode: Mapped[UserLLMSelectionMode] = mapped_column(
+        Enum(UserLLMSelectionMode, name="user_llm_selection_mode", values_callable=enum_values),
+        default=UserLLMSelectionMode.PROJECT,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    user: Mapped["User"] = relationship(back_populates="llm_profile")
+
+
+class UserLLMConnection(Base):
+    __tablename__ = "user_llm_connections"
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", "model", name="uq_user_llm_connections_user_provider_model"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    provider: Mapped[LLMProvider] = mapped_column(
+        Enum(LLMProvider, name="llm_provider", values_callable=enum_values)
+    )
+    model: Mapped[str] = mapped_column(String(128))
+    encrypted_api_key: Mapped[str] = mapped_column(Text)
+    is_enabled: Mapped[bool] = mapped_column(default=True)
+    is_selected: Mapped[bool] = mapped_column(default=False)
+    validation_status: Mapped[LLMConnectionValidationStatus] = mapped_column(
+        Enum(
+            LLMConnectionValidationStatus,
+            name="llm_connection_validation_status",
+            values_callable=enum_values,
+        ),
+        default=LLMConnectionValidationStatus.UNKNOWN,
+    )
+    validation_error: Mapped[Optional[str]] = mapped_column(Text)
+    last_validated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    user: Mapped["User"] = relationship(back_populates="llm_connections")
 
 
 class UserSummaryPreference(Base):

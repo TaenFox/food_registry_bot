@@ -23,6 +23,10 @@ from food_registry_bot.bot.handlers import (
     handle_goal_message_callback,
     handle_health,
     handle_message,
+    handle_provider,
+    handle_provider_save_openai,
+    handle_provider_use_personal,
+    handle_provider_use_project,
     handle_period_report_callback,
     handle_recent,
     handle_recent_delete_callback,
@@ -46,6 +50,7 @@ from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT
 from food_registry_bot.bot.keyboards import build_data_exchange_files_keyboard
 from food_registry_bot.db.base import Base
 from food_registry_bot.db.models import (
+    AccountCategory,
     ConversationMessageRole,
     ConversationMessage,
     ConversationSession,
@@ -61,9 +66,12 @@ from food_registry_bot.db.models import (
     SupportedMetric,
     User,
     UserAccess,
+    UserLLMConnection,
+    UserLLMProfile,
     UserGoalPreference,
     UserSummaryPreference,
 )
+from food_registry_bot.config import Settings
 from food_registry_bot.db.repositories import DataExchangeFileRepository
 from food_registry_bot.extraction import (
     ExtractedJournalEntry,
@@ -82,6 +90,13 @@ ADMIN_ID = 999001
 ALLOWED_USER_ID = 1001
 DENIED_USER_ID = 2002
 LARGE_DENIED_USER_ID = 5517166158
+
+
+def make_settings(**updates) -> Settings:
+    settings = Settings(_env_file=None)
+    for key, value in updates.items():
+        setattr(settings, key, value)
+    return settings
 
 
 def create_session_factory() -> sessionmaker[Session]:
@@ -244,6 +259,125 @@ async def test_health_denies_unallowed_user() -> None:
     assert message.answer.await_args.args == (
         "Сейчас у тебя нет доступа к боту. Если он нужен, попроси администратора добавить твой Telegram ID.",
     )
+
+
+async def test_provider_save_openai_stores_encrypted_personal_key() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        answer=AsyncMock(),
+    )
+    settings = make_settings(personal_api_keys_secret="test-secret")
+
+    await handle_provider_save_openai(
+        message,
+        SimpleNamespace(args="gpt-5-mini sk-test-key"),
+        session_factory,
+        settings=settings,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        user = session.query(User).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
+        connection = session.query(UserLLMConnection).filter_by(user_id=user.id).one()
+
+    assert connection.provider.value == "openai"
+    assert connection.model == "gpt-5-mini"
+    assert connection.encrypted_api_key != "sk-test-key"
+    message.answer.assert_awaited_once()
+
+
+async def test_provider_use_personal_switches_selection_mode() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
+    settings = make_settings(personal_api_keys_secret="test-secret")
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_provider_save_openai(
+        message,
+        SimpleNamespace(args="gpt-5-mini sk-test-key"),
+        session_factory,
+        settings=settings,
+        admin_user_ids=(ADMIN_ID,),
+    )
+    message.answer.reset_mock()
+
+    await handle_provider_use_personal(
+        message,
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        user = session.query(User).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
+        profile = session.query(UserLLMProfile).filter_by(user_id=user.id).one()
+
+    assert profile.selection_mode.value == "personal"
+    message.answer.assert_awaited_once()
+
+
+async def test_provider_use_project_requires_internal_category() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        session.add(
+            UserAccess(
+                telegram_user_id=ALLOWED_USER_ID,
+                username="allowed_user",
+                is_allowed=True,
+                account_category=AccountCategory.EXTERNAL,
+            )
+        )
+        session.commit()
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_provider_use_project(
+        message,
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    message.answer.assert_awaited_once()
+    assert "только аккаунтам категории internal" in message.answer.await_args.args[0]
+
+
+async def test_provider_command_shows_saved_connections() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
+    settings = make_settings(
+        openai_api_key="project-key",
+        personal_api_keys_secret="test-secret",
+    )
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_provider_save_openai(
+        message,
+        SimpleNamespace(args="gpt-5-mini sk-test-key"),
+        session_factory,
+        settings=settings,
+        admin_user_ids=(ADMIN_ID,),
+    )
+    message.answer.reset_mock()
+
+    await handle_provider(
+        message,
+        session_factory,
+        settings=settings,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    provider_text = message.answer.await_args.args[0]
+    assert "LLM-провайдеры:" in provider_text
+    assert "openai/gpt-5-mini" in provider_text
 
 
 async def test_admin_returns_system_overview_and_commands() -> None:

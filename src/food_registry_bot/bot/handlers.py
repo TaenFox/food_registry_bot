@@ -56,7 +56,16 @@ from food_registry_bot.conversation import (
     DisabledConversationService,
     NutritionCoachContextBuilder,
 )
-from food_registry_bot.db.models import ConversationMessageRole, ConversationSession, EntryType
+from food_registry_bot.config import Settings, get_data_exchange_dir
+from food_registry_bot.db.models import (
+    AccountCategory,
+    ConversationMessageRole,
+    ConversationSession,
+    EntryType,
+    LLMConnectionValidationStatus,
+    LLMProvider,
+    UserLLMSelectionMode,
+)
 from food_registry_bot.db.models import DataExchangeDirection, DataExchangeFile, DataExchangeStatus, LLMIssueStage
 from food_registry_bot.db.session import session_scope
 from food_registry_bot.db.repositories import (
@@ -72,6 +81,8 @@ from food_registry_bot.db.repositories import (
     LLMIssueLogRepository,
     UserGoalPreferenceRepository,
     UserAccessRepository,
+    UserLLMConnectionRepository,
+    UserLLMProfileRepository,
     UserRepository,
     UserSummaryPreferenceRepository,
 )
@@ -86,7 +97,11 @@ from food_registry_bot.extraction import (
 from food_registry_bot.exchange.service import FileLimitExceededError
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_PARTIAL
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_WORKOUT
-from food_registry_bot.config import get_data_exchange_dir
+from food_registry_bot.llm_access import SecretCipher
+from food_registry_bot.llm_access.resolver import (
+    build_provider_unavailable_message,
+    build_user_llm_runtime_bundle,
+)
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
     calculate_default_workout_calorie_credit,
@@ -165,12 +180,22 @@ DEFAULT_PERIOD_REPORT_DAYS = PERIOD_REPORT_PERIOD_SEQUENCE[0]
 PERIOD_REPORT_SUBPERIOD_DAYS = 4
 ADMIN_USER_PAGE_SIZE = 10
 ADMIN_LLM_ISSUE_PAGE_SIZE = 5
+LLM_MODEL_PLACEHOLDER = "<MODEL>"
+API_KEY_PLACEHOLDER = "<API_KEY>"
 
 
 class FoodWriteFlowError(RuntimeError):
     def __init__(self, message: str, *, issue=None) -> None:
         super().__init__(message)
         self.issue = issue
+
+
+def truncate_text(text: str, *, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit <= 1:
+        return text[:limit]
+    return text[: limit - 1] + "…"
 
 
 def describe_import_contract(contract_type: str) -> str:
@@ -430,6 +455,86 @@ def parse_goal_command_args(command: CommandObject | None) -> tuple[str, int] | 
     return metric_code, value
 
 
+def parse_provider_save_command_args(command: CommandObject | None) -> tuple[str, str] | None:
+    if command is None or command.args is None:
+        return None
+
+    parts = command.args.strip().split(maxsplit=1)
+    if len(parts) != 2:
+        return None
+    model, api_key = parts
+    if not model.strip() or not api_key.strip():
+        return None
+    return model.strip(), api_key.strip()
+
+
+def parse_provider_model_arg(command: CommandObject | None) -> str | None:
+    if command is None or command.args is None:
+        return None
+    model = command.args.strip()
+    return model or None
+
+
+def resolve_effective_account_category(
+    *,
+    telegram_user_id: int,
+    access_account_category: str,
+    admin_user_ids: tuple[int, ...],
+) -> str:
+    if is_admin_user(telegram_user_id, admin_user_ids):
+        return AccountCategory.INTERNAL.value
+    return access_account_category
+
+
+def build_provider_settings_response(
+    *,
+    telegram_user_id: int,
+    account_category: str,
+    selection_mode: str,
+    project_openai_enabled: bool,
+    personal_openai_enabled: bool,
+    connections: list,
+    admin_user_ids: tuple[int, ...],
+) -> str:
+    lines = ["LLM-провайдеры:"]
+    lines.append(f"- категория аккаунта: {resolve_effective_account_category(telegram_user_id=telegram_user_id, access_account_category=account_category, admin_user_ids=admin_user_ids)}")
+    lines.append(f"- режим выбора: {selection_mode}")
+    lines.append(f"- проектный OpenAI: {'доступен' if project_openai_enabled else 'недоступен'}")
+    lines.append(f"- персональные ключи OpenAI: {'доступны' if personal_openai_enabled else 'недоступны'}")
+    if not connections:
+        lines.extend(
+            [
+                "",
+                "Сохранённых персональных подключений пока нет.",
+                "Команды:",
+                f"- /provider_save_openai {LLM_MODEL_PLACEHOLDER} {API_KEY_PLACEHOLDER}",
+                "- /provider_use_personal",
+                "- /provider_use_project",
+            ]
+        )
+        return "\n".join(lines)
+
+    lines.extend(["", "Сохранённые подключения:"])
+    for connection in connections:
+        selected_suffix = " [selected]" if connection.is_selected else ""
+        enabled_suffix = "on" if connection.is_enabled else "off"
+        lines.append(
+            f"- {connection.provider}/{connection.model} · {enabled_suffix} · {connection.validation_status}{selected_suffix}"
+        )
+        if connection.validation_error:
+            lines.append(f"  ошибка: {truncate_text(connection.validation_error, limit=120)}")
+    lines.extend(
+        [
+            "",
+            "Команды:",
+            f"- /provider_save_openai {LLM_MODEL_PLACEHOLDER} {API_KEY_PLACEHOLDER}",
+            "- /provider_use_personal",
+            "- /provider_use_project",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def build_admin_user_directory(known_users: list, admin_user_ids: tuple[int, ...]) -> list:
     users_by_id = {known_user.telegram_user_id: known_user for known_user in known_users}
     for admin_user_id in admin_user_ids:
@@ -440,6 +545,7 @@ def build_admin_user_directory(known_users: list, admin_user_ids: tuple[int, ...
             username=None,
             has_profile=False,
             is_allowed=False,
+            account_category=AccountCategory.INTERNAL.value,
         )
     admin_entries = [users_by_id[telegram_user_id] for telegram_user_id in sorted(admin_user_ids) if telegram_user_id in users_by_id]
     regular_entries = [
@@ -1732,7 +1838,6 @@ async def handle_admin_panel_callback(
     with session_scope(session_factory) as session:
         known_users = UserAccessRepository(session).list_known_users()
         directory_users = build_admin_user_directory(known_users, admin_user_ids)
-        manageable_users = filter_manageable_known_users(known_users, admin_user_ids)
 
         if callback_data.action == "overview":
             incomplete_food_entry_count = EntryRepository(session).count_incomplete_food_entries(
@@ -2068,6 +2173,182 @@ async def handle_health(
         return
 
     await message.answer("ok")
+
+
+@router.message(Command("provider"))
+async def handle_provider(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    settings: Settings | None = None,
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    if settings is None:
+        await message.answer("Настройки провайдеров в этом окружении недоступны.")
+        return
+
+    telegram_user = message.from_user
+    if telegram_user is None:
+        raise ValueError("Incoming message does not contain Telegram user")
+
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        access = UserAccessRepository(session).get_by_telegram_user_id(telegram_user.id)
+        profile, _created = UserLLMProfileRepository(session).get_or_create(user_id=user_id)
+        connections = UserLLMConnectionRepository(session).list_views_for_user(user_id=user_id)
+
+    project_openai_enabled = bool(
+        settings.enable_openai_provider
+        and settings.openai_api_key
+        and (
+            is_admin_user(telegram_user.id, admin_user_ids)
+            or (
+                access is not None
+                and access.account_category is AccountCategory.INTERNAL
+            )
+        )
+    )
+    personal_openai_enabled = bool(
+        settings.enable_openai_provider and settings.personal_api_keys_secret
+    )
+    await message.answer(
+        build_provider_settings_response(
+            telegram_user_id=telegram_user.id,
+            account_category=(
+                access.account_category.value if access is not None else AccountCategory.UNASSIGNED.value
+            ),
+            selection_mode=profile.selection_mode.value,
+            project_openai_enabled=project_openai_enabled,
+            personal_openai_enabled=personal_openai_enabled,
+            connections=connections,
+            admin_user_ids=admin_user_ids,
+        ),
+        reply_markup=build_main_keyboard(),
+    )
+
+
+@router.message(Command("provider_save_openai"))
+async def handle_provider_save_openai(
+    message: Message,
+    command: CommandObject,
+    session_factory: sessionmaker[Session],
+    settings: Settings | None = None,
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    if settings is None:
+        await message.answer("Настройки провайдеров в этом окружении недоступны.")
+        return
+    if not settings.enable_openai_provider:
+        await message.answer("Класс провайдера OpenAI сейчас отключён в конфигурации приложения.")
+        return
+    if not settings.personal_api_keys_secret:
+        await message.answer("В приложении не настроен секрет для хранения персональных API-ключей.")
+        return
+
+    parsed_args = parse_provider_save_command_args(command)
+    if parsed_args is None:
+        await message.answer(
+            f"Использование: <code>/provider_save_openai {LLM_MODEL_PLACEHOLDER} {API_KEY_PLACEHOLDER}</code>"
+        )
+        return
+
+    model, api_key = parsed_args
+    cipher = SecretCipher(settings.personal_api_keys_secret)
+    encrypted_api_key = cipher.encrypt(api_key)
+
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        connection_repository = UserLLMConnectionRepository(session)
+        connection_repository.upsert_connection(
+            user_id=user_id,
+            provider=LLMProvider.OPENAI,
+            model=model,
+            encrypted_api_key=encrypted_api_key,
+            is_enabled=True,
+            is_selected=True,
+            validation_status=LLMConnectionValidationStatus.UNKNOWN,
+            validation_error=None,
+        )
+        connection_repository.select_provider(user_id=user_id, provider=LLMProvider.OPENAI)
+
+    await message.answer(
+        f"Сохранил персональный OpenAI-ключ для модели <code>{html.escape(model)}</code>.",
+        reply_markup=build_main_keyboard(),
+    )
+
+
+@router.message(Command("provider_use_personal"))
+async def handle_provider_use_personal(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        connection_repository = UserLLMConnectionRepository(session)
+        openai_connections = [
+            connection
+            for connection in connection_repository.list_for_user(user_id=user_id)
+            if connection.provider is LLMProvider.OPENAI and connection.is_enabled
+        ]
+        if not openai_connections:
+            await message.answer(
+                "Сначала сохрани хотя бы один персональный OpenAI-ключ командой "
+                f"<code>/provider_save_openai {LLM_MODEL_PLACEHOLDER} {API_KEY_PLACEHOLDER}</code>."
+            )
+            return
+        connection_repository.select_provider(user_id=user_id, provider=LLMProvider.OPENAI)
+        UserLLMProfileRepository(session).set_selection_mode(
+            user_id=user_id,
+            selection_mode=UserLLMSelectionMode.PERSONAL,
+        )
+
+    await message.answer(
+        "Переключил LLM-сценарии на персональные OpenAI-ключи.",
+        reply_markup=build_main_keyboard(),
+    )
+
+
+@router.message(Command("provider_use_project"))
+async def handle_provider_use_project(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    telegram_user = message.from_user
+    if telegram_user is None:
+        raise ValueError("Incoming message does not contain Telegram user")
+
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        access = UserAccessRepository(session).get_by_telegram_user_id(telegram_user.id)
+        is_internal = is_admin_user(telegram_user.id, admin_user_ids) or (
+            access is not None and access.account_category is AccountCategory.INTERNAL
+        )
+        if not is_internal:
+            await message.answer("Проектный провайдер доступен только аккаунтам категории internal.")
+            return
+
+        UserLLMProfileRepository(session).set_selection_mode(
+            user_id=user_id,
+            selection_mode=UserLLMSelectionMode.PROJECT,
+        )
+
+    await message.answer(
+        "Переключил LLM-сценарии на проектный провайдер.",
+        reply_markup=build_main_keyboard(),
+    )
 
 
 @router.message(Command("recent"))
@@ -3039,6 +3320,7 @@ async def handle_message(
     nutrition_service: NutritionEstimationService = default_nutrition_service,
     conversation_service: ConversationService = default_conversation_service,
     message_routing_service: MessageRoutingService = default_message_routing_service,
+    settings: Settings | None = None,
     admin_user_ids: tuple[int, ...] = (),
 ) -> None:
     if not await require_user_access(message, session_factory, admin_user_ids):
@@ -3047,8 +3329,10 @@ async def handle_message(
     typing_task = await start_typing_indicator(message)
     try:
         active_conversation_session_id: int | None = None
+        initial_user_id: int | None = None
         with session_scope(session_factory) as session:
             _, user_id = ensure_user_registered(message, session)
+            initial_user_id = user_id
             reply_to_message = getattr(message, "reply_to_message", None)
             reply_to_message_id = getattr(reply_to_message, "message_id", None)
             chat = getattr(message, "chat", None)
@@ -3092,6 +3376,28 @@ async def handle_message(
             current_time = datetime.now(timezone.utc)
             with session_scope(session_factory) as session:
                 _, user_id = ensure_user_registered(message, session)
+                runtime_bundle = None
+                if settings is not None:
+                    runtime_bundle = build_user_llm_runtime_bundle(
+                        session=session,
+                        settings=settings,
+                        user_id=user_id,
+                        telegram_user_id=message.from_user.id,
+                        admin_user_ids=admin_user_ids,
+                        fallback_extraction_service=extraction_service,
+                        fallback_nutrition_service=nutrition_service,
+                        fallback_conversation_service=conversation_service,
+                    )
+                    if (
+                        runtime_bundle.conversation_access is not None
+                        and not runtime_bundle.conversation_access.is_available
+                    ):
+                        await message.answer(
+                            build_provider_unavailable_message(runtime_bundle.conversation_access),
+                            reply_markup=build_main_keyboard(),
+                            **build_reply_kwargs(message),
+                        )
+                        return
                 user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
                 if user is None:
                     raise RuntimeError("User profile was not found after registration")
@@ -3122,7 +3428,7 @@ async def handle_message(
                     workout_logging_enabled=user.workout_logging_enabled,
                 )
                 conversation_reply = await asyncio.to_thread(
-                    conversation_service.reply,
+                    (runtime_bundle.conversation_service if runtime_bundle is not None else conversation_service).reply,
                     user_message=extraction_request.text or "",
                     factual_context=factual_context,
                     session_summary=conversation_session.summary_text,
@@ -3165,7 +3471,28 @@ async def handle_message(
             )
             return
 
-        extraction_result = await asyncio.to_thread(extraction_service.extract, extraction_request)
+        resolved_extraction_service = extraction_service
+        if settings is not None and initial_user_id is not None:
+            with session_scope(session_factory) as session:
+                runtime_bundle = build_user_llm_runtime_bundle(
+                    session=session,
+                    settings=settings,
+                    user_id=initial_user_id,
+                    telegram_user_id=message.from_user.id,
+                    admin_user_ids=admin_user_ids,
+                    fallback_extraction_service=extraction_service,
+                    fallback_nutrition_service=nutrition_service,
+                    fallback_conversation_service=conversation_service,
+                )
+                if runtime_bundle.extraction_access is not None and not runtime_bundle.extraction_access.is_available:
+                    await message.answer(
+                        build_provider_unavailable_message(runtime_bundle.extraction_access),
+                        reply_markup=build_main_keyboard(),
+                    )
+                    return
+                resolved_extraction_service = runtime_bundle.extraction_service
+
+        extraction_result = await asyncio.to_thread(resolved_extraction_service.extract, extraction_request)
 
         if isinstance(extraction_result, InvalidExtractionPayload):
             if extraction_result.is_llm:
@@ -3204,12 +3531,37 @@ async def handle_message(
                 if user is None:
                     raise RuntimeError("User profile was not found after registration")
                 summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+                runtime_bundle = None
+                if settings is not None:
+                    runtime_bundle = build_user_llm_runtime_bundle(
+                        session=session,
+                        settings=settings,
+                        user_id=user_id,
+                        telegram_user_id=message.from_user.id,
+                        admin_user_ids=admin_user_ids,
+                        fallback_extraction_service=extraction_service,
+                        fallback_nutrition_service=nutrition_service,
+                        fallback_conversation_service=conversation_service,
+                    )
                 if payload_contains_workout_entries(extraction_result.payload) and not user.workout_logging_enabled:
                     await message.answer(
                         "Запись тренировок сейчас выключена. Включи её в /settings, если хочешь сохранять такие сообщения.",
                         reply_markup=build_main_keyboard(),
                     )
                     return
+                contains_food_entries = any(
+                    extracted_entry.type is EntryType.FOOD
+                    for extracted_entry in extraction_result.payload.entries
+                )
+                if (
+                    contains_food_entries
+                    and runtime_bundle is not None
+                    and runtime_bundle.nutrition_access is not None
+                    and not runtime_bundle.nutrition_access.is_available
+                ):
+                    raise FoodWriteFlowError(
+                        build_provider_unavailable_message(runtime_bundle.nutrition_access)
+                    )
 
                 saved_food_entries: list = []
                 saved_items = build_saved_items_from_payload(extraction_result.payload)
@@ -3281,7 +3633,7 @@ async def handle_message(
                 if saved_food_entries:
                     nutrition_flow_result = StoredEntryNutritionEstimationUseCase(
                         session,
-                        nutrition_service,
+                        runtime_bundle.nutrition_service if runtime_bundle is not None else nutrition_service,
                     ).run(entry_ids=[entry.id for entry in saved_food_entries])
                     if isinstance(nutrition_flow_result, FailedNutritionEstimation):
                         raise FoodWriteFlowError(
@@ -3317,7 +3669,11 @@ async def handle_message(
                         )
                         try:
                             coach_comment = await asyncio.to_thread(
-                                conversation_service.comment_on_food_write,
+                                (
+                                    runtime_bundle.conversation_service
+                                    if runtime_bundle is not None
+                                    else conversation_service
+                                ).comment_on_food_write,
                                 saved_items=[
                                     format_saved_item_line(item.name, item.quantity, item.unit).removeprefix("- ")
                                     for item in saved_items
