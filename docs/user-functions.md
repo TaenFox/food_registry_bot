@@ -46,6 +46,8 @@
 - показывает число админов в конфиге;
 - показывает число известных, разрешённых и запрещённых пользователей;
 - показывает число `food entries` без полного набора nutrition metrics;
+- показывает число `LLM extraction issues` за последние `24` часа;
+- показывает число `LLM nutrition issues` за последние `24` часа;
 - показывает текущий статус `backfill nutrition`: `idle`, `running`, `completed` или `failed`;
 - показывает доступные admin-действия;
 - добавляет inline-кнопки `Управление пользователями` и `Закрыть`.
@@ -64,12 +66,15 @@
 - запрещённых пользователей: 2
 - пользователей с профилем: 1
 - food entries без полного набора метрик: 16
+- LLM extraction issues за 24ч: 0
+- LLM nutrition issues за 24ч: 1
 - дозаполнение nutrition metrics: idle
 
 Доступные действия:
 - кнопка «Управление пользователями»
 - /admin
 - /admin_backfill_nutrition [LIMIT]
+- /admin_llm_errors [LIMIT]
 ```
 
 ### Управление пользователями из админ-панели
@@ -182,6 +187,35 @@ Backfill nutrition завершён.
 Выбрано entries: 3
 Обработано entries: 3
 Сохранено метрик: 15
+```
+
+### Просмотр последних LLM-ошибок админом
+
+Что делает админ:
+
+- отправляет `/admin_llm_errors`;
+- при необходимости отправляет `/admin_llm_errors 20`, чтобы изменить число показываемых кейсов.
+
+Что делает система:
+
+- выбирает последние записи технического журнала LLM-ошибок;
+- показывает extraction и nutrition ошибки в одном списке;
+- для каждого кейса показывает время, stage, error code, user id, provider/model и сокращённые technical details;
+- не требует доступа к серверным stdout/stderr логам.
+
+Что получает админ:
+
+- сообщение вида:
+
+```text
+Последние LLM-ошибки. Лимит: 10.
+
+- 2026-05-26 10:00:00 UTC | extraction | invalid_payload
+  user: 1001
+  provider: openai_responses / gpt-5-mini
+  details: entries must not be empty
+  text: батончик 7 г
+  payload: {"entries": []}
 ```
 
 ### Регистрация при первом сообщении

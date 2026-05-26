@@ -21,6 +21,7 @@ USER_COMMAND_SPECS: tuple[tuple[str, str], ...] = (
 ADMIN_COMMAND_SPECS: tuple[tuple[str, str], ...] = (
     ("admin", "показать состояние системы"),
     ("admin_backfill_nutrition", "дозаполнить неполные nutrition metrics"),
+    ("admin_llm_errors", "показать последние LLM-ошибки"),
 )
 
 

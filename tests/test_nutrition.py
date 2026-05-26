@@ -205,7 +205,12 @@ def test_llm_nutrition_service_handles_client_errors() -> None:
     result = service.estimate(build_request())
 
     assert result == InvalidNutritionPayload(
-        message="Не удалось получить structured payload от nutrition provider."
+        message="Не удалось получить structured payload от nutrition provider.",
+        provider="openai_responses",
+        model="gpt-5-mini",
+        technical_message="boom",
+        error_code="client_error",
+        is_llm=True,
     )
 
 

@@ -12,6 +12,8 @@ from food_registry_bot.db.models import (
     EntryItem,
     EntryItemMetric,
     EntryType,
+    LLMIssueLog,
+    LLMIssueStage,
     MealType,
     DataExchangeDirection,
     DataExchangeFile,
@@ -73,6 +75,19 @@ class ConversationTurn:
     role: str
     content: str
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class LLMIssueLogCreate:
+    stage: LLMIssueStage
+    error_code: str
+    provider: str | None = None
+    model: str | None = None
+    telegram_user_id: int | None = None
+    username: str | None = None
+    request_text: str | None = None
+    raw_payload: str | None = None
+    technical_message: str | None = None
 
 
 class UserRepository:
@@ -940,6 +955,42 @@ class DataExchangeFileRepository:
         exchange_file.processed_at = processed_at
         self._session.flush()
         return exchange_file
+
+
+class LLMIssueLogRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(self, issue: LLMIssueLogCreate) -> LLMIssueLog:
+        stored_issue = LLMIssueLog(
+            stage=issue.stage,
+            error_code=issue.error_code,
+            provider=issue.provider,
+            model=issue.model,
+            telegram_user_id=issue.telegram_user_id,
+            username=issue.username,
+            request_text=issue.request_text,
+            raw_payload=issue.raw_payload,
+            technical_message=issue.technical_message,
+        )
+        self._session.add(stored_issue)
+        self._session.flush()
+        return stored_issue
+
+    def count_recent_by_stage(self, *, stage: LLMIssueStage, since: datetime) -> int:
+        statement = select(LLMIssueLog).where(
+            LLMIssueLog.stage == stage,
+            LLMIssueLog.created_at >= since,
+        )
+        return len(list(self._session.scalars(statement)))
+
+    def list_recent(self, *, limit: int) -> list[LLMIssueLog]:
+        statement = (
+            select(LLMIssueLog)
+            .order_by(LLMIssueLog.created_at.desc(), LLMIssueLog.id.desc())
+            .limit(limit)
+        )
+        return list(self._session.scalars(statement))
 
     def mark_error(
         self,

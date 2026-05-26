@@ -44,6 +44,11 @@ class DataExchangeStatus(str, enum.Enum):
     ERROR = "error"
 
 
+class LLMIssueStage(str, enum.Enum):
+    EXTRACTION = "extraction"
+    NUTRITION = "nutrition"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -330,6 +335,29 @@ class DataExchangeFile(Base):
     )
 
     user: Mapped["User"] = relationship(back_populates="data_exchange_files")
+
+
+class LLMIssueLog(Base):
+    __tablename__ = "llm_issue_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stage: Mapped[LLMIssueStage] = mapped_column(
+        Enum(LLMIssueStage, name="llm_issue_stage", values_callable=enum_values),
+        index=True,
+    )
+    error_code: Mapped[str] = mapped_column(String(64), index=True)
+    provider: Mapped[Optional[str]] = mapped_column(String(64))
+    model: Mapped[Optional[str]] = mapped_column(String(128))
+    telegram_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, index=True)
+    username: Mapped[Optional[str]] = mapped_column(String(255))
+    request_text: Mapped[Optional[str]] = mapped_column(Text)
+    raw_payload: Mapped[Optional[str]] = mapped_column(Text)
+    technical_message: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        index=True,
+    )
 
 
 class ConversationSession(Base):

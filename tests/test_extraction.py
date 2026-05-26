@@ -286,7 +286,12 @@ def test_llm_extraction_service_handles_client_errors() -> None:
     result = service.extract(JournalExtractionRequest(text="съел гречку"))
 
     assert result == InvalidExtractionPayload(
-        message="Не удалось получить structured payload от LLM."
+        message="Не удалось получить structured payload от LLM.",
+        provider="openai_responses",
+        model="gpt-5-mini",
+        technical_message="boom",
+        error_code="client_error",
+        is_llm=True,
     )
 
 
