@@ -13,6 +13,7 @@ def test_core_tables_registered() -> None:
         "entry_items",
         "supported_metrics",
         "entry_item_metrics",
+        "llm_issue_logs",
         "conversation_sessions",
         "conversation_messages",
         "data_exchange_files",
