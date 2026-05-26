@@ -984,10 +984,11 @@ class LLMIssueLogRepository:
         )
         return len(list(self._session.scalars(statement)))
 
-    def list_recent(self, *, limit: int) -> list[LLMIssueLog]:
+    def list_recent(self, *, limit: int, offset: int = 0) -> list[LLMIssueLog]:
         statement = (
             select(LLMIssueLog)
             .order_by(LLMIssueLog.created_at.desc(), LLMIssueLog.id.desc())
+            .offset(offset)
             .limit(limit)
         )
         return list(self._session.scalars(statement))

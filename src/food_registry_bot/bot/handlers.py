@@ -22,6 +22,7 @@ from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.keyboards import (
     WATER_250_ML_BUTTON_TEXT,
     build_admin_delete_entries_confirmation_keyboard,
+    build_admin_llm_issues_keyboard,
     build_admin_overview_keyboard,
     build_admin_user_actions_keyboard,
     build_admin_user_list_keyboard,
@@ -163,6 +164,7 @@ PERIOD_REPORT_PERIOD_SEQUENCE = (8, 16, 32)
 DEFAULT_PERIOD_REPORT_DAYS = PERIOD_REPORT_PERIOD_SEQUENCE[0]
 PERIOD_REPORT_SUBPERIOD_DAYS = 4
 ADMIN_USER_PAGE_SIZE = 10
+ADMIN_LLM_ISSUE_PAGE_SIZE = 5
 
 
 class FoodWriteFlowError(RuntimeError):
@@ -598,7 +600,6 @@ def build_admin_overview_response(
             "- кнопка «Управление пользователями»",
             "- /admin",
             "- <code>/admin_backfill_nutrition [LIMIT]</code>",
-            "- <code>/admin_llm_errors [LIMIT]</code>",
         ]
     )
 
@@ -694,11 +695,11 @@ def build_saved_items_confirmation(items: list[EntryItemCreate]) -> str:
     return "\n".join(lines)
 
 
-def build_llm_issue_log_summary(*, limit: int, issues: list) -> str:
+def build_llm_issue_log_summary(*, page: int, page_size: int, issues: list) -> str:
     if not issues:
-        return f"LLM-ошибок не найдено. Лимит {limit}."
+        return f"LLM-ошибок не найдено. Страница {page + 1}."
 
-    lines = [f"Последние LLM-ошибки. Лимит: {limit}."]
+    lines = [f"Последние LLM-ошибки. Страница {page + 1}, по {page_size}."]
     for issue in issues:
         provider_part = issue.provider or "unknown"
         model_part = issue.model or "unknown"
@@ -719,6 +720,24 @@ def build_llm_issue_log_summary(*, limit: int, issues: list) -> str:
             ]
         )
     return "\n".join(lines)
+
+
+def load_admin_llm_issues_page(
+    *,
+    total_count: int,
+    page: int,
+    page_size: int = ADMIN_LLM_ISSUE_PAGE_SIZE,
+) -> tuple[int, int, bool, bool]:
+    page = max(page, 0)
+    if total_count == 0:
+        return 0, 0, False, False
+
+    max_page = max((total_count - 1) // page_size, 0)
+    page = min(page, max_page)
+    offset = page * page_size
+    has_previous_page = page > 0
+    has_next_page = offset + page_size < total_count
+    return page, offset, has_previous_page, has_next_page
 
 
 def _truncate_issue_field(value: str | None, *, max_length: int = 160) -> str:
@@ -1777,6 +1796,37 @@ async def handle_admin_panel_callback(
             await callback.answer()
             return
 
+        if callback_data.action == "open_llm_issues":
+            issue_repository = LLMIssueLogRepository(session)
+            total_count = issue_repository.count_recent_by_stage(
+                stage=LLMIssueStage.EXTRACTION,
+                since=datetime(1970, 1, 1, tzinfo=timezone.utc),
+            ) + issue_repository.count_recent_by_stage(
+                stage=LLMIssueStage.NUTRITION,
+                since=datetime(1970, 1, 1, tzinfo=timezone.utc),
+            )
+            page, offset, has_previous_page, has_next_page = load_admin_llm_issues_page(
+                total_count=total_count,
+                page=callback_data.page,
+                page_size=ADMIN_LLM_ISSUE_PAGE_SIZE,
+            )
+            issues = issue_repository.list_recent(limit=ADMIN_LLM_ISSUE_PAGE_SIZE, offset=offset)
+            await safe_edit_message_text(
+                callback.message,
+                text=build_llm_issue_log_summary(
+                    page=page,
+                    page_size=ADMIN_LLM_ISSUE_PAGE_SIZE,
+                    issues=issues,
+                ),
+                reply_markup=build_admin_llm_issues_keyboard(
+                    page=page,
+                    has_previous_page=has_previous_page,
+                    has_next_page=has_next_page,
+                ),
+            )
+            await callback.answer()
+            return
+
         known_user = find_known_user(directory_users, telegram_user_id=callback_data.telegram_user_id)
         if known_user is None:
             await callback.answer("Пользователь уже недоступен.", show_alert=True)
@@ -1959,30 +2009,6 @@ async def handle_admin_backfill_nutrition(
     )
 
 
-@router.message(Command("admin_llm_errors"))
-async def handle_admin_llm_errors(
-    message: Message,
-    command: CommandObject,
-    session_factory: sessionmaker[Session],
-    admin_user_ids: tuple[int, ...] = (),
-) -> None:
-    telegram_user = message.from_user
-    if telegram_user is None or not is_admin_user(telegram_user.id, admin_user_ids):
-        await message.answer("Команда доступна только администратору.")
-        return
-
-    limit = 10
-    if command.args is not None and command.args.strip():
-        parsed_limit = parse_positive_int_arg(command)
-        if parsed_limit is None:
-            await message.answer("Использование: <code>/admin_llm_errors [LIMIT]</code>")
-            return
-        limit = parsed_limit
-
-    with session_scope(session_factory) as session:
-        issues = LLMIssueLogRepository(session).list_recent(limit=limit)
-
-    await message.answer(build_llm_issue_log_summary(limit=limit, issues=issues))
 
 
 @router.message(Command("start"))

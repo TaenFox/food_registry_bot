@@ -18,7 +18,6 @@ from food_registry_bot.bot.handlers import (
     handle_admin,
     handle_admin_panel_callback,
     handle_admin_backfill_nutrition,
-    handle_admin_llm_errors,
     handle_data_exchange_file_callback,
     handle_goal,
     handle_goal_message_callback,
@@ -284,10 +283,10 @@ async def test_admin_returns_system_overview_and_commands() -> None:
     assert "- food entries без полного набора метрик: 1" in admin_text
     assert "- LLM extraction issues за 24ч: 0" in admin_text
     assert "- LLM nutrition issues за 24ч: 0" in admin_text
-    assert "- <code>/admin_llm_errors [LIMIT]</code>" in admin_text
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Управление пользователями"
-    assert reply_markup.inline_keyboard[1][0].text == "Закрыть"
+    assert reply_markup.inline_keyboard[1][0].text == "LLM-ошибки"
+    assert reply_markup.inline_keyboard[2][0].text == "Закрыть"
 
 
 async def test_admin_overview_excludes_admin_from_user_counters() -> None:
@@ -393,7 +392,7 @@ async def test_admin_is_forbidden_for_non_admin() -> None:
     assert message.answer.await_args.args == ("Команда доступна только администратору.",)
 
 
-async def test_admin_llm_errors_returns_recent_issue_list() -> None:
+async def test_admin_panel_opens_recent_llm_issue_list() -> None:
     session_factory = create_session_factory()
     with session_factory() as session:
         session.add(
@@ -411,42 +410,55 @@ async def test_admin_llm_errors_returns_recent_issue_list() -> None:
         )
         session.commit()
 
-    message = SimpleNamespace(
+    callback_message = SimpleNamespace(
+        text="old text",
+        edit_text=AsyncMock(),
+    )
+    callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=callback_message,
         answer=AsyncMock(),
     )
-    command = SimpleNamespace(args="5")
 
-    await handle_admin_llm_errors(
-        message,
-        command,
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="open_llm_issues", page=0),
         session_factory,
+        backfill_tracker=AdminBackfillTracker(),
         admin_user_ids=(ADMIN_ID,),
     )
 
-    response_text = message.answer.await_args.args[0]
-    assert "Последние LLM-ошибки. Лимит: 5." in response_text
+    response_text = callback_message.edit_text.await_args.args[0]
+    assert "Последние LLM-ошибки. Страница 1, по 5." in response_text
     assert "extraction | invalid_payload" in response_text
     assert "батончик 7 г" in response_text
     assert '{"entries": []}' in response_text
+    reply_markup = callback_message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[-2][0].text == "К панели"
 
 
-async def test_admin_llm_errors_rejects_invalid_limit() -> None:
+async def test_admin_panel_opens_empty_llm_issue_list() -> None:
     session_factory = create_session_factory()
-    message = SimpleNamespace(
+    callback_message = SimpleNamespace(
+        text="old text",
+        edit_text=AsyncMock(),
+    )
+    callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=callback_message,
         answer=AsyncMock(),
     )
-    command = SimpleNamespace(args="oops")
 
-    await handle_admin_llm_errors(
-        message,
-        command,
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="open_llm_issues", page=0),
         session_factory,
+        backfill_tracker=AdminBackfillTracker(),
         admin_user_ids=(ADMIN_ID,),
     )
 
-    assert message.answer.await_args.args == ("Использование: <code>/admin_llm_errors [LIMIT]</code>",)
+    response_text = callback_message.edit_text.await_args.args[0]
+    assert response_text == "LLM-ошибок не найдено. Страница 1."
 
 
 async def test_admin_panel_users_returns_first_page_with_buttons() -> None:
