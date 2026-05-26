@@ -280,6 +280,12 @@ def build_admin_overview_keyboard() -> InlineKeyboardMarkup:
                     callback_data=AdminPanelCallback(action="open_users").pack(),
                 ),
             ],
+            [
+                InlineKeyboardButton(
+                    text="LLM-ошибки",
+                    callback_data=AdminPanelCallback(action="open_llm_issues", page=0).pack(),
+                ),
+            ],
             _build_close_row(AdminPanelCallback(action="close").pack()),
         ]
     )
@@ -366,6 +372,42 @@ def build_admin_user_actions_keyboard(*, telegram_user_id: int, page: int, is_al
             _build_close_row(AdminPanelCallback(action="close").pack()),
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_admin_llm_issues_keyboard(
+    *,
+    page: int,
+    has_previous_page: bool,
+    has_next_page: bool,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    navigation_row: list[InlineKeyboardButton] = []
+    if has_previous_page:
+        navigation_row.append(
+            InlineKeyboardButton(
+                text="← Назад",
+                callback_data=AdminPanelCallback(action="open_llm_issues", page=page - 1).pack(),
+            )
+        )
+    if has_next_page:
+        navigation_row.append(
+            InlineKeyboardButton(
+                text="Вперёд →",
+                callback_data=AdminPanelCallback(action="open_llm_issues", page=page + 1).pack(),
+            )
+        )
+    if navigation_row:
+        rows.append(navigation_row)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="К панели",
+                callback_data=AdminPanelCallback(action="overview").pack(),
+            )
+        ]
+    )
+    rows.append(_build_close_row(AdminPanelCallback(action="close").pack()))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

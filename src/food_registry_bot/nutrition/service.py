@@ -21,6 +21,12 @@ class ValidNutritionPayload:
 @dataclass(frozen=True)
 class InvalidNutritionPayload:
     message: str
+    provider: str | None = None
+    model: str | None = None
+    raw_payload: str | None = None
+    technical_message: str | None = None
+    error_code: str | None = None
+    is_llm: bool = False
 
 
 class NutritionPayloadClient(Protocol):
@@ -76,17 +82,27 @@ class StaticNutritionEstimationService:
     ) -> ValidNutritionPayload | InvalidNutritionPayload:
         if not self._raw_payload.strip():
             return InvalidNutritionPayload(
-                message="Nutrition service вернул пустой structured payload."
+                message="Nutrition service вернул пустой structured payload.",
+                provider=self._provider_name,
+                model=self._model_name,
+                raw_payload=self._raw_payload,
+                technical_message="Static nutrition payload is empty",
+                error_code="empty_payload",
             )
 
         try:
             payload = _parse_payload(raw_payload=self._raw_payload, request=request)
-        except (ValidationError, json.JSONDecodeError, ValueError):
+        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
             return InvalidNutritionPayload(
                 message=(
                     "Nutrition service вернул невалидный structured payload. "
                     "Ожидаю объект вида {'items': [...]} с client_item_id и metrics[]."
-                )
+                ),
+                provider=self._provider_name,
+                model=self._model_name,
+                raw_payload=self._raw_payload,
+                technical_message=str(exc),
+                error_code="invalid_payload",
             )
 
         return ValidNutritionPayload(
@@ -106,24 +122,41 @@ class LLMNutritionEstimationService:
     ) -> ValidNutritionPayload | InvalidNutritionPayload:
         try:
             raw_payload = self._client.estimate_nutrition_payload(request)
-        except LLMNutritionClientError:
+        except LLMNutritionClientError as exc:
             return InvalidNutritionPayload(
-                message="Не удалось получить structured payload от nutrition provider."
+                message="Не удалось получить structured payload от nutrition provider.",
+                provider=self._client.provider_name,
+                model=self._client.model_name,
+                technical_message=str(exc),
+                error_code="client_error",
+                is_llm=True,
             )
 
         if not raw_payload.strip():
             return InvalidNutritionPayload(
-                message="Nutrition provider вернул пустой structured payload."
+                message="Nutrition provider вернул пустой structured payload.",
+                provider=self._client.provider_name,
+                model=self._client.model_name,
+                raw_payload=raw_payload,
+                technical_message="OpenAI returned an empty nutrition response",
+                error_code="empty_payload",
+                is_llm=True,
             )
 
         try:
             payload = _parse_payload(raw_payload=raw_payload, request=request)
-        except (ValidationError, json.JSONDecodeError, ValueError):
+        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
             return InvalidNutritionPayload(
                 message=(
                     "Nutrition provider вернул невалидный structured payload. "
                     "Ожидаю объект вида {'items': [...]} с client_item_id и metrics[]."
-                )
+                ),
+                provider=self._client.provider_name,
+                model=self._client.model_name,
+                raw_payload=raw_payload,
+                technical_message=str(exc),
+                error_code="invalid_payload",
+                is_llm=True,
             )
 
         return ValidNutritionPayload(

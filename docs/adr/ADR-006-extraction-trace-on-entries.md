@@ -18,18 +18,19 @@
 
 - `extraction_provider` - технический идентификатор источника extraction, например `structured_payload` или `openai_responses`;
 - `extraction_model` - идентификатор модели, если extraction делала LLM;
-- `extraction_raw_payload` - raw JSON payload, который вернул extraction layer до преобразования в доменную запись.
+- `extraction_raw_payload` - raw JSON payload, соответствующий конкретной сохранённой `entry` до преобразования в доменную запись.
 
-Если один extraction result содержит несколько `entries`, общий trace дублируется на каждую созданную запись. На этом шаге это допустимо, потому что:
+Если один extraction result содержит несколько `entries`, на каждую созданную запись сохраняется свой entry-specific fragment того же extraction result. На этом шаге это допустимо, потому что:
 
 - изменение минимально и обратимо;
 - не требуется вводить отдельную `journal_extractions` таблицу;
-- trace сразу доступен рядом с сохранённой записью.
+- trace сразу доступен рядом с сохранённой записью;
+- later flows вроде nutrition backfill могут детерминированно восстановить extraction facts именно для этой записи.
 
 `llm_comment` пока не используется как trace-хранилище и остаётся отдельным полем под будущий пользовательский или модельный комментарий.
 
 ## Consequences
 
 - Отладка качества extraction становится наблюдаемой без новой сущности и без изменения пользовательского поведения.
-- Цена решения - дублирование одного и того же raw payload на несколько `entries`, если они были созданы из одного extraction result.
+- Цена решения - частичное дублирование entry-level extraction payload между `entries`, если они были созданы из одного extraction result.
 - Если позже понадобится история повторных попыток, request-level trace, latency, token usage или provider errors, это станет основанием для отдельной extraction trace model, а не ломает текущее решение.

@@ -11,6 +11,7 @@ from food_registry_bot.db.models import (
     EntryItem,
     EntryItemMetric,
     EntryType,
+    LLMIssueStage,
     SupportedMetric,
     UserAccess,
     UserGoalPreference,
@@ -23,6 +24,8 @@ from food_registry_bot.db.repositories import (
     EntryItemMetricRepository,
     EntryItemMetricValue,
     EntryRepository,
+    LLMIssueLogCreate,
+    LLMIssueLogRepository,
     NutritionEstimatePersistenceService,
     SupportedMetricRepository,
     UserAccessRepository,
@@ -126,6 +129,44 @@ def test_user_access_repository_sets_and_updates_access() -> None:
     saved_access = session.query(UserAccess).filter_by(telegram_user_id=9001).one()
     assert saved_access.username == "first_user_renamed"
     assert saved_access.is_allowed is False
+
+
+def test_llm_issue_log_repository_creates_and_lists_recent_issues() -> None:
+    session = create_test_session()
+    repository = LLMIssueLogRepository(session)
+
+    repository.create(
+        LLMIssueLogCreate(
+            stage=LLMIssueStage.EXTRACTION,
+            error_code="invalid_payload",
+            provider="openai_responses",
+            model="gpt-5-mini",
+            telegram_user_id=7001,
+            request_text="батончик 7 г",
+            raw_payload='{"entries": []}',
+            technical_message="entries must not be empty",
+        )
+    )
+    repository.create(
+        LLMIssueLogCreate(
+            stage=LLMIssueStage.NUTRITION,
+            error_code="client_error",
+            provider="openai_responses",
+            model="gpt-5-mini",
+            telegram_user_id=7002,
+            technical_message="timeout",
+        )
+    )
+
+    recent_issues = repository.list_recent(limit=10)
+
+    assert len(recent_issues) == 2
+    assert recent_issues[0].stage is LLMIssueStage.NUTRITION
+    assert recent_issues[1].stage is LLMIssueStage.EXTRACTION
+    assert repository.count_recent_by_stage(
+        stage=LLMIssueStage.EXTRACTION,
+        since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+    ) == 1
 
 
 def test_user_access_repository_lists_known_users_from_profiles_and_access() -> None:

@@ -30,6 +30,7 @@ class SkippedNutritionEstimation:
 @dataclass(frozen=True)
 class FailedNutritionEstimation:
     message: str
+    issue: InvalidNutritionPayload | None = None
 
 
 @dataclass(frozen=True)
@@ -84,7 +85,7 @@ class StoredEntryNutritionEstimationUseCase:
 
         nutrition_result = self._nutrition_service.estimate(prepared_request.request)
         if isinstance(nutrition_result, InvalidNutritionPayload):
-            return FailedNutritionEstimation(message=nutrition_result.message)
+            return FailedNutritionEstimation(message=nutrition_result.message, issue=nutrition_result)
 
         resolved_estimates = resolve_nutrition_estimates(prepared_request, nutrition_result.payload)
         saved_metrics = self._persistence_service.save_resolved_estimates_for_entries(

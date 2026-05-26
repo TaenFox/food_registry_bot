@@ -4,10 +4,11 @@ import asyncio
 from contextlib import suppress
 import logging
 import html
+import json
 from io import BytesIO
 from pathlib import Path
 import tempfile
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from aiogram import Router
@@ -21,6 +22,7 @@ from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.keyboards import (
     WATER_250_ML_BUTTON_TEXT,
     build_admin_delete_entries_confirmation_keyboard,
+    build_admin_llm_issues_keyboard,
     build_admin_overview_keyboard,
     build_admin_user_actions_keyboard,
     build_admin_user_list_keyboard,
@@ -55,7 +57,7 @@ from food_registry_bot.conversation import (
     NutritionCoachContextBuilder,
 )
 from food_registry_bot.db.models import ConversationMessageRole, ConversationSession, EntryType
-from food_registry_bot.db.models import DataExchangeDirection, DataExchangeFile, DataExchangeStatus
+from food_registry_bot.db.models import DataExchangeDirection, DataExchangeFile, DataExchangeStatus, LLMIssueStage
 from food_registry_bot.db.session import session_scope
 from food_registry_bot.db.repositories import (
     ConversationMessageRepository,
@@ -66,6 +68,8 @@ from food_registry_bot.db.repositories import (
     EntryItemMetricValue,
     EntryRepository,
     KnownUserAccessView,
+    LLMIssueLogCreate,
+    LLMIssueLogRepository,
     UserGoalPreferenceRepository,
     UserAccessRepository,
     UserRepository,
@@ -160,10 +164,13 @@ PERIOD_REPORT_PERIOD_SEQUENCE = (8, 16, 32)
 DEFAULT_PERIOD_REPORT_DAYS = PERIOD_REPORT_PERIOD_SEQUENCE[0]
 PERIOD_REPORT_SUBPERIOD_DAYS = 4
 ADMIN_USER_PAGE_SIZE = 10
+ADMIN_LLM_ISSUE_PAGE_SIZE = 5
 
 
 class FoodWriteFlowError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, issue=None) -> None:
+        super().__init__(message)
+        self.issue = issue
 
 
 def describe_import_contract(contract_type: str) -> str:
@@ -564,6 +571,8 @@ def build_admin_overview_response(
     admin_user_ids: tuple[int, ...],
     known_users: list,
     incomplete_food_entry_count: int,
+    recent_extraction_issue_count: int,
+    recent_nutrition_issue_count: int,
     backfill_status_line: str,
     app_version: str,
 ) -> str:
@@ -583,6 +592,8 @@ def build_admin_overview_response(
             f"- запрещённых пользователей: {denied_count}",
             f"- пользователей с профилем: {profile_count}",
             f"- food entries без полного набора метрик: {incomplete_food_entry_count}",
+            f"- LLM extraction issues за 24ч: {recent_extraction_issue_count}",
+            f"- LLM nutrition issues за 24ч: {recent_nutrition_issue_count}",
             f"- дозаполнение nutrition metrics: {backfill_status_line}",
             "",
             "Доступные действия:",
@@ -682,6 +693,89 @@ def build_saved_items_confirmation(items: list[EntryItemCreate]) -> str:
     for item in items:
         lines.append(format_saved_item_line(item.name, item.quantity, item.unit))
     return "\n".join(lines)
+
+
+def build_llm_issue_log_summary(*, page: int, page_size: int, issues: list) -> str:
+    if not issues:
+        return f"LLM-ошибок не найдено. Страница {page + 1}."
+
+    lines = [f"Последние LLM-ошибки. Страница {page + 1}, по {page_size}."]
+    for issue in issues:
+        provider_part = issue.provider or "unknown"
+        model_part = issue.model or "unknown"
+        user_part = (
+            f"{issue.telegram_user_id}"
+            if issue.telegram_user_id is not None
+            else "unknown"
+        )
+        lines.extend(
+            [
+                "",
+                f"- {issue.created_at.strftime('%Y-%m-%d %H:%M:%S %Z')} | {issue.stage.value} | {issue.error_code}",
+                f"  user: {user_part}",
+                f"  provider: {provider_part} / {model_part}",
+                f"  details: {_truncate_issue_field(issue.technical_message)}",
+                f"  text: {_truncate_issue_field(issue.request_text)}",
+                f"  payload: {_truncate_issue_field(issue.raw_payload)}",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def load_admin_llm_issues_page(
+    *,
+    total_count: int,
+    page: int,
+    page_size: int = ADMIN_LLM_ISSUE_PAGE_SIZE,
+) -> tuple[int, int, bool, bool]:
+    page = max(page, 0)
+    if total_count == 0:
+        return 0, 0, False, False
+
+    max_page = max((total_count - 1) // page_size, 0)
+    page = min(page, max_page)
+    offset = page * page_size
+    has_previous_page = page > 0
+    has_next_page = offset + page_size < total_count
+    return page, offset, has_previous_page, has_next_page
+
+
+def _truncate_issue_field(value: str | None, *, max_length: int = 160) -> str:
+    if value is None or not value.strip():
+        return "—"
+    normalized = " ".join(value.split())
+    if len(normalized) <= max_length:
+        return normalized
+    return normalized[: max_length - 1] + "…"
+
+
+def log_llm_issue(
+    *,
+    session_factory: sessionmaker[Session],
+    stage: LLMIssueStage,
+    error_code: str | None,
+    provider: str | None,
+    model: str | None,
+    telegram_user_id: int | None,
+    username: str | None,
+    request_text: str | None,
+    raw_payload: str | None,
+    technical_message: str | None,
+) -> None:
+    with session_scope(session_factory) as session:
+        LLMIssueLogRepository(session).create(
+            LLMIssueLogCreate(
+                stage=stage,
+                error_code=error_code or "unknown_error",
+                provider=provider,
+                model=model,
+                telegram_user_id=telegram_user_id,
+                username=username,
+                request_text=request_text,
+                raw_payload=raw_payload,
+                technical_message=technical_message,
+            )
+        )
 
 
 def build_extracted_workout_metric_lines(payload) -> list[str]:
@@ -1584,6 +1678,16 @@ async def handle_admin(
         incomplete_food_entry_count = EntryRepository(session).count_incomplete_food_entries(
             required_metric_codes=list(SUPPORTED_NUTRITION_METRIC_CODES)
         )
+        issue_repository = LLMIssueLogRepository(session)
+        recent_issue_since = datetime.now(timezone.utc) - timedelta(hours=24)
+        recent_extraction_issue_count = issue_repository.count_recent_by_stage(
+            stage=LLMIssueStage.EXTRACTION,
+            since=recent_issue_since,
+        )
+        recent_nutrition_issue_count = issue_repository.count_recent_by_stage(
+            stage=LLMIssueStage.NUTRITION,
+            since=recent_issue_since,
+        )
 
     await message.answer(
         build_admin_overview_response(
@@ -1591,6 +1695,8 @@ async def handle_admin(
             admin_user_ids=admin_user_ids,
             known_users=known_users,
             incomplete_food_entry_count=incomplete_food_entry_count,
+            recent_extraction_issue_count=recent_extraction_issue_count,
+            recent_nutrition_issue_count=recent_nutrition_issue_count,
             backfill_status_line=build_admin_backfill_status_line(backfill_tracker),
             app_version=app_version,
         ),
@@ -1632,6 +1738,8 @@ async def handle_admin_panel_callback(
             incomplete_food_entry_count = EntryRepository(session).count_incomplete_food_entries(
                 required_metric_codes=list(SUPPORTED_NUTRITION_METRIC_CODES)
             )
+            issue_repository = LLMIssueLogRepository(session)
+            recent_issue_since = datetime.now(timezone.utc) - timedelta(hours=24)
             await safe_edit_message_text(
                 callback.message,
                 text=build_admin_overview_response(
@@ -1639,6 +1747,14 @@ async def handle_admin_panel_callback(
                     admin_user_ids=admin_user_ids,
                     known_users=known_users,
                     incomplete_food_entry_count=incomplete_food_entry_count,
+                    recent_extraction_issue_count=issue_repository.count_recent_by_stage(
+                        stage=LLMIssueStage.EXTRACTION,
+                        since=recent_issue_since,
+                    ),
+                    recent_nutrition_issue_count=issue_repository.count_recent_by_stage(
+                        stage=LLMIssueStage.NUTRITION,
+                        since=recent_issue_since,
+                    ),
                     backfill_status_line=build_admin_backfill_status_line(backfill_tracker),
                     app_version=app_version,
                 ),
@@ -1672,6 +1788,37 @@ async def handle_admin_panel_callback(
                         )
                         for known_user in page_users
                     ],
+                    page=page,
+                    has_previous_page=has_previous_page,
+                    has_next_page=has_next_page,
+                ),
+            )
+            await callback.answer()
+            return
+
+        if callback_data.action == "open_llm_issues":
+            issue_repository = LLMIssueLogRepository(session)
+            total_count = issue_repository.count_recent_by_stage(
+                stage=LLMIssueStage.EXTRACTION,
+                since=datetime(1970, 1, 1, tzinfo=timezone.utc),
+            ) + issue_repository.count_recent_by_stage(
+                stage=LLMIssueStage.NUTRITION,
+                since=datetime(1970, 1, 1, tzinfo=timezone.utc),
+            )
+            page, offset, has_previous_page, has_next_page = load_admin_llm_issues_page(
+                total_count=total_count,
+                page=callback_data.page,
+                page_size=ADMIN_LLM_ISSUE_PAGE_SIZE,
+            )
+            issues = issue_repository.list_recent(limit=ADMIN_LLM_ISSUE_PAGE_SIZE, offset=offset)
+            await safe_edit_message_text(
+                callback.message,
+                text=build_llm_issue_log_summary(
+                    page=page,
+                    page_size=ADMIN_LLM_ISSUE_PAGE_SIZE,
+                    issues=issues,
+                ),
+                reply_markup=build_admin_llm_issues_keyboard(
                     page=page,
                     has_previous_page=has_previous_page,
                     has_next_page=has_next_page,
@@ -1860,6 +2007,8 @@ async def handle_admin_backfill_nutrition(
         limit=limit,
         task=task,
     )
+
+
 
 
 @router.message(Command("start"))
@@ -3019,6 +3168,20 @@ async def handle_message(
         extraction_result = await asyncio.to_thread(extraction_service.extract, extraction_request)
 
         if isinstance(extraction_result, InvalidExtractionPayload):
+            if extraction_result.is_llm:
+                await asyncio.to_thread(
+                    log_llm_issue,
+                    session_factory=session_factory,
+                    stage=LLMIssueStage.EXTRACTION,
+                    error_code=extraction_result.error_code,
+                    provider=extraction_result.provider,
+                    model=extraction_result.model,
+                    telegram_user_id=getattr(getattr(message, "from_user", None), "id", None),
+                    username=getattr(getattr(message, "from_user", None), "username", None),
+                    request_text=extraction_request.text,
+                    raw_payload=extraction_result.raw_payload,
+                    technical_message=extraction_result.technical_message,
+                )
             await message.answer(
                 extraction_result.message,
                 reply_markup=build_main_keyboard(),
@@ -3054,6 +3217,10 @@ async def handle_message(
                 occurred_at_values: list[datetime] = []
                 for extracted_entry in extraction_result.payload.entries:
                     occurred_at = extracted_entry.occurred_at or datetime.now(timezone.utc)
+                    entry_extraction_raw_payload = json.dumps(
+                        {"entries": [extracted_entry.model_dump(mode="json")]},
+                        ensure_ascii=False,
+                    )
                     saved_entry = EntryRepository(session).create(
                         user_id=user_id,
                         entry_type=extracted_entry.type,
@@ -3061,7 +3228,7 @@ async def handle_message(
                         source_text=extraction_request.text if extracted_entry.type is EntryType.WORKOUT else None,
                         extraction_provider=extraction_result.extraction_provider,
                         extraction_model=extraction_result.extraction_model,
-                        extraction_raw_payload=extraction_result.raw_payload,
+                        extraction_raw_payload=entry_extraction_raw_payload,
                         items=[
                             EntryItemCreate(
                                 name=item.name,
@@ -3117,7 +3284,10 @@ async def handle_message(
                         nutrition_service,
                     ).run(entry_ids=[entry.id for entry in saved_food_entries])
                     if isinstance(nutrition_flow_result, FailedNutritionEstimation):
-                        raise FoodWriteFlowError(nutrition_flow_result.message)
+                        raise FoodWriteFlowError(
+                            nutrition_flow_result.message,
+                            issue=nutrition_flow_result.issue,
+                        )
                     if isinstance(nutrition_flow_result, SkippedNutritionEstimation):
                         raise FoodWriteFlowError(nutrition_flow_result.reason)
                     nutrition_result = nutrition_flow_result
@@ -3181,6 +3351,21 @@ async def handle_message(
                         extra_lines=extracted_workout_metric_lines,
                     )
         except FoodWriteFlowError as exc:
+            issue = getattr(exc, "issue", None)
+            if issue is not None and issue.is_llm:
+                await asyncio.to_thread(
+                    log_llm_issue,
+                    session_factory=session_factory,
+                    stage=LLMIssueStage.NUTRITION,
+                    error_code=issue.error_code,
+                    provider=issue.provider,
+                    model=issue.model,
+                    telegram_user_id=getattr(getattr(message, "from_user", None), "id", None),
+                    username=getattr(getattr(message, "from_user", None), "username", None),
+                    request_text=extraction_request.text,
+                    raw_payload=issue.raw_payload,
+                    technical_message=issue.technical_message,
+                )
             await message.answer(str(exc), reply_markup=build_main_keyboard())
             return
 

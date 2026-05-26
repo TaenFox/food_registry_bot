@@ -109,6 +109,32 @@ def test_nutrition_request_rejects_quantity_without_unit() -> None:
         )
 
 
+def test_nutrition_request_accepts_structured_nutrition_label() -> None:
+    request = NutritionEstimationRequest.model_validate(
+        {
+            "items": [
+                {
+                    "client_item_id": "entry-1:item-0",
+                    "name": "батончик",
+                    "quantity": 7,
+                    "unit": "г",
+                    "nutrition_label": {
+                        "basis": "unknown",
+                        "calories": 480,
+                        "protein": 15,
+                        "fat": 37,
+                        "carbs": 22,
+                    },
+                }
+            ]
+        }
+    )
+
+    assert request.items[0].nutrition_label is not None
+    assert request.items[0].nutrition_label.basis.value == "unknown"
+    assert request.items[0].nutrition_label.calories == 480
+
+
 def test_static_nutrition_service_validates_payload() -> None:
     service = StaticNutritionEstimationService(
         raw_payload=build_metric_payload(["entry-1:item-0", "entry-1:item-1"]),
@@ -179,7 +205,12 @@ def test_llm_nutrition_service_handles_client_errors() -> None:
     result = service.estimate(build_request())
 
     assert result == InvalidNutritionPayload(
-        message="Не удалось получить structured payload от nutrition provider."
+        message="Не удалось получить structured payload от nutrition provider.",
+        provider="openai_responses",
+        model="gpt-5-mini",
+        technical_message="boom",
+        error_code="client_error",
+        is_llm=True,
     )
 
 
@@ -279,6 +310,8 @@ def test_openai_nutrition_client_builds_request_with_json_contract() -> None:
     assert "Return only valid json matching this schema exactly" in calls[0]["instructions"]
     assert "same client_item_id as in the request" in calls[0]["instructions"]
     assert "Return confidence for every metric using only low, medium, or high" in calls[0]["instructions"]
+    assert "If nutrition_label is present for an item" in calls[0]["instructions"]
+    assert "basis is unknown" in calls[0]["instructions"]
     assert content[0]["type"] == "input_text"
     assert content[1]["type"] == "input_text"
     assert '"client_item_id": "entry-1:item-0"' in content[1]["text"]
@@ -329,6 +362,28 @@ def test_prepare_nutrition_request_from_entries_includes_food_items_without_quan
         "entry-42:item-1",
         "entry-42:item-2",
     ]
+
+
+def test_prepare_nutrition_request_from_entries_restores_nutrition_label_from_extraction_trace() -> None:
+    entry = Entry(
+        id=44,
+        user_id=1,
+        entry_type=EntryType.FOOD,
+        occurred_at="2026-05-18T10:00:00Z",
+        extraction_raw_payload=(
+            '{"entries": [{"type": "food", "items": [{"name": "батончик", "quantity": 7, "unit": "g", '
+            '"nutrition_label": {"basis": "unknown", "calories": 480, "protein": 15, "fat": 37, "carbs": 22}}]}]}'
+        ),
+    )
+    entry.items = [EntryItem(position=0, name="батончик", quantity=7, unit="g")]
+
+    prepared_request = prepare_nutrition_request_from_entries([entry])
+
+    assert prepared_request is not None
+    label = prepared_request.request.items[0].nutrition_label
+    assert label is not None
+    assert label.calories == 480
+    assert label.basis.value == "unknown"
 
 
 def test_prepare_nutrition_request_from_entries_drops_unsupported_unit() -> None:
@@ -406,3 +461,24 @@ def test_extraction_to_nutrition_pipeline_on_structured_payload() -> None:
 
     assert [estimate.item_ref.name for estimate in estimates] == ["гречка", "курица"]
     assert all(metric.confidence is NutritionConfidence.LOW for metric in estimates[1].metrics)
+
+
+def test_extraction_to_nutrition_pipeline_keeps_structured_nutrition_label() -> None:
+    extraction_service = StructuredPayloadExtractionService()
+    extraction_result = extraction_service.extract(
+        JournalExtractionRequest(
+            text=(
+                '{"entries": ['
+                '{"type": "food", "items": [{"name": "батончик", "quantity": 7, "unit": "г", '
+                '"nutrition_label": {"basis": "unknown", "calories": 480, "protein": 15, "fat": 37, "carbs": 22}}]}'
+                "]}"
+            ),
+        )
+    )
+    assert isinstance(extraction_result, ValidExtractionPayload)
+
+    prepared_request = prepare_nutrition_request_from_extracted_payload(extraction_result.payload)
+    assert prepared_request is not None
+    label = prepared_request.request.items[0].nutrition_label
+    assert label is not None
+    assert label.calories == 480

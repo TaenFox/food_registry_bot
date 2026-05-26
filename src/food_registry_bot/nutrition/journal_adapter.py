@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -12,6 +13,7 @@ from food_registry_bot.nutrition.contract import (
     NutritionEstimationRequest,
     NutritionUnit,
 )
+from food_registry_bot.nutrition_label import NutritionLabelData
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,7 @@ class NutritionJournalItemRef:
     name: str
     quantity: int | None
     unit: str | None
+    nutrition_label: NutritionLabelData | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,7 @@ def _build_prepared_request(item_refs: Iterable[NutritionJournalItemRef]) -> Pre
                     name=item_ref.name,
                     quantity=item_ref.quantity,
                     unit=item_ref.unit,
+                    nutrition_label=item_ref.nutrition_label,
                 )
                 for item_ref in collected_refs
             ]
@@ -110,6 +114,7 @@ def prepare_nutrition_request_from_extracted_payload(
                     name=item.name,
                     quantity=quantity,
                     unit=unit,
+                    nutrition_label=item.nutrition_label,
                 )
             )
 
@@ -123,8 +128,17 @@ def prepare_nutrition_request_from_entries(entries: Iterable[Entry]) -> Prepared
         if not _is_supported_food_item(entry_type=entry.entry_type):
             continue
 
+        extracted_payload = _parse_entry_extraction_payload(entry.extraction_raw_payload)
+        extracted_entry = _resolve_matching_extracted_entry(entry=entry, payload=extracted_payload)
+        extracted_items = extracted_entry.items if extracted_entry is not None else []
+
         for item in sorted(entry.items, key=lambda current: current.position):
             quantity, unit = _sanitize_quantity_unit(quantity=item.quantity, unit=item.unit)
+            extracted_item = (
+                extracted_items[item.position]
+                if 0 <= item.position < len(extracted_items)
+                else None
+            )
             item_refs.append(
                 NutritionJournalItemRef(
                     client_item_id=f"entry-{entry.id}:item-{item.position}",
@@ -133,6 +147,7 @@ def prepare_nutrition_request_from_entries(entries: Iterable[Entry]) -> Prepared
                     name=item.name,
                     quantity=quantity,
                     unit=unit,
+                    nutrition_label=extracted_item.nutrition_label if extracted_item is not None else None,
                 )
             )
 
@@ -159,3 +174,52 @@ def resolve_nutrition_estimates(
         )
         for item_ref in prepared_request.item_refs
     ]
+
+
+def _parse_entry_extraction_payload(raw_payload: str | None) -> ExtractedJournalPayload | None:
+    if raw_payload is None or not raw_payload.strip():
+        return None
+
+    try:
+        return ExtractedJournalPayload.model_validate_json(raw_payload)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def _resolve_matching_extracted_entry(
+    *,
+    entry: Entry,
+    payload: ExtractedJournalPayload | None,
+):
+    if payload is None:
+        return None
+
+    persisted_items = sorted(entry.items, key=lambda current: current.position)
+    for extracted_entry in payload.entries:
+        if extracted_entry.type is not entry.entry_type:
+            continue
+        if len(extracted_entry.items) != len(persisted_items):
+            continue
+
+        matches_all_items = True
+        for persisted_item, extracted_item in zip(persisted_items, extracted_entry.items):
+            quantity, unit = _sanitize_quantity_unit(
+                quantity=extracted_item.quantity,
+                unit=extracted_item.unit,
+            )
+            persisted_quantity, persisted_unit = _sanitize_quantity_unit(
+                quantity=persisted_item.quantity,
+                unit=persisted_item.unit,
+            )
+            if (
+                extracted_item.name != persisted_item.name
+                or quantity != persisted_quantity
+                or unit != persisted_unit
+            ):
+                matches_all_items = False
+                break
+
+        if matches_all_items:
+            return extracted_entry
+
+    return None
