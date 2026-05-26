@@ -4,6 +4,7 @@ import asyncio
 from contextlib import suppress
 import logging
 import html
+import json
 from io import BytesIO
 from pathlib import Path
 import tempfile
@@ -3054,6 +3055,10 @@ async def handle_message(
                 occurred_at_values: list[datetime] = []
                 for extracted_entry in extraction_result.payload.entries:
                     occurred_at = extracted_entry.occurred_at or datetime.now(timezone.utc)
+                    entry_extraction_raw_payload = json.dumps(
+                        {"entries": [extracted_entry.model_dump(mode="json")]},
+                        ensure_ascii=False,
+                    )
                     saved_entry = EntryRepository(session).create(
                         user_id=user_id,
                         entry_type=extracted_entry.type,
@@ -3061,7 +3066,7 @@ async def handle_message(
                         source_text=extraction_request.text if extracted_entry.type is EntryType.WORKOUT else None,
                         extraction_provider=extraction_result.extraction_provider,
                         extraction_model=extraction_result.extraction_model,
-                        extraction_raw_payload=extraction_result.raw_payload,
+                        extraction_raw_payload=entry_extraction_raw_payload,
                         items=[
                             EntryItemCreate(
                                 name=item.name,

@@ -67,6 +67,27 @@ def test_structured_payload_service_normalizes_water_alias_name_inside_water_ent
     assert result.payload.entries[0].items[0].unit == "ml"
 
 
+def test_structured_payload_service_parses_food_nutrition_label() -> None:
+    service = StructuredPayloadExtractionService()
+
+    result = service.extract(
+        JournalExtractionRequest(
+            text=(
+                '{"entries": ['
+                '{"type": "food", "items": [{"name": "батончик", "quantity": 7, "unit": "г", '
+                '"nutrition_label": {"basis": "unknown", "calories": 480, "protein": 15, "fat": 37, "carbs": 22}}]}'
+                "]}"
+            )
+        )
+    )
+
+    assert isinstance(result, ValidExtractionPayload)
+    label = result.payload.entries[0].items[0].nutrition_label
+    assert label is not None
+    assert label.basis.value == "unknown"
+    assert label.calories == 480
+
+
 def test_structured_payload_service_rejects_unit_without_quantity() -> None:
     service = StructuredPayloadExtractionService()
 
@@ -233,6 +254,24 @@ def test_llm_extraction_service_rejects_invalid_client_response() -> None:
     assert isinstance(result, InvalidExtractionPayload)
 
 
+def test_llm_extraction_service_drops_food_metrics_before_validation() -> None:
+    client = SimpleNamespace(
+        provider_name="openai_responses",
+        model_name="gpt-5-mini",
+        extract_journal_payload=lambda _request: (
+            '{"entries": [{"type": "food", "items": [{"name": "батончик", "quantity": 7, "unit": "g", '
+            '"metrics": [{"code": "kcal", "value": 33.6, "confidence": "high"}]}]}]}'
+        ),
+    )
+    service = LLMExtractionService(client=client)
+
+    result = service.extract(JournalExtractionRequest(text="батончик 7 г"))
+
+    assert isinstance(result, ValidExtractionPayload)
+    assert result.payload.entries[0].items[0].metrics == []
+    assert '"metrics"' not in result.raw_payload
+
+
 def test_llm_extraction_service_handles_client_errors() -> None:
     def raise_client_error(_request: JournalExtractionRequest) -> str:
         raise LLMExtractionClientError("boom")
@@ -352,6 +391,10 @@ def test_openai_client_builds_multimodal_input() -> None:
     assert "Return item names in Russian" in calls[0]["instructions"]
     assert "For water entries, always set item.name to exactly 'water'" in calls[0]["instructions"]
     assert "If water quantity is present, use unit 'ml'" in calls[0]["instructions"]
+    assert "Do not put nutrition metrics into food or water items" in calls[0]["instructions"]
+    assert "Nutrition metrics for food are computed later by the nutrition layer" in calls[0]["instructions"]
+    assert "item.nutrition_label" in calls[0]["instructions"]
+    assert "basis='unknown'" in calls[0]["instructions"]
     assert "save it as one item and do not decompose it into guessed ingredients" in calls[0]["instructions"]
     assert "prefer grams for food and milliliters for water or drinks" in calls[0]["instructions"]
     assert "for liquid food items like dipping sauces, milliliters are also allowed" in calls[0]["instructions"]

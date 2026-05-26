@@ -82,8 +82,10 @@ class LLMExtractionService:
                 message="LLM вернула пустой structured payload для записи журнала."
             )
 
+        normalized_raw_payload = _normalize_llm_raw_payload(raw_payload)
+
         try:
-            payload = ExtractedJournalPayload.model_validate_json(raw_payload)
+            payload = ExtractedJournalPayload.model_validate_json(normalized_raw_payload)
         except (ValidationError, json.JSONDecodeError):
             return InvalidExtractionPayload(
                 message=(
@@ -96,5 +98,43 @@ class LLMExtractionService:
             payload=payload,
             extraction_provider=self._client.provider_name,
             extraction_model=self._client.model_name,
-            raw_payload=raw_payload,
+            raw_payload=normalized_raw_payload,
         )
+
+
+def _normalize_llm_raw_payload(raw_payload: str) -> str:
+    try:
+        parsed_payload = json.loads(raw_payload)
+    except json.JSONDecodeError:
+        return raw_payload
+
+    if not isinstance(parsed_payload, dict):
+        return raw_payload
+
+    entries = parsed_payload.get("entries")
+    if not isinstance(entries, list):
+        return raw_payload
+
+    normalized = False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") == "workout":
+            continue
+
+        items = entry.get("items")
+        if not isinstance(items, list):
+            continue
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if "metrics" not in item:
+                continue
+            item.pop("metrics", None)
+            normalized = True
+
+    if not normalized:
+        return raw_payload
+
+    return json.dumps(parsed_payload, ensure_ascii=False)

@@ -5,6 +5,8 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from food_registry_bot.nutrition_label import NutritionLabelData
+
 
 class NutritionUnit(str, Enum):
     GRAM = "g"
@@ -32,6 +34,7 @@ class NutritionEstimationItemInput(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     quantity: Optional[int] = Field(default=None, gt=0)
     unit: Optional[NutritionUnit] = None
+    nutrition_label: Optional[NutritionLabelData] = None
 
     @field_validator("unit", mode="before")
     @classmethod
