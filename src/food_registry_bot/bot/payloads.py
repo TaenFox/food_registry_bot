@@ -21,6 +21,14 @@ class RecentEntryDeleteCallback(CallbackData, prefix="recent_delete"):
     count: int = 5
 
 
+class RecentEntryActionCallback(CallbackData, prefix="recent_action"):
+    action: str
+    entry_id: int = 0
+    item_position: int = 0
+    page: int = 0
+    count: int = 5
+
+
 class DataExchangeFileCallback(CallbackData, prefix="data_exchange"):
     action: str
     file_id: int = 0
@@ -49,6 +57,7 @@ __all__ = [
     "NormalizedEntryPayload",
     "NormalizedJournalPayload",
     "PeriodReportCallback",
+    "RecentEntryActionCallback",
     "RecentEntryDeleteCallback",
     "SummarySettingsCallback",
 ]

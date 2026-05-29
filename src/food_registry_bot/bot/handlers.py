@@ -33,6 +33,11 @@ from food_registry_bot.bot.keyboards import (
     build_period_report_keyboard,
     build_period_report_noticeable_keyboard,
     build_recent_entries_delete_keyboard,
+    build_recent_food_entry_keyboard,
+    build_recent_food_entry_delete_confirmation_keyboard,
+    build_recent_food_entry_selection_keyboard,
+    build_recent_food_item_delete_confirmation_keyboard,
+    build_recent_food_item_keyboard,
     build_recent_entry_confirmation_keyboard,
     build_recent_entry_selection_keyboard,
     build_summary_settings_keyboard,
@@ -48,6 +53,7 @@ from food_registry_bot.bot.payloads import (
     DataExchangeFileCallback,
     GoalMessageCallback,
     PeriodReportCallback,
+    RecentEntryActionCallback,
     RecentEntryDeleteCallback,
     SummarySettingsCallback,
 )
@@ -886,7 +892,7 @@ def build_recent_entries_response(
     page: int,
     count: int,
     nutrition_day_start_hour: int,
-    selection_mode: bool = False,
+    selection_prompt: str | None = None,
 ) -> str:
     if not entries:
         return "Пока записей нет. Отправь еду текстом, фото блюда или нажми кнопку воды."
@@ -903,8 +909,8 @@ def build_recent_entries_response(
             lines.extend(["", heading])
             current_heading = heading
         lines.append(build_recent_entry_display_line(index=index, entry=entry, timezone_name=timezone_name))
-    if selection_mode:
-        lines.extend(["", "Выбери запись, которую нужно удалить."])
+    if selection_prompt is not None:
+        lines.extend(["", selection_prompt])
     return "\n".join(lines)
 
 
@@ -916,6 +922,72 @@ def build_recent_entry_delete_confirmation(*, entry, timezone_name: str) -> str:
             f"{format_entry_timestamp(entry, timezone_name)} — {build_recent_entry_title(entry)}",
             "",
             "Это действие необратимо. Если запись понадобится снова, её нужно будет создать заново.",
+        ]
+    )
+
+
+def build_recent_entry_item_button_label(item) -> str:
+    return truncate_button_label(format_saved_item_line(item.name, item.quantity, item.unit).removeprefix("- "))
+
+
+def build_recent_food_entry_response(*, entry, timezone_name: str) -> str:
+    lines = [
+        "Запись еды:",
+        "",
+        f"{format_entry_timestamp(entry, timezone_name)} — {build_recent_entry_title(entry)}",
+        "",
+        "Блюда:",
+    ]
+    for index, item in enumerate(sorted(entry.items, key=lambda current: current.position), start=1):
+        lines.append(f"{index}. {format_saved_item_line(item.name, item.quantity, item.unit).removeprefix('- ')}")
+    lines.extend(["", "Выбери блюдо."])
+    return "\n".join(lines)
+
+
+def build_recent_food_entries_response(food_entries: list, *, timezone_name: str, page: int, count: int, nutrition_day_start_hour: int) -> str:
+    if not food_entries:
+        return f"На странице {page + 1} по {count} сейчас нет записей еды."
+    return build_recent_entries_response(
+        food_entries,
+        timezone_name=timezone_name,
+        page=page,
+        count=count,
+        nutrition_day_start_hour=nutrition_day_start_hour,
+        selection_prompt="Выбери запись еды.",
+    )
+
+
+def build_recent_food_item_response(*, entry, item, timezone_name: str) -> str:
+    lines = [
+        "Блюдо:",
+        "",
+        f"{format_entry_timestamp(entry, timezone_name)} — {format_saved_item_line(item.name, item.quantity, item.unit).removeprefix('- ')}",
+    ]
+    if supports_recent_item_portion_adjustment(item):
+        lines.extend(["", "Можно изменить порцию кнопками ниже."])
+    return "\n".join(lines)
+
+
+def build_recent_food_item_delete_confirmation(*, item) -> str:
+    return "\n".join(
+        [
+            "Удалить это блюдо из записи?",
+            "",
+            format_saved_item_line(item.name, item.quantity, item.unit).removeprefix("- "),
+            "",
+            "Если это последнее блюдо в записи, удалится вся запись.",
+        ]
+    )
+
+
+def build_recent_entry_delete_confirmation_for_food_entry(*, entry, timezone_name: str) -> str:
+    return "\n".join(
+        [
+            "Удалить эту запись целиком?",
+            "",
+            f"{format_entry_timestamp(entry, timezone_name)} — {build_recent_entry_title(entry)}",
+            "",
+            "Удалятся все блюда внутри записи.",
         ]
     )
 
@@ -1520,6 +1592,122 @@ def resolve_recent_entry_for_callback(
     return entry_repository.get_by_id_for_user(entry_id=entry_id, user_id=user_id)
 
 
+def resolve_recent_entry_item(*, entry, item_position: int):
+    for item in entry.items:
+        if item.position == item_position:
+            return item
+    return None
+
+
+def delete_recent_entry_item(*, session: Session, entry_repository: EntryRepository, entry, item) -> bool:
+    if len(entry.items) <= 1:
+        entry_repository.delete(entry)
+        return False
+    session.delete(item)
+    session.flush()
+    session.expire(entry, ["items"])
+    return True
+
+
+def supports_recent_item_portion_adjustment(item) -> bool:
+    normalized_unit = item.unit.strip().lower() if item.unit is not None else None
+    return item.quantity is not None and normalized_unit in {"g", "ml"} and bool(item.metrics)
+
+
+def adjust_recent_entry_item_portion(*, selected_item, delta_quantity: int) -> bool:
+    if not supports_recent_item_portion_adjustment(selected_item):
+        return False
+    current_quantity = selected_item.quantity
+    if current_quantity is None:
+        return False
+    new_quantity = current_quantity + delta_quantity
+    if new_quantity <= 0:
+        return False
+    scale_ratio = new_quantity / current_quantity
+    selected_item.quantity = new_quantity
+    for metric in selected_item.metrics:
+        metric.value = round(metric.value * scale_ratio, 4)
+    return True
+
+
+def repeat_recent_entry_item(
+    *,
+    session: Session,
+    user_id: int,
+    item,
+) -> None:
+    saved_entry = EntryRepository(session).create(
+        user_id=user_id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime.now(timezone.utc),
+        items=[
+            EntryItemCreate(
+                name=item.name,
+                quantity=item.quantity,
+                unit=item.unit,
+                confidence=item.confidence,
+                source_type=item.source_type,
+            )
+        ],
+    )
+    if not item.metrics:
+        return
+    persisted_item = sorted(saved_entry.items, key=lambda current: current.position)[0]
+    EntryItemMetricRepository(session).upsert_metrics(
+        entry_item_id=persisted_item.id,
+        metric_values=[
+            EntryItemMetricValue(
+                code=metric.metric.code,
+                value=metric.value,
+                confidence=metric.confidence,
+            )
+            for metric in item.metrics
+            if metric.metric is not None
+        ],
+    )
+
+
+def repeat_recent_entry(
+    *,
+    session: Session,
+    user_id: int,
+    entry,
+) -> None:
+    saved_entry = EntryRepository(session).create(
+        user_id=user_id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime.now(timezone.utc),
+        items=[
+            EntryItemCreate(
+                name=item.name,
+                quantity=item.quantity,
+                unit=item.unit,
+                confidence=item.confidence,
+                source_type=item.source_type,
+            )
+            for item in sorted(entry.items, key=lambda current: current.position)
+        ],
+    )
+    persisted_items = sorted(saved_entry.items, key=lambda current: current.position)
+    metric_repository = EntryItemMetricRepository(session)
+    source_items = sorted(entry.items, key=lambda current: current.position)
+    for persisted_item, source_item in zip(persisted_items, source_items):
+        if not source_item.metrics:
+            continue
+        metric_repository.upsert_metrics(
+            entry_item_id=persisted_item.id,
+            metric_values=[
+                EntryItemMetricValue(
+                    code=metric.metric.code,
+                    value=metric.value,
+                    confidence=metric.confidence,
+                )
+                for metric in source_item.metrics
+                if metric.metric is not None
+            ],
+        )
+
+
 def load_recent_entries_page(
     *,
     entry_repository: EntryRepository,
@@ -2115,6 +2303,7 @@ async def handle_recent(
             count=recent_count,
             has_previous_page=has_previous_page,
             has_next_page=has_next_page,
+            has_food_entries=any(entry.entry_type is EntryType.FOOD for entry in entries),
         )
         if entries
         else build_main_keyboard()
@@ -2188,6 +2377,7 @@ async def handle_recent_delete_callback(
                         count=callback_data.count,
                         has_previous_page=has_previous_page,
                         has_next_page=has_next_page,
+                        has_food_entries=any(entry.entry_type is EntryType.FOOD for entry in recent_entries),
                     )
                     if recent_entries
                     else None
@@ -2204,7 +2394,7 @@ async def handle_recent_delete_callback(
                     page=page,
                     count=callback_data.count,
                     nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-                    selection_mode=True,
+                    selection_prompt="Выбери запись, которую нужно удалить.",
                 ),
                 reply_markup=(
                     build_recent_entry_selection_keyboard(
@@ -2271,12 +2461,388 @@ async def handle_recent_delete_callback(
                 count=callback_data.count,
                 has_previous_page=has_previous_page,
                 has_next_page=has_next_page,
+                has_food_entries=any(entry.entry_type is EntryType.FOOD for entry in updated_recent_entries),
             )
             if updated_recent_entries
             else None
         ),
     )
     await callback.answer("Запись удалена. Список уже обновлён.")
+
+
+@router.callback_query(RecentEntryActionCallback.filter())
+async def handle_recent_action_callback(
+    callback: CallbackQuery,
+    callback_data: RecentEntryActionCallback,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    telegram_user = callback.from_user
+    if telegram_user is None:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+    if callback.message is None:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    if callback_data.action == "close":
+        await safe_delete_message(callback.message)
+        await callback.answer()
+        return
+
+    with session_scope(session_factory) as session:
+        if not (
+            is_admin_user(telegram_user.id, admin_user_ids)
+            or UserAccessRepository(session).is_allowed(telegram_user.id)
+        ):
+            await callback.answer("Нет доступа к боту. Попроси администратора его выдать.", show_alert=True)
+            return
+
+        user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
+        if user is None:
+            user, _created = UserRepository(session).get_or_create(
+                telegram_user_id=telegram_user.id,
+                username=telegram_user.username,
+            )
+        summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user.id)
+        entry_repository = EntryRepository(session)
+        page, recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
+            entry_repository=entry_repository,
+            user_id=user.id,
+            page=callback_data.page,
+            page_size=callback_data.count,
+        )
+
+        if callback_data.action == "back_to_list":
+            await callback.message.edit_text(
+                build_recent_entries_response(
+                    recent_entries,
+                    timezone_name=user.timezone,
+                    page=page,
+                    count=callback_data.count,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                ),
+                reply_markup=(
+                    build_recent_entries_delete_keyboard(
+                        page=page,
+                        count=callback_data.count,
+                        has_previous_page=has_previous_page,
+                        has_next_page=has_next_page,
+                        has_food_entries=any(entry.entry_type is EntryType.FOOD for entry in recent_entries),
+                    )
+                    if recent_entries
+                    else None
+                ),
+            )
+            await callback.answer()
+            return
+
+        if callback_data.action == "open_food_entries":
+            food_entries = [entry for entry in recent_entries if entry.entry_type is EntryType.FOOD]
+            await callback.message.edit_text(
+                build_recent_food_entries_response(
+                    food_entries,
+                    timezone_name=user.timezone,
+                    page=page,
+                    count=callback_data.count,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                ),
+                reply_markup=(
+                    build_recent_food_entry_selection_keyboard(
+                        entry_buttons=[
+                            (build_recent_entry_button_label(entry, user.timezone), entry.id)
+                            for entry in food_entries
+                        ],
+                        page=page,
+                        count=callback_data.count,
+                        has_previous_page=has_previous_page,
+                        has_next_page=has_next_page,
+                    )
+                    if food_entries
+                    else build_recent_food_entry_selection_keyboard(
+                        entry_buttons=[],
+                        page=page,
+                        count=callback_data.count,
+                        has_previous_page=has_previous_page,
+                        has_next_page=has_next_page,
+                    )
+                ),
+            )
+            await callback.answer()
+            return
+
+        selected_entry = resolve_recent_entry_for_callback(
+            entry_repository=entry_repository,
+            user_id=user.id,
+            entry_id=callback_data.entry_id,
+        )
+        if selected_entry is None or selected_entry.entry_type is not EntryType.FOOD:
+            await callback.answer("Эта запись еды уже недоступна.", show_alert=True)
+            return
+
+        if callback_data.action == "open_entry":
+            await callback.message.edit_text(
+                build_recent_food_entry_response(entry=selected_entry, timezone_name=user.timezone),
+                reply_markup=build_recent_food_entry_keyboard(
+                    item_buttons=[
+                        (build_recent_entry_item_button_label(item), item.position)
+                        for item in sorted(selected_entry.items, key=lambda current: current.position)
+                    ],
+                    entry_id=selected_entry.id,
+                    page=page,
+                    count=callback_data.count,
+                ),
+            )
+            await callback.answer()
+            return
+
+        if callback_data.action == "repeat_entry":
+            repeat_recent_entry(
+                session=session,
+                user_id=user.id,
+                entry=selected_entry,
+            )
+            page, updated_recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
+                entry_repository=entry_repository,
+                user_id=user.id,
+                page=0,
+                page_size=callback_data.count,
+            )
+            await callback.message.edit_text(
+                build_recent_entries_response(
+                    updated_recent_entries,
+                    timezone_name=user.timezone,
+                    page=page,
+                    count=callback_data.count,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                ),
+                reply_markup=build_recent_entries_delete_keyboard(
+                    page=page,
+                    count=callback_data.count,
+                    has_previous_page=has_previous_page,
+                    has_next_page=has_next_page,
+                    has_food_entries=any(entry.entry_type is EntryType.FOOD for entry in updated_recent_entries),
+                ),
+            )
+            await callback.answer("Запись сохранена как новый приём пищи.")
+            return
+
+        if callback_data.action == "delete_entry":
+            await callback.message.edit_text(
+                build_recent_entry_delete_confirmation_for_food_entry(
+                    entry=selected_entry,
+                    timezone_name=user.timezone,
+                ),
+                reply_markup=build_recent_food_entry_delete_confirmation_keyboard(
+                    entry_id=selected_entry.id,
+                    page=page,
+                    count=callback_data.count,
+                ),
+            )
+            await callback.answer()
+            return
+
+        if callback_data.action == "confirm_delete_entry":
+            entry_repository.delete(selected_entry)
+            page, updated_recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
+                entry_repository=entry_repository,
+                user_id=user.id,
+                page=page,
+                page_size=callback_data.count,
+            )
+            await callback.message.edit_text(
+                build_recent_entries_response(
+                    updated_recent_entries,
+                    timezone_name=user.timezone,
+                    page=page,
+                    count=callback_data.count,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                ),
+                reply_markup=(
+                    build_recent_entries_delete_keyboard(
+                        page=page,
+                        count=callback_data.count,
+                        has_previous_page=has_previous_page,
+                        has_next_page=has_next_page,
+                        has_food_entries=any(entry.entry_type is EntryType.FOOD for entry in updated_recent_entries),
+                    )
+                    if updated_recent_entries
+                    else None
+                ),
+            )
+            await callback.answer("Запись удалена. Список уже обновлён.")
+            return
+
+        selected_item = resolve_recent_entry_item(entry=selected_entry, item_position=callback_data.item_position)
+        if selected_item is None:
+            await callback.answer("Это блюдо уже недоступно.", show_alert=True)
+            return
+
+        if callback_data.action == "delete_item":
+            await callback.message.edit_text(
+                build_recent_food_item_delete_confirmation(item=selected_item),
+                reply_markup=build_recent_food_item_delete_confirmation_keyboard(
+                    entry_id=selected_entry.id,
+                    item_position=selected_item.position,
+                    page=page,
+                    count=callback_data.count,
+                ),
+            )
+            await callback.answer()
+            return
+
+        if callback_data.action == "repeat_item":
+            repeat_recent_entry_item(
+                session=session,
+                user_id=user.id,
+                item=selected_item,
+            )
+            page, updated_recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
+                entry_repository=entry_repository,
+                user_id=user.id,
+                page=0,
+                page_size=callback_data.count,
+            )
+            await callback.message.edit_text(
+                build_recent_entries_response(
+                    updated_recent_entries,
+                    timezone_name=user.timezone,
+                    page=page,
+                    count=callback_data.count,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                ),
+                reply_markup=build_recent_entries_delete_keyboard(
+                    page=page,
+                    count=callback_data.count,
+                    has_previous_page=has_previous_page,
+                    has_next_page=has_next_page,
+                    has_food_entries=any(entry.entry_type is EntryType.FOOD for entry in updated_recent_entries),
+                ),
+            )
+            await callback.answer("Блюдо сохранено как новая запись.")
+            return
+
+        if callback_data.action in {"decrease_portion", "increase_portion"}:
+            delta_quantity = -10 if callback_data.action == "decrease_portion" else 10
+            if not supports_recent_item_portion_adjustment(selected_item):
+                await callback.answer("Для этого блюда изменение порции пока недоступно.", show_alert=True)
+                return
+            if not adjust_recent_entry_item_portion(selected_item=selected_item, delta_quantity=delta_quantity):
+                await callback.answer("Порцию нельзя уменьшить дальше.", show_alert=True)
+                return
+            session.flush()
+            session.expire(selected_entry, ["items"])
+            updated_entry = resolve_recent_entry_for_callback(
+                entry_repository=entry_repository,
+                user_id=user.id,
+                entry_id=selected_entry.id,
+            )
+            if updated_entry is None:
+                await callback.answer("Запись уже недоступна.", show_alert=True)
+                return
+            updated_item = resolve_recent_entry_item(entry=updated_entry, item_position=selected_item.position)
+            if updated_item is None:
+                await callback.answer("Это блюдо уже недоступно.", show_alert=True)
+                return
+            await callback.message.edit_text(
+                build_recent_food_item_response(
+                    entry=updated_entry,
+                    item=updated_item,
+                    timezone_name=user.timezone,
+                ),
+                reply_markup=build_recent_food_item_keyboard(
+                    entry_id=updated_entry.id,
+                    item_position=updated_item.position,
+                    unit=updated_item.unit,
+                    can_adjust_portion=supports_recent_item_portion_adjustment(updated_item),
+                    page=page,
+                    count=callback_data.count,
+                ),
+            )
+            await callback.answer("Порция обновлена.")
+            return
+
+        if callback_data.action == "confirm_delete_item":
+            entry_survived = delete_recent_entry_item(
+                session=session,
+                entry_repository=entry_repository,
+                entry=selected_entry,
+                item=selected_item,
+            )
+            page, updated_recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
+                entry_repository=entry_repository,
+                user_id=user.id,
+                page=page,
+                page_size=callback_data.count,
+            )
+            if entry_survived:
+                updated_entry = resolve_recent_entry_for_callback(
+                    entry_repository=entry_repository,
+                    user_id=user.id,
+                    entry_id=selected_entry.id,
+                )
+                if updated_entry is None:
+                    await callback.answer("Запись уже недоступна.", show_alert=True)
+                    return
+                await callback.message.edit_text(
+                    build_recent_food_entry_response(entry=updated_entry, timezone_name=user.timezone),
+                    reply_markup=build_recent_food_entry_keyboard(
+                        item_buttons=[
+                            (build_recent_entry_item_button_label(item), item.position)
+                            for item in sorted(updated_entry.items, key=lambda current: current.position)
+                        ],
+                        entry_id=updated_entry.id,
+                        page=page,
+                        count=callback_data.count,
+                    ),
+                )
+                await callback.answer("Блюдо удалено. Запись обновлена.")
+                return
+
+            updated_food_entries = [entry for entry in updated_recent_entries if entry.entry_type is EntryType.FOOD]
+            await callback.message.edit_text(
+                build_recent_food_entries_response(
+                    updated_food_entries,
+                    timezone_name=user.timezone,
+                    page=page,
+                    count=callback_data.count,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                ),
+                reply_markup=build_recent_food_entry_selection_keyboard(
+                    entry_buttons=[
+                        (build_recent_entry_button_label(entry, user.timezone), entry.id)
+                        for entry in updated_food_entries
+                    ],
+                    page=page,
+                    count=callback_data.count,
+                    has_previous_page=has_previous_page,
+                    has_next_page=has_next_page,
+                ),
+            )
+            await callback.answer("Блюдо удалено. Если это была единственная позиция, запись тоже удалена.")
+            return
+
+        if callback_data.action != "open_item":
+            await callback.answer("Неизвестное действие.", show_alert=True)
+            return
+
+        await callback.message.edit_text(
+            build_recent_food_item_response(
+                entry=selected_entry,
+                item=selected_item,
+                timezone_name=user.timezone,
+            ),
+            reply_markup=build_recent_food_item_keyboard(
+                entry_id=selected_entry.id,
+                item_position=selected_item.position,
+                unit=selected_item.unit,
+                can_adjust_portion=supports_recent_item_portion_adjustment(selected_item),
+                page=page,
+                count=callback_data.count,
+            ),
+        )
+        await callback.answer()
+        return
+
 
 
 @router.message(Command("settings"))
