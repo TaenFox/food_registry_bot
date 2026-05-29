@@ -143,14 +143,6 @@ def build_recent_entries_delete_keyboard(
     )
     if navigation_row:
         rows.append(navigation_row)
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="Выбрать для удаления",
-                callback_data=RecentEntryDeleteCallback(action="open", page=page, count=count).pack(),
-            )
-        ]
-    )
     if has_food_entries:
         rows.append(
             [
@@ -300,6 +292,28 @@ def build_recent_food_entry_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
+                text="Повторить запись целиком",
+                callback_data=RecentEntryActionCallback(
+                    action="repeat_entry",
+                    entry_id=entry_id,
+                    page=page,
+                    count=count,
+                ).pack(),
+            ),
+            InlineKeyboardButton(
+                text="Удалить запись",
+                callback_data=RecentEntryActionCallback(
+                    action="delete_entry",
+                    entry_id=entry_id,
+                    page=page,
+                    count=count,
+                ).pack(),
+            ),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
                 text="Назад к записям еды",
                 callback_data=RecentEntryActionCallback(
                     action="open_food_entries",
@@ -421,6 +435,39 @@ def build_recent_food_item_delete_confirmation_keyboard(
                         action="open_item",
                         entry_id=entry_id,
                         item_position=item_position,
+                        page=page,
+                        count=count,
+                    ).pack(),
+                ),
+            ],
+            _build_close_row(RecentEntryActionCallback(action="close", page=page, count=count).pack()),
+        ]
+    )
+
+
+def build_recent_food_entry_delete_confirmation_keyboard(
+    *,
+    entry_id: int,
+    page: int,
+    count: int,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Подтвердить",
+                    callback_data=RecentEntryActionCallback(
+                        action="confirm_delete_entry",
+                        entry_id=entry_id,
+                        page=page,
+                        count=count,
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="Отмена",
+                    callback_data=RecentEntryActionCallback(
+                        action="open_entry",
+                        entry_id=entry_id,
                         page=page,
                         count=count,
                     ).pack(),
