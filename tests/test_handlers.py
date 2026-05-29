@@ -1634,9 +1634,7 @@ async def test_recent_action_open_item_shows_food_item_screen() -> None:
     assert callback.message.edit_text.await_args.args == (
         "Блюдо:\n"
         "\n"
-        "13:00 — рис (150 г)\n"
-        "\n"
-        "Экран действий для блюда будет расширен на следующих этапах.",
+        "13:00 — рис (150 г)",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert flatten_inline_button_texts(reply_markup) == [
@@ -1938,6 +1936,141 @@ async def test_recent_action_repeat_item_without_metrics_creates_entry_without_m
     with session_factory() as session:
         assert session.query(Entry).count() == 2
         assert session.query(EntryItemMetric).count() == 0
+
+
+async def test_recent_action_open_item_without_supported_portion_hides_portion_buttons() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_item_nopotion_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="recent_item_nopotion_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        entry = Entry(user_id=user.id, entry_type=EntryType.FOOD, source_text="обед", occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc))
+        session.add(entry)
+        session.flush()
+        item = EntryItem(entry_id=entry.id, position=0, name="суп", quantity=1, unit="шт")
+        session.add(item)
+        session.flush()
+        session.add(EntryItemMetric(entry_item_id=item.id, metric_id=1, value=120.0, confidence="medium"))
+        session.commit()
+        entry_id = entry.id
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_item_nopotion_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_action_callback(
+        callback,
+        RecentEntryActionCallback(action="open_item", entry_id=entry_id, item_position=0, page=0, count=5),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert flatten_inline_button_texts(callback.message.edit_text.await_args.kwargs["reply_markup"]) == [
+        "Удалить блюдо",
+        "Повторить сейчас",
+        "Назад к записи",
+        "Закрыть",
+    ]
+
+
+async def test_recent_action_increase_portion_updates_quantity_and_metrics() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_item_increase_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="recent_item_increase_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        entry = Entry(user_id=user.id, entry_type=EntryType.FOOD, source_text="обед", occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc))
+        session.add(entry)
+        session.flush()
+        item = EntryItem(entry_id=entry.id, position=0, name="рис", quantity=150, unit="g")
+        session.add(item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=item.id, metric_id=1, value=200.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=2, value=4.5, confidence="high"),
+            ]
+        )
+        session.commit()
+        entry_id = entry.id
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_item_increase_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_action_callback(
+        callback,
+        RecentEntryActionCallback(action="increase_portion", entry_id=entry_id, item_position=0, page=0, count=5),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        updated_item = session.query(EntryItem).filter_by(entry_id=entry_id, position=0).one()
+        updated_metrics = session.query(EntryItemMetric).filter_by(entry_item_id=updated_item.id).order_by(EntryItemMetric.metric_id.asc()).all()
+        assert updated_item.quantity == 160
+        assert [(metric.metric_id, metric.value) for metric in updated_metrics] == [
+            (1, 213.3333),
+            (2, 4.8),
+        ]
+
+    assert callback.message.edit_text.await_args.args == (
+        "Блюдо:\n"
+        "\n"
+        "13:00 — рис (160 г)\n"
+        "\n"
+        "Можно изменить порцию кнопками ниже.",
+    )
+    callback.answer.assert_awaited_once_with("Порция обновлена.")
+
+
+async def test_recent_action_decrease_portion_blocks_non_positive_result() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_item_decrease_limit_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="recent_item_decrease_limit_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        entry = Entry(user_id=user.id, entry_type=EntryType.FOOD, source_text="обед", occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc))
+        session.add(entry)
+        session.flush()
+        item = EntryItem(entry_id=entry.id, position=0, name="соус", quantity=10, unit="ml")
+        session.add(item)
+        session.flush()
+        session.add(EntryItemMetric(entry_item_id=item.id, metric_id=1, value=30.0, confidence="medium"))
+        session.commit()
+        entry_id = entry.id
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_item_decrease_limit_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_action_callback(
+        callback,
+        RecentEntryActionCallback(action="decrease_portion", entry_id=entry_id, item_position=0, page=0, count=5),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        unchanged_item = session.query(EntryItem).filter_by(entry_id=entry_id, position=0).one()
+        unchanged_metric = session.query(EntryItemMetric).filter_by(entry_item_id=unchanged_item.id).one()
+        assert unchanged_item.quantity == 10
+        assert unchanged_metric.value == 30.0
+
+    callback.message.edit_text.assert_not_awaited()
+    callback.answer.assert_awaited_once_with("Порцию нельзя уменьшить дальше.", show_alert=True)
 
 
 async def test_recent_list_callback_opens_second_page() -> None:

@@ -317,11 +317,12 @@ def build_recent_food_item_keyboard(
     *,
     entry_id: int,
     item_position: int,
+    unit: str | None,
+    can_adjust_portion: bool,
     page: int,
     count: int,
 ) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    rows = [
             [
                 InlineKeyboardButton(
                     text="Удалить блюдо",
@@ -346,6 +347,37 @@ def build_recent_food_item_keyboard(
                     ).pack(),
                 )
             ],
+    ]
+    normalized_unit = unit.strip().lower() if unit is not None else None
+    if can_adjust_portion and normalized_unit in {"g", "ml"}:
+        decrement_label = "-10 г" if normalized_unit == "g" else "-10 мл"
+        increment_label = "+10 г" if normalized_unit == "g" else "+10 мл"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=decrement_label,
+                    callback_data=RecentEntryActionCallback(
+                        action="decrease_portion",
+                        entry_id=entry_id,
+                        item_position=item_position,
+                        page=page,
+                        count=count,
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text=increment_label,
+                    callback_data=RecentEntryActionCallback(
+                        action="increase_portion",
+                        entry_id=entry_id,
+                        item_position=item_position,
+                        page=page,
+                        count=count,
+                    ).pack(),
+                ),
+            ]
+        )
+    rows.extend(
+        [
             [
                 InlineKeyboardButton(
                     text="Назад к записи",
@@ -360,6 +392,7 @@ def build_recent_food_item_keyboard(
             _build_close_row(RecentEntryActionCallback(action="close", page=page, count=count).pack()),
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_recent_food_item_delete_confirmation_keyboard(

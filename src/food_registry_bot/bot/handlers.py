@@ -957,15 +957,14 @@ def build_recent_food_entries_response(food_entries: list, *, timezone_name: str
 
 
 def build_recent_food_item_response(*, entry, item, timezone_name: str) -> str:
-    return "\n".join(
-        [
-            "Блюдо:",
-            "",
-            f"{format_entry_timestamp(entry, timezone_name)} — {format_saved_item_line(item.name, item.quantity, item.unit).removeprefix('- ')}",
-            "",
-            "Экран действий для блюда будет расширен на следующих этапах.",
-        ]
-    )
+    lines = [
+        "Блюдо:",
+        "",
+        f"{format_entry_timestamp(entry, timezone_name)} — {format_saved_item_line(item.name, item.quantity, item.unit).removeprefix('- ')}",
+    ]
+    if supports_recent_item_portion_adjustment(item):
+        lines.extend(["", "Можно изменить порцию кнопками ниже."])
+    return "\n".join(lines)
 
 
 def build_recent_food_item_delete_confirmation(*, item) -> str:
@@ -1594,6 +1593,27 @@ def delete_recent_entry_item(*, session: Session, entry_repository: EntryReposit
     session.delete(item)
     session.flush()
     session.expire(entry, ["items"])
+    return True
+
+
+def supports_recent_item_portion_adjustment(item) -> bool:
+    normalized_unit = item.unit.strip().lower() if item.unit is not None else None
+    return item.quantity is not None and normalized_unit in {"g", "ml"} and bool(item.metrics)
+
+
+def adjust_recent_entry_item_portion(*, selected_item, delta_quantity: int) -> bool:
+    if not supports_recent_item_portion_adjustment(selected_item):
+        return False
+    current_quantity = selected_item.quantity
+    if current_quantity is None:
+        return False
+    new_quantity = current_quantity + delta_quantity
+    if new_quantity <= 0:
+        return False
+    scale_ratio = new_quantity / current_quantity
+    selected_item.quantity = new_quantity
+    for metric in selected_item.metrics:
+        metric.value = round(metric.value * scale_ratio, 4)
     return True
 
 
@@ -2570,6 +2590,46 @@ async def handle_recent_action_callback(
             await callback.answer("Блюдо сохранено как новая запись.")
             return
 
+        if callback_data.action in {"decrease_portion", "increase_portion"}:
+            delta_quantity = -10 if callback_data.action == "decrease_portion" else 10
+            if not supports_recent_item_portion_adjustment(selected_item):
+                await callback.answer("Для этого блюда изменение порции пока недоступно.", show_alert=True)
+                return
+            if not adjust_recent_entry_item_portion(selected_item=selected_item, delta_quantity=delta_quantity):
+                await callback.answer("Порцию нельзя уменьшить дальше.", show_alert=True)
+                return
+            session.flush()
+            session.expire(selected_entry, ["items"])
+            updated_entry = resolve_recent_entry_for_callback(
+                entry_repository=entry_repository,
+                user_id=user.id,
+                entry_id=selected_entry.id,
+            )
+            if updated_entry is None:
+                await callback.answer("Запись уже недоступна.", show_alert=True)
+                return
+            updated_item = resolve_recent_entry_item(entry=updated_entry, item_position=selected_item.position)
+            if updated_item is None:
+                await callback.answer("Это блюдо уже недоступно.", show_alert=True)
+                return
+            await callback.message.edit_text(
+                build_recent_food_item_response(
+                    entry=updated_entry,
+                    item=updated_item,
+                    timezone_name=user.timezone,
+                ),
+                reply_markup=build_recent_food_item_keyboard(
+                    entry_id=updated_entry.id,
+                    item_position=updated_item.position,
+                    unit=updated_item.unit,
+                    can_adjust_portion=supports_recent_item_portion_adjustment(updated_item),
+                    page=page,
+                    count=callback_data.count,
+                ),
+            )
+            await callback.answer("Порция обновлена.")
+            return
+
         if callback_data.action == "confirm_delete_item":
             entry_survived = delete_recent_entry_item(
                 session=session,
@@ -2643,6 +2703,8 @@ async def handle_recent_action_callback(
             reply_markup=build_recent_food_item_keyboard(
                 entry_id=selected_entry.id,
                 item_position=selected_item.position,
+                unit=selected_item.unit,
+                can_adjust_portion=supports_recent_item_portion_adjustment(selected_item),
                 page=page,
                 count=callback_data.count,
             ),
