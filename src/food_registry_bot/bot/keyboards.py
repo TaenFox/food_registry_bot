@@ -316,11 +316,24 @@ def build_recent_food_entry_keyboard(
 def build_recent_food_item_keyboard(
     *,
     entry_id: int,
+    item_position: int,
     page: int,
     count: int,
 ) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Удалить блюдо",
+                    callback_data=RecentEntryActionCallback(
+                        action="delete_item",
+                        entry_id=entry_id,
+                        item_position=item_position,
+                        page=page,
+                        count=count,
+                    ).pack(),
+                )
+            ],
             [
                 InlineKeyboardButton(
                     text="Назад к записи",
@@ -331,6 +344,42 @@ def build_recent_food_item_keyboard(
                         count=count,
                     ).pack(),
                 )
+            ],
+            _build_close_row(RecentEntryActionCallback(action="close", page=page, count=count).pack()),
+        ]
+    )
+
+
+def build_recent_food_item_delete_confirmation_keyboard(
+    *,
+    entry_id: int,
+    item_position: int,
+    page: int,
+    count: int,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Подтвердить",
+                    callback_data=RecentEntryActionCallback(
+                        action="confirm_delete_item",
+                        entry_id=entry_id,
+                        item_position=item_position,
+                        page=page,
+                        count=count,
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="Отмена",
+                    callback_data=RecentEntryActionCallback(
+                        action="open_item",
+                        entry_id=entry_id,
+                        item_position=item_position,
+                        page=page,
+                        count=count,
+                    ).pack(),
+                ),
             ],
             _build_close_row(RecentEntryActionCallback(action="close", page=page, count=count).pack()),
         ]
