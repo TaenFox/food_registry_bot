@@ -1597,6 +1597,43 @@ def delete_recent_entry_item(*, session: Session, entry_repository: EntryReposit
     return True
 
 
+def repeat_recent_entry_item(
+    *,
+    session: Session,
+    user_id: int,
+    item,
+) -> None:
+    saved_entry = EntryRepository(session).create(
+        user_id=user_id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime.now(timezone.utc),
+        items=[
+            EntryItemCreate(
+                name=item.name,
+                quantity=item.quantity,
+                unit=item.unit,
+                confidence=item.confidence,
+                source_type=item.source_type,
+            )
+        ],
+    )
+    if not item.metrics:
+        return
+    persisted_item = sorted(saved_entry.items, key=lambda current: current.position)[0]
+    EntryItemMetricRepository(session).upsert_metrics(
+        entry_item_id=persisted_item.id,
+        metric_values=[
+            EntryItemMetricValue(
+                code=metric.metric.code,
+                value=metric.value,
+                confidence=metric.confidence,
+            )
+            for metric in item.metrics
+            if metric.metric is not None
+        ],
+    )
+
+
 def load_recent_entries_page(
     *,
     entry_repository: EntryRepository,
@@ -2500,6 +2537,37 @@ async def handle_recent_action_callback(
                 ),
             )
             await callback.answer()
+            return
+
+        if callback_data.action == "repeat_item":
+            repeat_recent_entry_item(
+                session=session,
+                user_id=user.id,
+                item=selected_item,
+            )
+            page, updated_recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
+                entry_repository=entry_repository,
+                user_id=user.id,
+                page=0,
+                page_size=callback_data.count,
+            )
+            await callback.message.edit_text(
+                build_recent_entries_response(
+                    updated_recent_entries,
+                    timezone_name=user.timezone,
+                    page=page,
+                    count=callback_data.count,
+                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+                ),
+                reply_markup=build_recent_entries_delete_keyboard(
+                    page=page,
+                    count=callback_data.count,
+                    has_previous_page=has_previous_page,
+                    has_next_page=has_next_page,
+                    has_food_entries=any(entry.entry_type is EntryType.FOOD for entry in updated_recent_entries),
+                ),
+            )
+            await callback.answer("Блюдо сохранено как новая запись.")
             return
 
         if callback_data.action == "confirm_delete_item":

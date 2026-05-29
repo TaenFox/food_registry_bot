@@ -336,6 +336,18 @@ def build_recent_food_item_keyboard(
             ],
             [
                 InlineKeyboardButton(
+                    text="Повторить сейчас",
+                    callback_data=RecentEntryActionCallback(
+                        action="repeat_item",
+                        entry_id=entry_id,
+                        item_position=item_position,
+                        page=page,
+                        count=count,
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="Назад к записи",
                     callback_data=RecentEntryActionCallback(
                         action="open_entry",
