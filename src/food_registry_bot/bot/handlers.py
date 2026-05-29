@@ -563,7 +563,14 @@ def filter_manageable_known_users(known_users: list, admin_user_ids: tuple[int, 
 def build_admin_user_button_label(known_user, *, is_admin: bool) -> str:
     username_part = f"@{known_user.username}" if known_user.username else str(known_user.telegram_user_id)
     status_part = "admin" if is_admin else ("on" if known_user.is_allowed else "off")
-    return truncate_button_label(f"{known_user.telegram_user_id} · {username_part} · {status_part}", max_length=40)
+    if is_admin:
+        category_part = AccountCategory.INTERNAL.value
+    else:
+        category_part = known_user.account_category
+    return truncate_button_label(
+        f"{known_user.telegram_user_id} · {username_part} · {status_part} · {category_part}",
+        max_length=40,
+    )
 
 
 def build_admin_users_page_response(known_users: list, *, page: int, page_size: int, admin_user_ids: tuple[int, ...]) -> str:
@@ -576,8 +583,9 @@ def build_admin_users_page_response(known_users: list, *, page: int, page_size: 
         is_admin = known_user.telegram_user_id in admin_user_ids
         status = "admin" if is_admin else ("доступ разрешён" if known_user.is_allowed else "доступ запрещён")
         profile_status = "профиль есть" if known_user.has_profile else "профиля нет"
+        category = AccountCategory.INTERNAL.value if is_admin else known_user.account_category
         lines.append(
-            f"- {known_user.telegram_user_id}{username_suffix} [{status}; {profile_status}]"
+            f"- {known_user.telegram_user_id}{username_suffix} [{status}; {category}; {profile_status}]"
         )
     lines.extend(["", "Выбери пользователя кнопкой ниже."])
     return "\n".join(lines)
@@ -587,12 +595,14 @@ def build_admin_user_actions_response(*, known_user, entry_count: int, is_admin:
     username_suffix = f"@{known_user.username}" if known_user.username else "—"
     access_status = "admin" if is_admin else ("разрешён" if known_user.is_allowed else "запрещён")
     profile_status = "есть" if known_user.has_profile else "нет"
+    account_category = AccountCategory.INTERNAL.value if is_admin else known_user.account_category
     return "\n".join(
         [
             "Пользователь:",
             f"- Telegram ID: {known_user.telegram_user_id}",
             f"- username: {username_suffix}",
             f"- доступ: {access_status}",
+            f"- категория аккаунта: {account_category}",
             f"- профиль: {profile_status}",
             f"- записей в журнале: {entry_count}",
         ]
@@ -1967,6 +1977,7 @@ async def handle_admin_panel_callback(
                     page=callback_data.page,
                     is_allowed=True,
                     is_admin=False,
+                    account_category=known_user.account_category,
                 ),
             )
             await callback.answer("Доступ разрешён.")
@@ -2001,9 +2012,54 @@ async def handle_admin_panel_callback(
                     page=callback_data.page,
                     is_allowed=False,
                     is_admin=False,
+                    account_category=known_user.account_category,
                 ),
             )
             await callback.answer("Доступ запрещён.")
+            return
+
+        if callback_data.action in {"set_internal_category", "set_external_category"}:
+            if is_admin_target:
+                await callback.answer("Для администратора это действие недоступно.", show_alert=True)
+                return
+            target_category = (
+                AccountCategory.INTERNAL
+                if callback_data.action == "set_internal_category"
+                else AccountCategory.EXTERNAL
+            )
+            updated_access = UserAccessRepository(session).set_account_category(
+                telegram_user_id=known_user.telegram_user_id,
+                username=known_user.username,
+                account_category=target_category,
+            )
+            known_user = find_known_user(
+                build_admin_user_directory(UserAccessRepository(session).list_known_users(), admin_user_ids),
+                telegram_user_id=callback_data.telegram_user_id,
+            )
+            entry_owner = UserRepository(session).get_by_telegram_user_id(callback_data.telegram_user_id)
+            entry_count = 0
+            if entry_owner is not None:
+                entry_count = len(EntryRepository(session).list_recent_for_user(user_id=entry_owner.id, limit=100000))
+            await safe_edit_message_text(
+                callback.message,
+                text=build_admin_user_actions_response(
+                    known_user=known_user,
+                    entry_count=entry_count,
+                    is_admin=False,
+                ),
+                reply_markup=build_admin_user_actions_keyboard(
+                    telegram_user_id=updated_access.telegram_user_id,
+                    page=callback_data.page,
+                    is_allowed=updated_access.is_allowed,
+                    is_admin=False,
+                    account_category=known_user.account_category,
+                ),
+            )
+            await callback.answer(
+                "Категория переключена на internal."
+                if target_category is AccountCategory.INTERNAL
+                else "Категория переключена на external."
+            )
             return
 
         entry_owner = UserRepository(session).get_by_telegram_user_id(callback_data.telegram_user_id)
@@ -2024,6 +2080,7 @@ async def handle_admin_panel_callback(
                     page=callback_data.page,
                     is_allowed=known_user.is_allowed,
                     is_admin=is_admin_target,
+                    account_category=known_user.account_category,
                 ),
             )
             await callback.answer()

@@ -334,7 +334,14 @@ def build_admin_user_list_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_admin_user_actions_keyboard(*, telegram_user_id: int, page: int, is_allowed: bool, is_admin: bool) -> InlineKeyboardMarkup:
+def build_admin_user_actions_keyboard(
+    *,
+    telegram_user_id: int,
+    page: int,
+    is_allowed: bool,
+    is_admin: bool,
+    account_category: str,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if not is_admin:
         access_button_text = "Запретить доступ" if is_allowed else "Разрешить доступ"
@@ -349,6 +356,26 @@ def build_admin_user_actions_keyboard(*, telegram_user_id: int, page: int, is_al
                         page=page,
                     ).pack(),
                 )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"Internal{' · текущая' if account_category == 'internal' else ''}",
+                    callback_data=AdminPanelCallback(
+                        action="set_internal_category",
+                        telegram_user_id=telegram_user_id,
+                        page=page,
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text=f"External{' · текущая' if account_category == 'external' else ''}",
+                    callback_data=AdminPanelCallback(
+                        action="set_external_category",
+                        telegram_user_id=telegram_user_id,
+                        page=page,
+                    ).pack(),
+                ),
             ]
         )
     rows.extend(

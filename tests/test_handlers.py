@@ -622,16 +622,16 @@ async def test_admin_panel_users_returns_first_page_with_buttons() -> None:
     callback.message.edit_text.assert_awaited_once()
     assert callback.message.edit_text.await_args.args == (
         "Пользователи (страница 1, по 10):\n"
-        f"- {ADMIN_ID} [admin; профиля нет]\n"
-        "- 3000 @user_0 [доступ разрешён; профиля нет]\n"
-        "- 3001 @user_1 [доступ запрещён; профиля нет]\n"
-        "- 3002 @user_2 [доступ разрешён; профиля нет]\n"
-        "- 3003 @user_3 [доступ запрещён; профиля нет]\n"
-        "- 3004 @user_4 [доступ разрешён; профиля нет]\n"
-        "- 3005 @user_5 [доступ запрещён; профиля нет]\n"
-        "- 3006 @user_6 [доступ разрешён; профиля нет]\n"
-        "- 3007 @user_7 [доступ запрещён; профиля нет]\n"
-        "- 3008 @user_8 [доступ разрешён; профиля нет]\n"
+        f"- {ADMIN_ID} [admin; internal; профиля нет]\n"
+        "- 3000 @user_0 [доступ разрешён; unassigned; профиля нет]\n"
+        "- 3001 @user_1 [доступ запрещён; unassigned; профиля нет]\n"
+        "- 3002 @user_2 [доступ разрешён; unassigned; профиля нет]\n"
+        "- 3003 @user_3 [доступ запрещён; unassigned; профиля нет]\n"
+        "- 3004 @user_4 [доступ разрешён; unassigned; профиля нет]\n"
+        "- 3005 @user_5 [доступ запрещён; unassigned; профиля нет]\n"
+        "- 3006 @user_6 [доступ разрешён; unassigned; профиля нет]\n"
+        "- 3007 @user_7 [доступ запрещён; unassigned; профиля нет]\n"
+        "- 3008 @user_8 [доступ разрешён; unassigned; профиля нет]\n"
         "\n"
         "Выбери пользователя кнопкой ниже.",
     )
@@ -670,9 +670,9 @@ async def test_admin_panel_users_returns_second_page() -> None:
 
     assert callback.message.edit_text.await_args.args == (
         "Пользователи (страница 2, по 10):\n"
-        "- 4009 @user_9 [доступ разрешён; профиля нет]\n"
-        "- 4010 @user_10 [доступ разрешён; профиля нет]\n"
-        "- 4011 @user_11 [доступ разрешён; профиля нет]\n"
+        "- 4009 @user_9 [доступ разрешён; unassigned; профиля нет]\n"
+        "- 4010 @user_10 [доступ разрешён; unassigned; профиля нет]\n"
+        "- 4011 @user_11 [доступ разрешён; unassigned; профиля нет]\n"
         "\n"
         "Выбери пользователя кнопкой ниже.",
     )
@@ -710,8 +710,8 @@ async def test_admin_panel_users_shows_new_denied_user_after_first_contact() -> 
     callback.message.edit_text.assert_awaited_once()
     assert callback.message.edit_text.await_args.args == (
         "Пользователи (страница 1, по 10):\n"
-        f"- {ADMIN_ID} [admin; профиля нет]\n"
-        f"- {LARGE_DENIED_USER_ID} @new_user [доступ запрещён; профиля нет]\n"
+        f"- {ADMIN_ID} [admin; internal; профиля нет]\n"
+        f"- {LARGE_DENIED_USER_ID} @new_user [доступ запрещён; unassigned; профиля нет]\n"
         "\n"
         "Выбери пользователя кнопкой ниже.",
     )
@@ -768,11 +768,14 @@ async def test_admin_panel_open_user_and_toggle_access() -> None:
         f"- Telegram ID: {ALLOWED_USER_ID}\n"
         "- username: @allowed_user\n"
         "- доступ: запрещён\n"
+        "- категория аккаунта: unassigned\n"
         "- профиль: нет\n"
         "- записей в журнале: 0",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Разрешить доступ"
+    assert reply_markup.inline_keyboard[1][0].text == "Internal"
+    assert reply_markup.inline_keyboard[1][1].text == "External"
 
     callback.message.edit_text.reset_mock()
     callback.answer.reset_mock()
@@ -789,10 +792,12 @@ async def test_admin_panel_open_user_and_toggle_access() -> None:
     with session_factory() as session:
         access = session.query(UserAccess).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
         assert access.is_allowed is True
+        assert access.account_category == AccountCategory.INTERNAL
 
-    assert callback.message.edit_text.await_args.args[0].endswith("- записей в журнале: 0")
+    assert "- категория аккаунта: internal\n" in callback.message.edit_text.await_args.args[0]
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Запретить доступ"
+    assert reply_markup.inline_keyboard[1][0].text == "Internal · текущая"
     callback.answer.assert_awaited_once_with("Доступ разрешён.")
 
 
@@ -818,11 +823,51 @@ async def test_admin_panel_open_admin_user_without_access_toggle() -> None:
         f"- Telegram ID: {ADMIN_ID}\n"
         "- username: —\n"
         "- доступ: admin\n"
+        "- категория аккаунта: internal\n"
         "- профиль: нет\n"
         "- записей в журнале: 0",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Удалить данные пользователя"
+
+
+async def test_admin_panel_can_switch_user_to_external_category() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        session.add(
+            UserAccess(
+                telegram_user_id=ALLOWED_USER_ID,
+                username="allowed_user",
+                is_allowed=True,
+                account_category=AccountCategory.INTERNAL,
+            )
+        )
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="set_external_category", telegram_user_id=ALLOWED_USER_ID, page=0),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
+    )
+
+    with session_factory() as session:
+        access = session.query(UserAccess).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
+        assert access.is_allowed is True
+        assert access.account_category == AccountCategory.EXTERNAL
+
+    assert "- категория аккаунта: external\n" in callback.message.edit_text.await_args.args[0]
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[1][1].text == "External · текущая"
+    callback.answer.assert_awaited_once_with("Категория переключена на external.")
 
 
 async def test_admin_panel_delete_entries_prompt_and_confirm() -> None:
