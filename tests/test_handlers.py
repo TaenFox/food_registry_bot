@@ -24,9 +24,8 @@ from food_registry_bot.bot.handlers import (
     handle_health,
     handle_message,
     handle_provider,
+    handle_provider_mode_callback,
     handle_provider_save_openai,
-    handle_provider_use_personal,
-    handle_provider_use_project,
     handle_period_report_callback,
     handle_recent,
     handle_recent_action_callback,
@@ -44,6 +43,7 @@ from food_registry_bot.bot.payloads import (
     DataExchangeFileCallback,
     GoalMessageCallback,
     PeriodReportCallback,
+    ProviderModeCallback,
     RecentEntryActionCallback,
     RecentEntryDeleteCallback,
     SummarySettingsCallback,
@@ -308,28 +308,42 @@ async def test_provider_save_openai_stores_encrypted_personal_key() -> None:
     message.answer.assert_awaited_once()
 
 
-async def test_provider_use_personal_switches_selection_mode() -> None:
+async def test_provider_mode_callback_switches_to_personal() -> None:
     session_factory = create_session_factory()
-    allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
+    with session_factory() as session:
+        session.add(
+            UserAccess(
+                telegram_user_id=ALLOWED_USER_ID,
+                username="allowed_user",
+                is_allowed=True,
+                account_category=AccountCategory.INTERNAL,
+            )
+        )
+        session.commit()
     settings = make_settings(personal_api_keys_secret="test-secret")
-    message = SimpleNamespace(
+    callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock()),
         answer=AsyncMock(),
     )
 
     await handle_provider_save_openai(
-        message,
+        SimpleNamespace(
+            from_user=callback.from_user,
+            answer=AsyncMock(),
+        ),
         SimpleNamespace(args="gpt-5-mini sk-test-key"),
         session_factory,
         settings=settings,
         admin_user_ids=(ADMIN_ID,),
         openai_key_validator=make_openai_validator_result(is_valid=True, status="valid"),
     )
-    message.answer.reset_mock()
 
-    await handle_provider_use_personal(
-        message,
+    await handle_provider_mode_callback(
+        callback,
+        ProviderModeCallback(action="use_personal"),
         session_factory,
+        settings=settings,
         admin_user_ids=(ADMIN_ID,),
     )
 
@@ -338,10 +352,10 @@ async def test_provider_use_personal_switches_selection_mode() -> None:
         profile = session.query(UserLLMProfile).filter_by(user_id=user.id).one()
 
     assert profile.selection_mode.value == "personal"
-    message.answer.assert_awaited_once()
+    callback.answer.assert_awaited_once_with("Переключил LLM-сценарии на персональные OpenAI-ключи.")
 
 
-async def test_provider_use_project_requires_internal_category() -> None:
+async def test_provider_mode_callback_rejects_project_toggle_for_external_user() -> None:
     session_factory = create_session_factory()
     with session_factory() as session:
         session.add(
@@ -353,24 +367,38 @@ async def test_provider_use_project_requires_internal_category() -> None:
             )
         )
         session.commit()
-    message = SimpleNamespace(
+    callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock()),
         answer=AsyncMock(),
     )
 
-    await handle_provider_use_project(
-        message,
+    await handle_provider_mode_callback(
+        callback,
+        ProviderModeCallback(action="use_project"),
         session_factory,
+        settings=make_settings(openai_api_key="project-key"),
         admin_user_ids=(ADMIN_ID,),
     )
 
-    message.answer.assert_awaited_once()
-    assert "только аккаунтам категории internal" in message.answer.await_args.args[0]
+    callback.answer.assert_awaited_once_with(
+        "Переключение режима доступно только internal-аккаунтам.",
+        show_alert=True,
+    )
 
 
 async def test_provider_command_shows_saved_connections() -> None:
     session_factory = create_session_factory()
-    allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
+    with session_factory() as session:
+        session.add(
+            UserAccess(
+                telegram_user_id=ALLOWED_USER_ID,
+                username="allowed_user",
+                is_allowed=True,
+                account_category=AccountCategory.INTERNAL,
+            )
+        )
+        session.commit()
     settings = make_settings(
         openai_api_key="project-key",
         personal_api_keys_secret="test-secret",
@@ -402,8 +430,10 @@ async def test_provider_command_shows_saved_connections() -> None:
     assert "openai/gpt-5-mini" in provider_text
     assert "&lt;MODEL&gt;" in provider_text
     assert "&lt;API_KEY&gt;" in provider_text
-    assert "сохранить персональный OpenAI-ключ" in provider_text
-    assert "переключить LLM-сценарии на персональные OpenAI-ключи" in provider_text
+    assert "Обновить персональный ключ" in provider_text
+    assert "Режим можно переключить кнопкой ниже." in provider_text
+    reply_markup = message.answer.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "Переключить на персональный ключ"
 
 
 async def test_provider_save_openai_marks_invalid_key_as_unusable() -> None:
@@ -471,6 +501,78 @@ async def test_provider_command_escapes_validation_error_html() -> None:
 
     provider_text = message.answer.await_args.args[0]
     assert "Модель &lt;model&gt; недоступна для этого ключа." in provider_text
+
+
+async def test_provider_command_for_external_user_shows_close_only() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        session.add(
+            UserAccess(
+                telegram_user_id=ALLOWED_USER_ID,
+                username="allowed_user",
+                is_allowed=True,
+                account_category=AccountCategory.EXTERNAL,
+            )
+        )
+        session.commit()
+    settings = make_settings(personal_api_keys_secret="test-secret")
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_provider(
+        message,
+        session_factory,
+        settings=settings,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    provider_text = message.answer.await_args.args[0]
+    assert "Режим можно переключить кнопкой ниже." not in provider_text
+    reply_markup = message.answer.await_args.kwargs["reply_markup"]
+    assert len(reply_markup.inline_keyboard) == 1
+
+
+async def test_external_user_gets_personal_provider_stub_for_conversation_message() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        session.add(
+            UserAccess(
+                telegram_user_id=ALLOWED_USER_ID,
+                username="allowed_user",
+                is_allowed=True,
+                account_category=AccountCategory.EXTERNAL,
+            )
+        )
+        session.commit()
+    settings = make_settings(
+        openai_api_key="project-key",
+        personal_api_keys_secret="test-secret",
+    )
+    message = SimpleNamespace(
+        text="что мне съесть на ужин?",
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        settings=settings,
+        admin_user_ids=(ADMIN_ID,),
+        message_routing_service=SimpleNamespace(
+            route=lambda *_args, **_kwargs: MessageRoutingDecision(
+                route="conversation",
+                reason="test_conversation_route",
+            )
+        ),
+    )
+
+    message.answer.assert_awaited_once()
+    response_text = message.answer.await_args.args[0]
+    assert "нужен персональный OpenAI-ключ" in response_text
+    assert "/provider_save_openai" in response_text
 
 
 async def test_admin_returns_system_overview_and_commands() -> None:

@@ -32,6 +32,7 @@ from food_registry_bot.bot.keyboards import (
     build_period_report_dynamics_keyboard,
     build_period_report_keyboard,
     build_period_report_noticeable_keyboard,
+    build_provider_mode_keyboard,
     build_recent_entries_delete_keyboard,
     build_recent_food_entry_keyboard,
     build_recent_food_entry_delete_confirmation_keyboard,
@@ -54,6 +55,7 @@ from food_registry_bot.bot.payloads import (
     DataExchangeFileCallback,
     GoalMessageCallback,
     PeriodReportCallback,
+    ProviderModeCallback,
     RecentEntryActionCallback,
     RecentEntryDeleteCallback,
     SummarySettingsCallback,
@@ -502,14 +504,10 @@ def build_provider_settings_response(
     personal_openai_enabled: bool,
     connections: list,
     admin_user_ids: tuple[int, ...],
+    can_toggle_mode: bool,
 ) -> str:
     escaped_model_placeholder = html.escape(LLM_MODEL_PLACEHOLDER)
     escaped_api_key_placeholder = html.escape(API_KEY_PLACEHOLDER)
-    command_lines = [
-        f"- /provider_save_openai {escaped_model_placeholder} {escaped_api_key_placeholder} — сохранить персональный OpenAI-ключ для модели",
-        "- /provider_use_personal — переключить LLM-сценарии на персональные OpenAI-ключи",
-        "- /provider_use_project — переключить LLM-сценарии на проектный OpenAI-ключ",
-    ]
     lines = ["LLM-провайдеры:"]
     lines.append(f"- категория аккаунта: {resolve_effective_account_category(telegram_user_id=telegram_user_id, access_account_category=account_category, admin_user_ids=admin_user_ids)}")
     lines.append(f"- режим выбора: {selection_mode}")
@@ -520,10 +518,11 @@ def build_provider_settings_response(
             [
                 "",
                 "Сохранённых персональных подключений пока нет.",
-                "Команды:",
-                *command_lines,
+                f"Чтобы подключить персональный ключ, используй: /provider_save_openai {escaped_model_placeholder} {escaped_api_key_placeholder}",
             ]
         )
+        if can_toggle_mode:
+            lines.extend(["", "Режим можно переключить кнопкой ниже."])
         return "\n".join(lines)
 
     lines.extend(["", "Сохранённые подключения:"])
@@ -540,11 +539,45 @@ def build_provider_settings_response(
     lines.extend(
         [
             "",
-            "Команды:",
-            *command_lines,
+            f"Обновить персональный ключ: /provider_save_openai {escaped_model_placeholder} {escaped_api_key_placeholder}",
         ]
     )
+    if can_toggle_mode:
+        lines.extend(["", "Режим можно переключить кнопкой ниже."])
     return "\n".join(lines)
+
+
+def resolve_account_category_for_provider(
+    *,
+    session: Session,
+    telegram_user_id: int,
+    admin_user_ids: tuple[int, ...],
+) -> AccountCategory:
+    if is_admin_user(telegram_user_id, admin_user_ids):
+        return AccountCategory.INTERNAL
+    return UserAccessRepository(session).get_account_category(telegram_user_id)
+
+
+def build_personal_provider_required_message() -> str:
+    escaped_model_placeholder = html.escape(LLM_MODEL_PLACEHOLDER)
+    escaped_api_key_placeholder = html.escape(API_KEY_PLACEHOLDER)
+    return (
+        "Для этого аккаунта нужен персональный OpenAI-ключ. "
+        f"Открой /provider и сохрани ключ командой /provider_save_openai {escaped_model_placeholder} {escaped_api_key_placeholder}."
+    )
+
+
+def should_show_personal_provider_required_stub(
+    *,
+    account_category: AccountCategory,
+    access,
+) -> bool:
+    return (
+        account_category is not AccountCategory.INTERNAL
+        and access is not None
+        and not access.is_available
+        and access.source == "personal"
+    )
 
 
 def build_admin_user_directory(known_users: list, admin_user_ids: tuple[int, ...]) -> list:
@@ -2476,21 +2509,21 @@ async def handle_provider(
         access = UserAccessRepository(session).get_by_telegram_user_id(telegram_user.id)
         profile, _created = UserLLMProfileRepository(session).get_or_create(user_id=user_id)
         connections = UserLLMConnectionRepository(session).list_views_for_user(user_id=user_id)
+        account_category = resolve_account_category_for_provider(
+            session=session,
+            telegram_user_id=telegram_user.id,
+            admin_user_ids=admin_user_ids,
+        )
 
     project_openai_enabled = bool(
         settings.enable_openai_provider
         and settings.openai_api_key
-        and (
-            is_admin_user(telegram_user.id, admin_user_ids)
-            or (
-                access is not None
-                and access.account_category is AccountCategory.INTERNAL
-            )
-        )
+        and account_category is AccountCategory.INTERNAL
     )
     personal_openai_enabled = bool(
         settings.enable_openai_provider and settings.personal_api_keys_secret
     )
+    can_toggle_mode = account_category is AccountCategory.INTERNAL
     await message.answer(
         build_provider_settings_response(
             telegram_user_id=telegram_user.id,
@@ -2502,8 +2535,12 @@ async def handle_provider(
             personal_openai_enabled=personal_openai_enabled,
             connections=connections,
             admin_user_ids=admin_user_ids,
+            can_toggle_mode=can_toggle_mode,
         ),
-        reply_markup=build_main_keyboard(),
+        reply_markup=build_provider_mode_keyboard(
+            can_toggle_mode=can_toggle_mode,
+            selection_mode=profile.selection_mode.value,
+        ),
     )
 
 
@@ -2583,73 +2620,102 @@ async def handle_provider_save_openai(
     await message.answer(response_text, reply_markup=build_main_keyboard())
 
 
-@router.message(Command("provider_use_personal"))
-async def handle_provider_use_personal(
-    message: Message,
+@router.callback_query(ProviderModeCallback.filter())
+async def handle_provider_mode_callback(
+    callback: CallbackQuery,
+    callback_data: ProviderModeCallback,
     session_factory: sessionmaker[Session],
+    settings: Settings | None = None,
     admin_user_ids: tuple[int, ...] = (),
 ) -> None:
-    if not await require_user_access(message, session_factory, admin_user_ids):
-        return
-
-    with session_scope(session_factory) as session:
-        _, user_id = ensure_user_registered(message, session)
-        connection_repository = UserLLMConnectionRepository(session)
-        openai_connections = [
-            connection
-            for connection in connection_repository.list_for_user(user_id=user_id)
-            if connection.provider is LLMProvider.OPENAI and connection.is_enabled
-        ]
-        if not openai_connections:
-            await message.answer(
-                "Сначала сохрани хотя бы один персональный OpenAI-ключ командой "
-                f"<code>/provider_save_openai {LLM_MODEL_PLACEHOLDER} {API_KEY_PLACEHOLDER}</code>."
-            )
-            return
-        connection_repository.select_provider(user_id=user_id, provider=LLMProvider.OPENAI)
-        UserLLMProfileRepository(session).set_selection_mode(
-            user_id=user_id,
-            selection_mode=UserLLMSelectionMode.PERSONAL,
-        )
-
-    await message.answer(
-        "Переключил LLM-сценарии на персональные OpenAI-ключи.",
-        reply_markup=build_main_keyboard(),
-    )
-
-
-@router.message(Command("provider_use_project"))
-async def handle_provider_use_project(
-    message: Message,
-    session_factory: sessionmaker[Session],
-    admin_user_ids: tuple[int, ...] = (),
-) -> None:
-    if not await require_user_access(message, session_factory, admin_user_ids):
-        return
-
-    telegram_user = message.from_user
+    telegram_user = callback.from_user
     if telegram_user is None:
-        raise ValueError("Incoming message does not contain Telegram user")
+        await callback.answer("Не удалось определить пользователя.", show_alert=True)
+        return
+
+    if callback_data.action == "close":
+        await safe_delete_message(callback.message)
+        await callback.answer()
+        return
 
     with session_scope(session_factory) as session:
-        _, user_id = ensure_user_registered(message, session)
-        access = UserAccessRepository(session).get_by_telegram_user_id(telegram_user.id)
-        is_internal = is_admin_user(telegram_user.id, admin_user_ids) or (
-            access is not None and access.account_category is AccountCategory.INTERNAL
-        )
-        if not is_internal:
-            await message.answer("Проектный провайдер доступен только аккаунтам категории internal.")
+        has_access = user_has_access(callback, session, admin_user_ids)
+        if not has_access:
+            await callback.answer("Сейчас у тебя нет доступа к боту.", show_alert=True)
             return
 
-        UserLLMProfileRepository(session).set_selection_mode(
-            user_id=user_id,
-            selection_mode=UserLLMSelectionMode.PROJECT,
+        user, _created = UserRepository(session).get_or_create(
+            telegram_user_id=telegram_user.id,
+            username=telegram_user.username,
         )
+        account_category = resolve_account_category_for_provider(
+            session=session,
+            telegram_user_id=telegram_user.id,
+            admin_user_ids=admin_user_ids,
+        )
+        if account_category is not AccountCategory.INTERNAL:
+            await callback.answer("Переключение режима доступно только internal-аккаунтам.", show_alert=True)
+            return
 
-    await message.answer(
-        "Переключил LLM-сценарии на проектный провайдер.",
-        reply_markup=build_main_keyboard(),
+        connection_repository = UserLLMConnectionRepository(session)
+        if callback_data.action == "use_personal":
+            openai_connections = [
+                connection
+                for connection in connection_repository.list_for_user(user_id=user.id)
+                if connection.provider is LLMProvider.OPENAI and connection.is_enabled
+            ]
+            if not openai_connections:
+                await callback.answer(
+                    "Сначала сохрани персональный OpenAI-ключ через /provider_save_openai.",
+                    show_alert=True,
+                )
+                return
+            connection_repository.select_provider(user_id=user.id, provider=LLMProvider.OPENAI)
+            UserLLMProfileRepository(session).set_selection_mode(
+                user_id=user.id,
+                selection_mode=UserLLMSelectionMode.PERSONAL,
+            )
+            success_text = "Переключил LLM-сценарии на персональные OpenAI-ключи."
+        elif callback_data.action == "use_project":
+            UserLLMProfileRepository(session).set_selection_mode(
+                user_id=user.id,
+                selection_mode=UserLLMSelectionMode.PROJECT,
+            )
+            success_text = "Переключил LLM-сценарии на проектный провайдер."
+        else:
+            await callback.answer("Неизвестное действие.", show_alert=True)
+            return
+
+        access = UserAccessRepository(session).get_by_telegram_user_id(telegram_user.id)
+        profile = UserLLMProfileRepository(session).get_by_user_id(user.id)
+        if profile is None:
+            raise RuntimeError("LLM profile was not found after provider mode update")
+        connections = connection_repository.list_views_for_user(user_id=user.id)
+
+    if settings is None:
+        await callback.answer(success_text)
+        return
+
+    await safe_edit_message_text(
+        callback.message,
+        text=build_provider_settings_response(
+            telegram_user_id=telegram_user.id,
+            account_category=(
+                access.account_category.value if access is not None else AccountCategory.UNASSIGNED.value
+            ),
+            selection_mode=profile.selection_mode.value,
+            project_openai_enabled=bool(settings.enable_openai_provider and settings.openai_api_key),
+            personal_openai_enabled=bool(settings.enable_openai_provider and settings.personal_api_keys_secret),
+            connections=connections,
+            admin_user_ids=admin_user_ids,
+            can_toggle_mode=True,
+        ),
+        reply_markup=build_provider_mode_keyboard(
+            can_toggle_mode=True,
+            selection_mode=profile.selection_mode.value,
+        ),
     )
+    await callback.answer(success_text)
 
 
 @router.message(Command("recent"))
@@ -4084,8 +4150,20 @@ async def handle_message(
                         runtime_bundle.conversation_access is not None
                         and not runtime_bundle.conversation_access.is_available
                     ):
+                        account_category = resolve_account_category_for_provider(
+                            session=session,
+                            telegram_user_id=message.from_user.id,
+                            admin_user_ids=admin_user_ids,
+                        )
                         await message.answer(
-                            build_provider_unavailable_message(runtime_bundle.conversation_access),
+                            (
+                                build_personal_provider_required_message()
+                                if should_show_personal_provider_required_stub(
+                                    account_category=account_category,
+                                    access=runtime_bundle.conversation_access,
+                                )
+                                else build_provider_unavailable_message(runtime_bundle.conversation_access)
+                            ),
                             reply_markup=build_main_keyboard(),
                             **build_reply_kwargs(message),
                         )
@@ -4177,8 +4255,20 @@ async def handle_message(
                     fallback_conversation_service=conversation_service,
                 )
                 if runtime_bundle.extraction_access is not None and not runtime_bundle.extraction_access.is_available:
+                    account_category = resolve_account_category_for_provider(
+                        session=session,
+                        telegram_user_id=message.from_user.id,
+                        admin_user_ids=admin_user_ids,
+                    )
                     await message.answer(
-                        build_provider_unavailable_message(runtime_bundle.extraction_access),
+                        (
+                            build_personal_provider_required_message()
+                            if should_show_personal_provider_required_stub(
+                                account_category=account_category,
+                                access=runtime_bundle.extraction_access,
+                            )
+                            else build_provider_unavailable_message(runtime_bundle.extraction_access)
+                        ),
                         reply_markup=build_main_keyboard(),
                     )
                     return
@@ -4251,8 +4341,20 @@ async def handle_message(
                     and runtime_bundle.nutrition_access is not None
                     and not runtime_bundle.nutrition_access.is_available
                 ):
+                    account_category = resolve_account_category_for_provider(
+                        session=session,
+                        telegram_user_id=message.from_user.id,
+                        admin_user_ids=admin_user_ids,
+                    )
                     raise FoodWriteFlowError(
-                        build_provider_unavailable_message(runtime_bundle.nutrition_access)
+                        (
+                            build_personal_provider_required_message()
+                            if should_show_personal_provider_required_stub(
+                                account_category=account_category,
+                                access=runtime_bundle.nutrition_access,
+                            )
+                            else build_provider_unavailable_message(runtime_bundle.nutrition_access)
+                        )
                     )
 
                 saved_food_entries: list = []

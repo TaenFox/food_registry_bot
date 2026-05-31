@@ -7,6 +7,7 @@ from food_registry_bot.bot.payloads import (
     DataExchangeFileCallback,
     GoalMessageCallback,
     PeriodReportCallback,
+    ProviderModeCallback,
     RecentEntryActionCallback,
     RecentEntryDeleteCallback,
     SummarySettingsCallback,
@@ -614,6 +615,35 @@ def build_goal_keyboard() -> InlineKeyboardMarkup:
             _build_close_row(GoalMessageCallback(action="close").pack()),
         ]
     )
+
+
+def build_provider_mode_keyboard(
+    *,
+    can_toggle_mode: bool,
+    selection_mode: str,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if can_toggle_mode:
+        if selection_mode == "personal":
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="Переключить на проектный ключ",
+                        callback_data=ProviderModeCallback(action="use_project").pack(),
+                    )
+                ]
+            )
+        else:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="Переключить на персональный ключ",
+                        callback_data=ProviderModeCallback(action="use_personal").pack(),
+                    )
+                ]
+            )
+    rows.append(_build_close_row(ProviderModeCallback(action="close").pack()))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_admin_user_list_keyboard(

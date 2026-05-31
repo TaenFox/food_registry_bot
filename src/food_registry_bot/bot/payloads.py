@@ -49,6 +49,10 @@ class AdminPanelCallback(CallbackData, prefix="admin_panel"):
 class GoalMessageCallback(CallbackData, prefix="goal_message"):
     action: str
 
+
+class ProviderModeCallback(CallbackData, prefix="provider_mode"):
+    action: str
+
 __all__ = [
     "AdminPanelCallback",
     "DataExchangeFileCallback",
@@ -57,6 +61,7 @@ __all__ = [
     "NormalizedEntryPayload",
     "NormalizedJournalPayload",
     "PeriodReportCallback",
+    "ProviderModeCallback",
     "RecentEntryActionCallback",
     "RecentEntryDeleteCallback",
     "SummarySettingsCallback",
