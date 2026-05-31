@@ -50,8 +50,10 @@ class GoalMessageCallback(CallbackData, prefix="goal_message"):
     action: str
 
 
-class ProviderModeCallback(CallbackData, prefix="provider_mode"):
+class ProviderMenuCallback(CallbackData, prefix="provider_menu"):
     action: str
+    provider: str = ""
+    model: str = ""
 
 __all__ = [
     "AdminPanelCallback",
@@ -61,7 +63,7 @@ __all__ = [
     "NormalizedEntryPayload",
     "NormalizedJournalPayload",
     "PeriodReportCallback",
-    "ProviderModeCallback",
+    "ProviderMenuCallback",
     "RecentEntryActionCallback",
     "RecentEntryDeleteCallback",
     "SummarySettingsCallback",

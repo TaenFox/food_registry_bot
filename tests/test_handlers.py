@@ -24,8 +24,8 @@ from food_registry_bot.bot.handlers import (
     handle_health,
     handle_message,
     handle_provider,
-    handle_provider_mode_callback,
-    handle_provider_save_openai,
+    handle_provider_menu_callback,
+    handle_provider_save,
     handle_period_report_callback,
     handle_recent,
     handle_recent_action_callback,
@@ -43,7 +43,7 @@ from food_registry_bot.bot.payloads import (
     DataExchangeFileCallback,
     GoalMessageCallback,
     PeriodReportCallback,
-    ProviderModeCallback,
+    ProviderMenuCallback,
     RecentEntryActionCallback,
     RecentEntryDeleteCallback,
     SummarySettingsCallback,
@@ -277,7 +277,7 @@ async def test_health_denies_unallowed_user() -> None:
     )
 
 
-async def test_provider_save_openai_stores_encrypted_personal_key() -> None:
+async def test_provider_save_stores_encrypted_personal_key() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
     message = SimpleNamespace(
@@ -286,9 +286,9 @@ async def test_provider_save_openai_stores_encrypted_personal_key() -> None:
     )
     settings = make_settings(personal_api_keys_secret="test-secret")
 
-    await handle_provider_save_openai(
+    await handle_provider_save(
         message,
-        SimpleNamespace(args="gpt-5-mini sk-test-key"),
+        SimpleNamespace(args="openai gpt-5-mini sk-test-key"),
         session_factory,
         settings=settings,
         admin_user_ids=(ADMIN_ID,),
@@ -308,7 +308,7 @@ async def test_provider_save_openai_stores_encrypted_personal_key() -> None:
     message.answer.assert_awaited_once()
 
 
-async def test_provider_mode_callback_switches_to_personal() -> None:
+async def test_provider_menu_callback_selects_personal_connection() -> None:
     session_factory = create_session_factory()
     with session_factory() as session:
         session.add(
@@ -327,21 +327,21 @@ async def test_provider_mode_callback_switches_to_personal() -> None:
         answer=AsyncMock(),
     )
 
-    await handle_provider_save_openai(
+    await handle_provider_save(
         SimpleNamespace(
             from_user=callback.from_user,
             answer=AsyncMock(),
         ),
-        SimpleNamespace(args="gpt-5-mini sk-test-key"),
+        SimpleNamespace(args="openai gpt-5-mini sk-test-key"),
         session_factory,
         settings=settings,
         admin_user_ids=(ADMIN_ID,),
         openai_key_validator=make_openai_validator_result(is_valid=True, status="valid"),
     )
 
-    await handle_provider_mode_callback(
+    await handle_provider_menu_callback(
         callback,
-        ProviderModeCallback(action="use_personal"),
+        ProviderMenuCallback(action="select_connection", provider="openai", model="gpt-5-mini"),
         session_factory,
         settings=settings,
         admin_user_ids=(ADMIN_ID,),
@@ -352,10 +352,10 @@ async def test_provider_mode_callback_switches_to_personal() -> None:
         profile = session.query(UserLLMProfile).filter_by(user_id=user.id).one()
 
     assert profile.selection_mode.value == "personal"
-    callback.answer.assert_awaited_once_with("Переключил LLM-сценарии на персональные OpenAI-ключи.")
+    callback.answer.assert_awaited_once_with("Выбрал персональное подключение openai/gpt-5-mini.")
 
 
-async def test_provider_mode_callback_rejects_project_toggle_for_external_user() -> None:
+async def test_provider_menu_callback_rejects_project_toggle_for_external_user() -> None:
     session_factory = create_session_factory()
     with session_factory() as session:
         session.add(
@@ -373,16 +373,16 @@ async def test_provider_mode_callback_rejects_project_toggle_for_external_user()
         answer=AsyncMock(),
     )
 
-    await handle_provider_mode_callback(
+    await handle_provider_menu_callback(
         callback,
-        ProviderModeCallback(action="use_project"),
+        ProviderMenuCallback(action="use_project"),
         session_factory,
         settings=make_settings(openai_api_key="project-key"),
         admin_user_ids=(ADMIN_ID,),
     )
 
     callback.answer.assert_awaited_once_with(
-        "Переключение режима доступно только internal-аккаунтам.",
+        "Проектный режим доступен только internal-аккаунтам.",
         show_alert=True,
     )
 
@@ -408,9 +408,9 @@ async def test_provider_command_shows_saved_connections() -> None:
         answer=AsyncMock(),
     )
 
-    await handle_provider_save_openai(
+    await handle_provider_save(
         message,
-        SimpleNamespace(args="gpt-5-mini sk-test-key"),
+        SimpleNamespace(args="openai gpt-5-mini sk-test-key"),
         session_factory,
         settings=settings,
         admin_user_ids=(ADMIN_ID,),
@@ -428,15 +428,17 @@ async def test_provider_command_shows_saved_connections() -> None:
     provider_text = message.answer.await_args.args[0]
     assert "LLM-провайдеры:" in provider_text
     assert "openai/gpt-5-mini" in provider_text
+    assert "&lt;PROVIDER&gt;" in provider_text
     assert "&lt;MODEL&gt;" in provider_text
     assert "&lt;API_KEY&gt;" in provider_text
-    assert "Обновить персональный ключ" in provider_text
-    assert "Режим можно переключить кнопкой ниже." in provider_text
+    assert "Сохранить или обновить ключ" in provider_text
+    assert "Доступные значения provider: openai" in provider_text
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[0][0].text == "Переключить на персональный ключ"
+    assert reply_markup.inline_keyboard[0][0].text == "✓ Проектный"
+    assert reply_markup.inline_keyboard[1][0].text == "OPENAI / gpt-5-mini"
 
 
-async def test_provider_save_openai_marks_invalid_key_as_unusable() -> None:
+async def test_provider_save_marks_invalid_key_as_unusable() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
     message = SimpleNamespace(
@@ -445,9 +447,9 @@ async def test_provider_save_openai_marks_invalid_key_as_unusable() -> None:
     )
     settings = make_settings(personal_api_keys_secret="test-secret")
 
-    await handle_provider_save_openai(
+    await handle_provider_save(
         message,
-        SimpleNamespace(args="gpt-5-mini sk-invalid-key"),
+        SimpleNamespace(args="openai gpt-5-mini sk-invalid-key"),
         session_factory,
         settings=settings,
         admin_user_ids=(ADMIN_ID,),
@@ -478,9 +480,9 @@ async def test_provider_command_escapes_validation_error_html() -> None:
         answer=AsyncMock(),
     )
 
-    await handle_provider_save_openai(
+    await handle_provider_save(
         message,
-        SimpleNamespace(args="gpt-5-mini sk-invalid-key"),
+        SimpleNamespace(args="openai gpt-5-mini sk-invalid-key"),
         session_factory,
         settings=settings,
         admin_user_ids=(ADMIN_ID,),
@@ -529,7 +531,7 @@ async def test_provider_command_for_external_user_shows_close_only() -> None:
     )
 
     provider_text = message.answer.await_args.args[0]
-    assert "Режим можно переключить кнопкой ниже." not in provider_text
+    assert "Проектный или персональный источник выбираются кнопками ниже." not in provider_text
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
     assert len(reply_markup.inline_keyboard) == 1
 
@@ -572,7 +574,55 @@ async def test_external_user_gets_personal_provider_stub_for_conversation_messag
     message.answer.assert_awaited_once()
     response_text = message.answer.await_args.args[0]
     assert "нужен персональный OpenAI-ключ" in response_text
-    assert "/provider_save_openai" in response_text
+    assert "/provider_save" in response_text
+    assert "Управление сохранёнными подключениями" in response_text
+    assert "можно выбрать или удалить добавленный ключ" in response_text
+
+
+async def test_provider_menu_callback_deletes_connection() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        session.add(
+            UserAccess(
+                telegram_user_id=ALLOWED_USER_ID,
+                username="allowed_user",
+                is_allowed=True,
+                account_category=AccountCategory.INTERNAL,
+            )
+        )
+        session.commit()
+    settings = make_settings(personal_api_keys_secret="test-secret")
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_provider_save(
+        SimpleNamespace(
+            from_user=callback.from_user,
+            answer=AsyncMock(),
+        ),
+        SimpleNamespace(args="openai gpt-5-mini sk-test-key"),
+        session_factory,
+        settings=settings,
+        admin_user_ids=(ADMIN_ID,),
+        openai_key_validator=make_openai_validator_result(is_valid=True, status="valid"),
+    )
+
+    await handle_provider_menu_callback(
+        callback,
+        ProviderMenuCallback(action="delete_connection", provider="openai", model="gpt-5-mini"),
+        session_factory,
+        settings=settings,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        user = session.query(User).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
+        assert session.query(UserLLMConnection).filter_by(user_id=user.id).count() == 0
+
+    callback.answer.assert_awaited_once_with("Удалил подключение openai/gpt-5-mini.")
 
 
 async def test_admin_returns_system_overview_and_commands() -> None:
@@ -987,12 +1037,12 @@ async def test_admin_panel_open_user_and_toggle_access() -> None:
     with session_factory() as session:
         access = session.query(UserAccess).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
         assert access.is_allowed is True
-        assert access.account_category == AccountCategory.INTERNAL
+        assert access.account_category == AccountCategory.EXTERNAL
 
-    assert "- категория аккаунта: internal\n" in callback.message.edit_text.await_args.args[0]
+    assert "- категория аккаунта: external\n" in callback.message.edit_text.await_args.args[0]
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Запретить доступ"
-    assert reply_markup.inline_keyboard[1][0].text == "Internal · текущая"
+    assert reply_markup.inline_keyboard[1][1].text == "External · текущая"
     callback.answer.assert_awaited_once_with("Доступ разрешён.")
 
 

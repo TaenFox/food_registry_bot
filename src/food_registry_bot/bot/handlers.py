@@ -32,7 +32,8 @@ from food_registry_bot.bot.keyboards import (
     build_period_report_dynamics_keyboard,
     build_period_report_keyboard,
     build_period_report_noticeable_keyboard,
-    build_provider_mode_keyboard,
+    build_provider_connection_actions_keyboard,
+    build_provider_connections_keyboard,
     build_recent_entries_delete_keyboard,
     build_recent_food_entry_keyboard,
     build_recent_food_entry_delete_confirmation_keyboard,
@@ -55,7 +56,7 @@ from food_registry_bot.bot.payloads import (
     DataExchangeFileCallback,
     GoalMessageCallback,
     PeriodReportCallback,
-    ProviderModeCallback,
+    ProviderMenuCallback,
     RecentEntryActionCallback,
     RecentEntryDeleteCallback,
     SummarySettingsCallback,
@@ -191,6 +192,8 @@ ADMIN_USER_PAGE_SIZE = 10
 ADMIN_LLM_ISSUE_PAGE_SIZE = 5
 LLM_MODEL_PLACEHOLDER = "<MODEL>"
 API_KEY_PLACEHOLDER = "<API_KEY>"
+PROVIDER_PLACEHOLDER = "<PROVIDER>"
+SUPPORTED_PERSONAL_PROVIDERS = (LLMProvider.OPENAI,)
 
 
 class FoodWriteFlowError(RuntimeError):
@@ -464,24 +467,17 @@ def parse_goal_command_args(command: CommandObject | None) -> tuple[str, int] | 
     return metric_code, value
 
 
-def parse_provider_save_command_args(command: CommandObject | None) -> tuple[str, str] | None:
+def parse_provider_save_command_args(command: CommandObject | None) -> tuple[str, str, str] | None:
     if command is None or command.args is None:
         return None
 
-    parts = command.args.strip().split(maxsplit=1)
-    if len(parts) != 2:
+    parts = command.args.strip().split(maxsplit=2)
+    if len(parts) != 3:
         return None
-    model, api_key = parts
-    if not model.strip() or not api_key.strip():
+    provider, model, api_key = parts
+    if not provider.strip() or not model.strip() or not api_key.strip():
         return None
-    return model.strip(), api_key.strip()
-
-
-def parse_provider_model_arg(command: CommandObject | None) -> str | None:
-    if command is None or command.args is None:
-        return None
-    model = command.args.strip()
-    return model or None
+    return provider.strip(), model.strip(), api_key.strip()
 
 
 def resolve_effective_account_category(
@@ -504,8 +500,10 @@ def build_provider_settings_response(
     personal_openai_enabled: bool,
     connections: list,
     admin_user_ids: tuple[int, ...],
-    can_toggle_mode: bool,
+    can_use_project: bool,
 ) -> str:
+    supported_provider_values = ", ".join(provider.value for provider in SUPPORTED_PERSONAL_PROVIDERS)
+    escaped_provider_placeholder = html.escape(PROVIDER_PLACEHOLDER)
     escaped_model_placeholder = html.escape(LLM_MODEL_PLACEHOLDER)
     escaped_api_key_placeholder = html.escape(API_KEY_PLACEHOLDER)
     lines = ["LLM-провайдеры:"]
@@ -518,11 +516,11 @@ def build_provider_settings_response(
             [
                 "",
                 "Сохранённых персональных подключений пока нет.",
-                f"Чтобы подключить персональный ключ, используй: /provider_save_openai {escaped_model_placeholder} {escaped_api_key_placeholder}",
+                f"Сохранить ключ: /provider_save {escaped_provider_placeholder} {escaped_model_placeholder} {escaped_api_key_placeholder}",
+                f"Доступные значения provider: {supported_provider_values}",
             ]
         )
-        if can_toggle_mode:
-            lines.extend(["", "Режим можно переключить кнопкой ниже."])
+        lines.extend(["", "Подключения выбираются кнопками ниже."])
         return "\n".join(lines)
 
     lines.extend(["", "Сохранённые подключения:"])
@@ -539,11 +537,14 @@ def build_provider_settings_response(
     lines.extend(
         [
             "",
-            f"Обновить персональный ключ: /provider_save_openai {escaped_model_placeholder} {escaped_api_key_placeholder}",
+            f"Сохранить или обновить ключ: /provider_save {escaped_provider_placeholder} {escaped_model_placeholder} {escaped_api_key_placeholder}",
+            f"Доступные значения provider: {supported_provider_values}",
         ]
     )
-    if can_toggle_mode:
-        lines.extend(["", "Режим можно переключить кнопкой ниже."])
+    if can_use_project:
+        lines.extend(["", "Проектный или персональный источник выбираются кнопками ниже."])
+    else:
+        lines.extend(["", "Персональное подключение выбирается кнопками ниже."])
     return "\n".join(lines)
 
 
@@ -559,11 +560,13 @@ def resolve_account_category_for_provider(
 
 
 def build_personal_provider_required_message() -> str:
+    escaped_provider_placeholder = html.escape(PROVIDER_PLACEHOLDER)
     escaped_model_placeholder = html.escape(LLM_MODEL_PLACEHOLDER)
     escaped_api_key_placeholder = html.escape(API_KEY_PLACEHOLDER)
     return (
         "Для этого аккаунта нужен персональный OpenAI-ключ. "
-        f"Открой /provider и сохрани ключ командой /provider_save_openai {escaped_model_placeholder} {escaped_api_key_placeholder}."
+        f"Сначала открой /provider и сохрани ключ командой /provider_save {escaped_provider_placeholder} {escaped_model_placeholder} {escaped_api_key_placeholder}. "
+        "Управление сохранёнными подключениями тоже находится в /provider: там можно выбрать или удалить добавленный ключ."
     )
 
 
@@ -577,6 +580,68 @@ def should_show_personal_provider_required_stub(
         and access is not None
         and not access.is_available
         and access.source == "personal"
+    )
+
+
+def resolve_supported_personal_provider(provider_value: str) -> LLMProvider | None:
+    normalized_value = provider_value.strip().lower()
+    for provider in SUPPORTED_PERSONAL_PROVIDERS:
+        if provider.value == normalized_value:
+            return provider
+    return None
+
+
+def format_provider_name(provider: str) -> str:
+    return provider.upper()
+
+
+def build_provider_connection_button_label(*, connection, selection_mode: str) -> str:
+    prefix = "✓ " if selection_mode == UserLLMSelectionMode.PERSONAL.value and connection.is_selected else ""
+    status_suffix = ""
+    if not connection.is_enabled:
+        status_suffix = " · off"
+    elif connection.validation_status != LLMConnectionValidationStatus.VALID.value:
+        status_suffix = f" · {connection.validation_status}"
+    return f"{prefix}{format_provider_name(connection.provider)} / {connection.model}{status_suffix}"
+
+
+def build_provider_connection_details_response(*, connection) -> str:
+    lines = [
+        "Подключение:",
+        f"- provider: {connection.provider}",
+        f"- model: {connection.model}",
+        f"- статус: {'on' if connection.is_enabled else 'off'}",
+        f"- validation: {connection.validation_status}",
+        f"- выбрано: {'yes' if connection.is_selected else 'no'}",
+    ]
+    if connection.validation_error:
+        lines.append(
+            f"- ошибка: {html.escape(truncate_text(connection.validation_error, limit=200))}"
+        )
+    return "\n".join(lines)
+
+
+def build_provider_reply_markup(
+    *,
+    can_use_project: bool,
+    selection_mode: str,
+    connections: list,
+):
+    connection_buttons = [
+        (
+            build_provider_connection_button_label(
+                connection=connection,
+                selection_mode=selection_mode,
+            ),
+            connection.provider,
+            connection.model,
+        )
+        for connection in connections
+    ]
+    return build_provider_connections_keyboard(
+        can_use_project=can_use_project,
+        selection_mode=selection_mode,
+        connection_buttons=connection_buttons,
     )
 
 
@@ -2523,7 +2588,7 @@ async def handle_provider(
     personal_openai_enabled = bool(
         settings.enable_openai_provider and settings.personal_api_keys_secret
     )
-    can_toggle_mode = account_category is AccountCategory.INTERNAL
+    can_use_project = account_category is AccountCategory.INTERNAL
     await message.answer(
         build_provider_settings_response(
             telegram_user_id=telegram_user.id,
@@ -2535,17 +2600,18 @@ async def handle_provider(
             personal_openai_enabled=personal_openai_enabled,
             connections=connections,
             admin_user_ids=admin_user_ids,
-            can_toggle_mode=can_toggle_mode,
+            can_use_project=can_use_project,
         ),
-        reply_markup=build_provider_mode_keyboard(
-            can_toggle_mode=can_toggle_mode,
+        reply_markup=build_provider_reply_markup(
+            can_use_project=can_use_project,
             selection_mode=profile.selection_mode.value,
+            connections=connections,
         ),
     )
 
 
-@router.message(Command("provider_save_openai"))
-async def handle_provider_save_openai(
+@router.message(Command("provider_save"))
+async def handle_provider_save(
     message: Message,
     command: CommandObject,
     session_factory: sessionmaker[Session],
@@ -2559,27 +2625,37 @@ async def handle_provider_save_openai(
     if settings is None:
         await message.answer("Настройки провайдеров в этом окружении недоступны.")
         return
-    if not settings.enable_openai_provider:
+
+    parsed_args = parse_provider_save_command_args(command)
+    if parsed_args is None:
+        supported_provider_values = ", ".join(provider.value for provider in SUPPORTED_PERSONAL_PROVIDERS)
+        await message.answer(
+            "Использование: "
+            f"<code>/provider_save {PROVIDER_PLACEHOLDER} {LLM_MODEL_PLACEHOLDER} {API_KEY_PLACEHOLDER}</code>\n"
+            f"Доступные значения provider: <code>{supported_provider_values}</code>"
+        )
+        return
+
+    provider_value, model, api_key = parsed_args
+    provider = resolve_supported_personal_provider(provider_value)
+    if provider is None:
+        supported_provider_values = ", ".join(provider.value for provider in SUPPORTED_PERSONAL_PROVIDERS)
+        await message.answer(
+            f"Провайдер <code>{html.escape(provider_value)}</code> сейчас не поддержан.\n"
+            f"Доступные значения provider: <code>{supported_provider_values}</code>"
+        )
+        return
+
+    if provider is LLMProvider.OPENAI and not settings.enable_openai_provider:
         await message.answer("Класс провайдера OpenAI сейчас отключён в конфигурации приложения.")
         return
     if not settings.personal_api_keys_secret:
         await message.answer("В приложении не настроен секрет для хранения персональных API-ключей.")
         return
 
-    parsed_args = parse_provider_save_command_args(command)
-    if parsed_args is None:
-        await message.answer(
-            f"Использование: <code>/provider_save_openai {LLM_MODEL_PLACEHOLDER} {API_KEY_PLACEHOLDER}</code>"
-        )
-        return
-
-    model, api_key = parsed_args
     cipher = SecretCipher(settings.personal_api_keys_secret)
     encrypted_api_key = cipher.encrypt(api_key)
-    validation_result: OpenAIKeyValidationResult = openai_key_validator(
-        api_key=api_key,
-        model=model,
-    )
+    validation_result: OpenAIKeyValidationResult = openai_key_validator(api_key=api_key, model=model)
     validation_status = LLMConnectionValidationStatus(validation_result.status)
     is_usable_connection = validation_result.is_valid
 
@@ -2588,31 +2664,35 @@ async def handle_provider_save_openai(
         connection_repository = UserLLMConnectionRepository(session)
         connection_repository.upsert_connection(
             user_id=user_id,
-            provider=LLMProvider.OPENAI,
+            provider=provider,
             model=model,
             encrypted_api_key=encrypted_api_key,
             is_enabled=is_usable_connection,
-            is_selected=is_usable_connection,
+            is_selected=False,
             validation_status=validation_status,
             validation_error=validation_result.error_message,
             last_validated_at=datetime.now(timezone.utc),
         )
         if is_usable_connection:
-            connection_repository.select_provider(user_id=user_id, provider=LLMProvider.OPENAI)
+            connection_repository.select_connection(
+                user_id=user_id,
+                provider=provider,
+                model=model,
+            )
 
     if validation_result.status == LLMConnectionValidationStatus.VALID.value:
         response_text = (
-            f"Сохранил и проверил персональный OpenAI-ключ для модели <code>{html.escape(model)}</code>."
+            f"Сохранил и проверил персональный ключ <code>{html.escape(provider.value)}/{html.escape(model)}</code>."
         )
     elif validation_result.status == LLMConnectionValidationStatus.INVALID.value:
         response_text = (
-            f"Сохранил персональный OpenAI-ключ для модели <code>{html.escape(model)}</code>, "
+            f"Сохранил персональный ключ <code>{html.escape(provider.value)}/{html.escape(model)}</code>, "
             "но проверка не пройдена.\n"
             f"{validation_result.error_message}"
         )
     else:
         response_text = (
-            f"Сохранил персональный OpenAI-ключ для модели <code>{html.escape(model)}</code>, "
+            f"Сохранил персональный ключ <code>{html.escape(provider.value)}/{html.escape(model)}</code>, "
             "но сейчас не удалось подтвердить его работоспособность.\n"
             f"{validation_result.error_message}"
         )
@@ -2620,10 +2700,10 @@ async def handle_provider_save_openai(
     await message.answer(response_text, reply_markup=build_main_keyboard())
 
 
-@router.callback_query(ProviderModeCallback.filter())
-async def handle_provider_mode_callback(
+@router.callback_query(ProviderMenuCallback.filter())
+async def handle_provider_menu_callback(
     callback: CallbackQuery,
-    callback_data: ProviderModeCallback,
+    callback_data: ProviderMenuCallback,
     session_factory: sessionmaker[Session],
     settings: Settings | None = None,
     admin_user_ids: tuple[int, ...] = (),
@@ -2653,47 +2733,109 @@ async def handle_provider_mode_callback(
             telegram_user_id=telegram_user.id,
             admin_user_ids=admin_user_ids,
         )
-        if account_category is not AccountCategory.INTERNAL:
-            await callback.answer("Переключение режима доступно только internal-аккаунтам.", show_alert=True)
-            return
-
         connection_repository = UserLLMConnectionRepository(session)
-        if callback_data.action == "use_personal":
-            openai_connections = [
-                connection
-                for connection in connection_repository.list_for_user(user_id=user.id)
-                if connection.provider is LLMProvider.OPENAI and connection.is_enabled
-            ]
-            if not openai_connections:
-                await callback.answer(
-                    "Сначала сохрани персональный OpenAI-ключ через /provider_save_openai.",
-                    show_alert=True,
-                )
-                return
-            connection_repository.select_provider(user_id=user.id, provider=LLMProvider.OPENAI)
-            UserLLMProfileRepository(session).set_selection_mode(
-                user_id=user.id,
-                selection_mode=UserLLMSelectionMode.PERSONAL,
-            )
-            success_text = "Переключил LLM-сценарии на персональные OpenAI-ключи."
+        can_use_project = account_category is AccountCategory.INTERNAL
+
+        if callback_data.action == "back":
+            access = UserAccessRepository(session).get_by_telegram_user_id(telegram_user.id)
+            profile = UserLLMProfileRepository(session).get_or_create(user_id=user.id)[0]
+            connections = connection_repository.list_views_for_user(user_id=user.id)
         elif callback_data.action == "use_project":
+            if not can_use_project:
+                await callback.answer("Проектный режим доступен только internal-аккаунтам.", show_alert=True)
+                return
             UserLLMProfileRepository(session).set_selection_mode(
                 user_id=user.id,
                 selection_mode=UserLLMSelectionMode.PROJECT,
             )
             success_text = "Переключил LLM-сценарии на проектный провайдер."
+            access = UserAccessRepository(session).get_by_telegram_user_id(telegram_user.id)
+            profile = UserLLMProfileRepository(session).get_by_user_id(user.id)
+            connections = connection_repository.list_views_for_user(user_id=user.id)
+        elif callback_data.action == "open_connection":
+            provider = resolve_supported_personal_provider(callback_data.provider)
+            if provider is None:
+                await callback.answer("Подключение больше не поддерживается.", show_alert=True)
+                return
+            connection = connection_repository.get_by_user_provider_model(
+                user_id=user.id,
+                provider=provider,
+                model=callback_data.model,
+            )
+            if connection is None:
+                await callback.answer("Подключение не найдено.", show_alert=True)
+                return
+            await safe_edit_message_text(
+                callback.message,
+                text=build_provider_connection_details_response(connection=connection),
+                reply_markup=build_provider_connection_actions_keyboard(
+                    provider=callback_data.provider,
+                    model=callback_data.model,
+                    can_choose=connection.is_enabled,
+                ),
+            )
+            await callback.answer()
+            return
+        elif callback_data.action == "select_connection":
+            provider = resolve_supported_personal_provider(callback_data.provider)
+            if provider is None:
+                await callback.answer("Подключение больше не поддерживается.", show_alert=True)
+                return
+            selected_connection = connection_repository.select_connection(
+                user_id=user.id,
+                provider=provider,
+                model=callback_data.model,
+            )
+            if selected_connection is None:
+                await callback.answer("Выбрать можно только рабочее подключение.", show_alert=True)
+                return
+            UserLLMProfileRepository(session).set_selection_mode(
+                user_id=user.id,
+                selection_mode=UserLLMSelectionMode.PERSONAL,
+            )
+            success_text = (
+                f"Выбрал персональное подключение {selected_connection.provider.value}/{selected_connection.model}."
+            )
+            access = UserAccessRepository(session).get_by_telegram_user_id(telegram_user.id)
+            profile = UserLLMProfileRepository(session).get_by_user_id(user.id)
+            connections = connection_repository.list_views_for_user(user_id=user.id)
+        elif callback_data.action == "delete_connection":
+            provider = resolve_supported_personal_provider(callback_data.provider)
+            if provider is None:
+                await callback.answer("Подключение больше не поддерживается.", show_alert=True)
+                return
+            deleted_connection = connection_repository.get_by_user_provider_model(
+                user_id=user.id,
+                provider=provider,
+                model=callback_data.model,
+            )
+            if deleted_connection is None:
+                await callback.answer("Подключение не найдено.", show_alert=True)
+                return
+            was_selected = deleted_connection.is_selected
+            connection_repository.delete_connection(
+                user_id=user.id,
+                provider=provider,
+                model=callback_data.model,
+            )
+            if was_selected and can_use_project:
+                UserLLMProfileRepository(session).set_selection_mode(
+                    user_id=user.id,
+                    selection_mode=UserLLMSelectionMode.PROJECT,
+                )
+            success_text = f"Удалил подключение {provider.value}/{callback_data.model}."
+            access = UserAccessRepository(session).get_by_telegram_user_id(telegram_user.id)
+            profile = UserLLMProfileRepository(session).get_or_create(user_id=user.id)[0]
+            connections = connection_repository.list_views_for_user(user_id=user.id)
         else:
             await callback.answer("Неизвестное действие.", show_alert=True)
             return
 
-        access = UserAccessRepository(session).get_by_telegram_user_id(telegram_user.id)
-        profile = UserLLMProfileRepository(session).get_by_user_id(user.id)
         if profile is None:
-            raise RuntimeError("LLM profile was not found after provider mode update")
-        connections = connection_repository.list_views_for_user(user_id=user.id)
+            raise RuntimeError("LLM profile was not found after provider action")
 
     if settings is None:
-        await callback.answer(success_text)
+        await callback.answer(success_text if 'success_text' in locals() else "")
         return
 
     await safe_edit_message_text(
@@ -2708,14 +2850,15 @@ async def handle_provider_mode_callback(
             personal_openai_enabled=bool(settings.enable_openai_provider and settings.personal_api_keys_secret),
             connections=connections,
             admin_user_ids=admin_user_ids,
-            can_toggle_mode=True,
+            can_use_project=can_use_project,
         ),
-        reply_markup=build_provider_mode_keyboard(
-            can_toggle_mode=True,
+        reply_markup=build_provider_reply_markup(
+            can_use_project=can_use_project,
             selection_mode=profile.selection_mode.value,
+            connections=connections,
         ),
     )
-    await callback.answer(success_text)
+    await callback.answer(success_text if 'success_text' in locals() else "")
 
 
 @router.message(Command("recent"))

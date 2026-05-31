@@ -197,7 +197,7 @@ class UserAccessRepository:
                 username=username,
                 is_allowed=is_allowed,
                 account_category=account_category or (
-                    AccountCategory.INTERNAL if is_allowed else AccountCategory.UNASSIGNED
+                    AccountCategory.EXTERNAL if is_allowed else AccountCategory.UNASSIGNED
                 ),
             )
             self._session.add(access)
@@ -207,7 +207,7 @@ class UserAccessRepository:
             if account_category is not None:
                 access.account_category = account_category
             elif is_allowed and access.account_category is AccountCategory.UNASSIGNED:
-                access.account_category = AccountCategory.INTERNAL
+                access.account_category = AccountCategory.EXTERNAL
 
         self._session.flush()
         return access
@@ -399,6 +399,27 @@ class UserLLMConnectionRepository:
         self._session.flush()
         return updated_connections
 
+    def select_connection(
+        self,
+        *,
+        user_id: int,
+        provider: LLMProvider,
+        model: str,
+    ) -> UserLLMConnection | None:
+        target_connection = self.get_by_user_provider_model(
+            user_id=user_id,
+            provider=provider,
+            model=model,
+        )
+        if target_connection is None or not target_connection.is_enabled:
+            return None
+
+        for connection in self.list_for_user(user_id=user_id):
+            connection.is_selected = connection.id == target_connection.id
+
+        self._session.flush()
+        return target_connection
+
     def get_selected_for_user_provider_model(
         self,
         *,
@@ -414,6 +435,25 @@ class UserLLMConnectionRepository:
             UserLLMConnection.is_enabled.is_(True),
         )
         return self._session.scalar(statement)
+
+    def delete_connection(
+        self,
+        *,
+        user_id: int,
+        provider: LLMProvider,
+        model: str,
+    ) -> bool:
+        connection = self.get_by_user_provider_model(
+            user_id=user_id,
+            provider=provider,
+            model=model,
+        )
+        if connection is None:
+            return False
+
+        self._session.delete(connection)
+        self._session.flush()
+        return True
 
     def _clear_selected_for_user_except(
         self,
