@@ -104,7 +104,7 @@ from food_registry_bot.extraction import (
 from food_registry_bot.exchange.service import FileLimitExceededError
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_PARTIAL
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_WORKOUT
-from food_registry_bot.llm_access import SecretCipher
+from food_registry_bot.llm_access import OpenAIKeyValidationResult, SecretCipher, validate_openai_api_key
 from food_registry_bot.llm_access.resolver import (
     build_provider_unavailable_message,
     build_user_llm_runtime_bundle,
@@ -503,6 +503,13 @@ def build_provider_settings_response(
     connections: list,
     admin_user_ids: tuple[int, ...],
 ) -> str:
+    escaped_model_placeholder = html.escape(LLM_MODEL_PLACEHOLDER)
+    escaped_api_key_placeholder = html.escape(API_KEY_PLACEHOLDER)
+    command_lines = [
+        f"- /provider_save_openai {escaped_model_placeholder} {escaped_api_key_placeholder} — сохранить персональный OpenAI-ключ для модели",
+        "- /provider_use_personal — переключить LLM-сценарии на персональные OpenAI-ключи",
+        "- /provider_use_project — переключить LLM-сценарии на проектный OpenAI-ключ",
+    ]
     lines = ["LLM-провайдеры:"]
     lines.append(f"- категория аккаунта: {resolve_effective_account_category(telegram_user_id=telegram_user_id, access_account_category=account_category, admin_user_ids=admin_user_ids)}")
     lines.append(f"- режим выбора: {selection_mode}")
@@ -514,9 +521,7 @@ def build_provider_settings_response(
                 "",
                 "Сохранённых персональных подключений пока нет.",
                 "Команды:",
-                f"- /provider_save_openai {LLM_MODEL_PLACEHOLDER} {API_KEY_PLACEHOLDER}",
-                "- /provider_use_personal",
-                "- /provider_use_project",
+                *command_lines,
             ]
         )
         return "\n".join(lines)
@@ -529,14 +534,14 @@ def build_provider_settings_response(
             f"- {connection.provider}/{connection.model} · {enabled_suffix} · {connection.validation_status}{selected_suffix}"
         )
         if connection.validation_error:
-            lines.append(f"  ошибка: {truncate_text(connection.validation_error, limit=120)}")
+            lines.append(
+                f"  ошибка: {html.escape(truncate_text(connection.validation_error, limit=120))}"
+            )
     lines.extend(
         [
             "",
             "Команды:",
-            f"- /provider_save_openai {LLM_MODEL_PLACEHOLDER} {API_KEY_PLACEHOLDER}",
-            "- /provider_use_personal",
-            "- /provider_use_project",
+            *command_lines,
         ]
     )
     return "\n".join(lines)
@@ -2509,6 +2514,7 @@ async def handle_provider_save_openai(
     session_factory: sessionmaker[Session],
     settings: Settings | None = None,
     admin_user_ids: tuple[int, ...] = (),
+    openai_key_validator=validate_openai_api_key,
 ) -> None:
     if not await require_user_access(message, session_factory, admin_user_ids):
         return
@@ -2533,6 +2539,12 @@ async def handle_provider_save_openai(
     model, api_key = parsed_args
     cipher = SecretCipher(settings.personal_api_keys_secret)
     encrypted_api_key = cipher.encrypt(api_key)
+    validation_result: OpenAIKeyValidationResult = openai_key_validator(
+        api_key=api_key,
+        model=model,
+    )
+    validation_status = LLMConnectionValidationStatus(validation_result.status)
+    is_usable_connection = validation_result.is_valid
 
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
@@ -2542,17 +2554,33 @@ async def handle_provider_save_openai(
             provider=LLMProvider.OPENAI,
             model=model,
             encrypted_api_key=encrypted_api_key,
-            is_enabled=True,
-            is_selected=True,
-            validation_status=LLMConnectionValidationStatus.UNKNOWN,
-            validation_error=None,
+            is_enabled=is_usable_connection,
+            is_selected=is_usable_connection,
+            validation_status=validation_status,
+            validation_error=validation_result.error_message,
+            last_validated_at=datetime.now(timezone.utc),
         )
-        connection_repository.select_provider(user_id=user_id, provider=LLMProvider.OPENAI)
+        if is_usable_connection:
+            connection_repository.select_provider(user_id=user_id, provider=LLMProvider.OPENAI)
 
-    await message.answer(
-        f"Сохранил персональный OpenAI-ключ для модели <code>{html.escape(model)}</code>.",
-        reply_markup=build_main_keyboard(),
-    )
+    if validation_result.status == LLMConnectionValidationStatus.VALID.value:
+        response_text = (
+            f"Сохранил и проверил персональный OpenAI-ключ для модели <code>{html.escape(model)}</code>."
+        )
+    elif validation_result.status == LLMConnectionValidationStatus.INVALID.value:
+        response_text = (
+            f"Сохранил персональный OpenAI-ключ для модели <code>{html.escape(model)}</code>, "
+            "но проверка не пройдена.\n"
+            f"{validation_result.error_message}"
+        )
+    else:
+        response_text = (
+            f"Сохранил персональный OpenAI-ключ для модели <code>{html.escape(model)}</code>, "
+            "но сейчас не удалось подтвердить его работоспособность.\n"
+            f"{validation_result.error_message}"
+        )
+
+    await message.answer(response_text, reply_markup=build_main_keyboard())
 
 
 @router.message(Command("provider_use_personal"))

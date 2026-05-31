@@ -85,6 +85,7 @@ from food_registry_bot.extraction import (
 )
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_FULL, CSV_CONTRACT_TYPE_PARTIAL
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_WORKOUT
+from food_registry_bot.llm_access import OpenAIKeyValidationResult
 from food_registry_bot.nutrition import InvalidNutritionPayload, StaticNutritionEstimationService
 
 
@@ -154,6 +155,19 @@ def build_metric_payload(item_ids: list[str], *, confidence: str = "medium") -> 
             }
         )
     return json.dumps({"items": items}, ensure_ascii=False)
+
+
+def make_openai_validator_result(
+    *,
+    is_valid: bool,
+    status: str,
+    error_message: str | None = None,
+):
+    return lambda **_kwargs: OpenAIKeyValidationResult(
+        is_valid=is_valid,
+        status=status,
+        error_message=error_message,
+    )
 
 
 async def call_handle_today_at(
@@ -278,6 +292,7 @@ async def test_provider_save_openai_stores_encrypted_personal_key() -> None:
         session_factory,
         settings=settings,
         admin_user_ids=(ADMIN_ID,),
+        openai_key_validator=make_openai_validator_result(is_valid=True, status="valid"),
     )
 
     with session_factory() as session:
@@ -287,6 +302,9 @@ async def test_provider_save_openai_stores_encrypted_personal_key() -> None:
     assert connection.provider.value == "openai"
     assert connection.model == "gpt-5-mini"
     assert connection.encrypted_api_key != "sk-test-key"
+    assert connection.validation_status.value == "valid"
+    assert connection.is_enabled is True
+    assert connection.is_selected is True
     message.answer.assert_awaited_once()
 
 
@@ -305,6 +323,7 @@ async def test_provider_use_personal_switches_selection_mode() -> None:
         session_factory,
         settings=settings,
         admin_user_ids=(ADMIN_ID,),
+        openai_key_validator=make_openai_validator_result(is_valid=True, status="valid"),
     )
     message.answer.reset_mock()
 
@@ -367,6 +386,7 @@ async def test_provider_command_shows_saved_connections() -> None:
         session_factory,
         settings=settings,
         admin_user_ids=(ADMIN_ID,),
+        openai_key_validator=make_openai_validator_result(is_valid=True, status="valid"),
     )
     message.answer.reset_mock()
 
@@ -380,6 +400,77 @@ async def test_provider_command_shows_saved_connections() -> None:
     provider_text = message.answer.await_args.args[0]
     assert "LLM-провайдеры:" in provider_text
     assert "openai/gpt-5-mini" in provider_text
+    assert "&lt;MODEL&gt;" in provider_text
+    assert "&lt;API_KEY&gt;" in provider_text
+    assert "сохранить персональный OpenAI-ключ" in provider_text
+    assert "переключить LLM-сценарии на персональные OpenAI-ключи" in provider_text
+
+
+async def test_provider_save_openai_marks_invalid_key_as_unusable() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        answer=AsyncMock(),
+    )
+    settings = make_settings(personal_api_keys_secret="test-secret")
+
+    await handle_provider_save_openai(
+        message,
+        SimpleNamespace(args="gpt-5-mini sk-invalid-key"),
+        session_factory,
+        settings=settings,
+        admin_user_ids=(ADMIN_ID,),
+        openai_key_validator=make_openai_validator_result(
+            is_valid=False,
+            status="invalid",
+            error_message="OpenAI отклонил ключ или доступ к модели.",
+        ),
+    )
+
+    with session_factory() as session:
+        user = session.query(User).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
+        connection = session.query(UserLLMConnection).filter_by(user_id=user.id).one()
+
+    assert connection.validation_status.value == "invalid"
+    assert connection.validation_error == "OpenAI отклонил ключ или доступ к модели."
+    assert connection.is_enabled is False
+    assert connection.is_selected is False
+    assert "проверка не пройдена" in message.answer.await_args.args[0]
+
+
+async def test_provider_command_escapes_validation_error_html() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
+    settings = make_settings(personal_api_keys_secret="test-secret")
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_provider_save_openai(
+        message,
+        SimpleNamespace(args="gpt-5-mini sk-invalid-key"),
+        session_factory,
+        settings=settings,
+        admin_user_ids=(ADMIN_ID,),
+        openai_key_validator=make_openai_validator_result(
+            is_valid=False,
+            status="invalid",
+            error_message="Модель <model> недоступна для этого ключа.",
+        ),
+    )
+    message.answer.reset_mock()
+
+    await handle_provider(
+        message,
+        session_factory,
+        settings=settings,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    provider_text = message.answer.await_args.args[0]
+    assert "Модель &lt;model&gt; недоступна для этого ключа." in provider_text
 
 
 async def test_admin_returns_system_overview_and_commands() -> None:
