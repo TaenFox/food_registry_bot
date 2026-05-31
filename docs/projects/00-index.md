@@ -17,3 +17,4 @@
 - [Проект Импорт и экспорт](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/projects/03-import-export-project.md:1)
 - [Проект Аналитические отчёты за период](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/projects/04-period-reports-project.md:1)
 - [Проект Сегментация LLM-провайдеров и пользовательских аккаунтов](/Users/pmokeev/Desktop/Projects/food_registry_bot/docs/projects/05-llm-provider-segmentation-project.md:1)
+- [Проект Действия с блюдами в recent](/Users/pmokeev/Desktop/Projects/food_registry_bot__codex-1/docs/projects/06-recent-item-actions-project.md:1)

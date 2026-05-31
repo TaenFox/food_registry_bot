@@ -717,7 +717,11 @@ class EntryRepository:
         statement = (
             select(Entry)
             .where(Entry.id == entry_id, Entry.user_id == user_id)
-            .options(selectinload(Entry.items))
+            .options(
+                selectinload(Entry.items)
+                .selectinload(EntryItem.metrics)
+                .selectinload(EntryItemMetric.metric)
+            )
         )
         return self._session.scalar(statement)
 
