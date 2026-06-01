@@ -436,6 +436,14 @@ class UserLLMConnectionRepository:
         )
         return self._session.scalar(statement)
 
+    def get_selected_for_user(self, *, user_id: int) -> Optional[UserLLMConnection]:
+        statement = select(UserLLMConnection).where(
+            UserLLMConnection.user_id == user_id,
+            UserLLMConnection.is_selected.is_(True),
+            UserLLMConnection.is_enabled.is_(True),
+        )
+        return self._session.scalar(statement)
+
     def delete_connection(
         self,
         *,

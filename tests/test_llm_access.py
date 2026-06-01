@@ -18,7 +18,7 @@ from food_registry_bot.db.repositories import (
     UserRepository,
 )
 from food_registry_bot.llm_access import SecretCipher
-from food_registry_bot.llm_access.resolver import resolve_openai_provider_access
+from food_registry_bot.llm_access.resolver import resolve_llm_provider_access, resolve_openai_provider_access
 
 
 def create_test_session() -> Session:
@@ -121,3 +121,47 @@ def test_resolve_openai_provider_access_uses_personal_key_for_external_user() ->
     assert access.is_available is True
     assert access.source == "personal"
     assert access.api_key == "personal-openai-key"
+
+
+def test_resolve_llm_provider_access_uses_selected_mistral_key_for_external_user() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=1003, username="external_mistral_user")
+    UserAccessRepository(session).set_access(
+        telegram_user_id=1003,
+        username="external_mistral_user",
+        is_allowed=True,
+        account_category=AccountCategory.EXTERNAL,
+    )
+    settings = make_settings(
+        openai_api_key="project-openai-key",
+        enable_openai_provider=True,
+        enable_mistral_provider=True,
+        personal_api_keys_secret="local-secret",
+    )
+    encrypted_api_key = SecretCipher(settings.personal_api_keys_secret).encrypt("personal-mistral-key")
+    UserLLMConnectionRepository(session).upsert_connection(
+        user_id=user.id,
+        provider=LLMProvider.MISTRAL,
+        model="mistral-small-latest",
+        encrypted_api_key=encrypted_api_key,
+        is_selected=True,
+    )
+    UserLLMProfileRepository(session).set_selection_mode(
+        user_id=user.id,
+        selection_mode=UserLLMSelectionMode.PERSONAL,
+    )
+
+    access = resolve_llm_provider_access(
+        session=session,
+        settings=settings,
+        user_id=user.id,
+        telegram_user_id=1003,
+        admin_user_ids=(),
+        project_model=settings.conversation_model,
+    )
+
+    assert access.is_available is True
+    assert access.source == "personal"
+    assert access.provider == "mistral"
+    assert access.model == "mistral-small-latest"
+    assert access.api_key == "personal-mistral-key"

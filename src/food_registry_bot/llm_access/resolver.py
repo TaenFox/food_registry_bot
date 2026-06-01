@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from food_registry_bot.config import Settings
 from food_registry_bot.conversation.factory import create_conversation_service
+from food_registry_bot.conversation.mistral_client import MistralChatCompletionsConversationClient
 from food_registry_bot.conversation.service import ConversationService, DisabledConversationService
 from food_registry_bot.db.models import AccountCategory, LLMProvider, UserLLMSelectionMode
 from food_registry_bot.db.repositories import (
@@ -14,9 +15,11 @@ from food_registry_bot.db.repositories import (
     UserLLMProfileRepository,
 )
 from food_registry_bot.extraction.factory import create_extraction_service
+from food_registry_bot.extraction.mistral_client import MistralChatCompletionsExtractionClient
 from food_registry_bot.extraction.service import JournalExtractionService
 from food_registry_bot.llm_access.crypto import SecretCipher, SecretCipherError
 from food_registry_bot.nutrition.factory import create_nutrition_service
+from food_registry_bot.nutrition.mistral_client import MistralChatCompletionsNutritionClient
 from food_registry_bot.nutrition.service import NutritionEstimationService
 
 
@@ -60,47 +63,47 @@ def build_user_llm_runtime_bundle(
     conversation_service = fallback_conversation_service
 
     if settings.extraction_provider.value == "llm":
-        extraction_access = resolve_openai_provider_access(
+        extraction_access = resolve_llm_provider_access(
             session=session,
             settings=settings,
             user_id=user_id,
             telegram_user_id=telegram_user_id,
             admin_user_ids=admin_user_ids,
-            model=settings.llm_model,
+            project_model=settings.llm_model,
         )
         if extraction_access.is_available and extraction_access.api_key is not None:
-            extraction_service = create_extraction_service_for_api_key(
+            extraction_service = create_extraction_service_for_access(
                 settings=settings,
-                api_key=extraction_access.api_key,
+                access=extraction_access,
             )
 
     if settings.nutrition_provider.value == "llm":
-        nutrition_access = resolve_openai_provider_access(
+        nutrition_access = resolve_llm_provider_access(
             session=session,
             settings=settings,
             user_id=user_id,
             telegram_user_id=telegram_user_id,
             admin_user_ids=admin_user_ids,
-            model=settings.nutrition_model,
+            project_model=settings.nutrition_model,
         )
         if nutrition_access.is_available and nutrition_access.api_key is not None:
-            nutrition_service = create_nutrition_service_for_api_key(
+            nutrition_service = create_nutrition_service_for_access(
                 settings=settings,
-                api_key=nutrition_access.api_key,
+                access=nutrition_access,
             )
 
-    conversation_access = resolve_openai_provider_access(
+    conversation_access = resolve_llm_provider_access(
         session=session,
         settings=settings,
         user_id=user_id,
         telegram_user_id=telegram_user_id,
         admin_user_ids=admin_user_ids,
-        model=settings.conversation_model,
+        project_model=settings.conversation_model,
     )
     if conversation_access.is_available and conversation_access.api_key is not None:
-        conversation_service = create_conversation_service_for_api_key(
+        conversation_service = create_conversation_service_for_access(
             settings=settings,
-            api_key=conversation_access.api_key,
+            access=conversation_access,
         )
     else:
         conversation_service = DisabledConversationService()
@@ -115,21 +118,21 @@ def build_user_llm_runtime_bundle(
     )
 
 
-def resolve_openai_provider_access(
+def resolve_llm_provider_access(
     *,
     session: Session,
     settings: Settings,
     user_id: int,
     telegram_user_id: int,
     admin_user_ids: tuple[int, ...],
-    model: str,
+    project_model: str,
 ) -> ResolvedProviderAccess:
     if not settings.enable_openai_provider:
         return ResolvedProviderAccess(
             is_available=False,
             source="disabled",
             provider=LLMProvider.OPENAI.value,
-            model=model,
+            model=project_model,
             api_key=None,
             reason_code="provider_disabled",
             reason_message="Провайдер OpenAI сейчас отключён в конфигурации приложения.",
@@ -144,11 +147,10 @@ def resolve_openai_provider_access(
     profile, _created = UserLLMProfileRepository(session).get_or_create(user_id=user_id)
 
     if profile.selection_mode is UserLLMSelectionMode.PERSONAL or account_category is not AccountCategory.INTERNAL:
-        return _resolve_personal_openai_access(
+        return _resolve_selected_personal_access(
             session=session,
             settings=settings,
             user_id=user_id,
-            model=model,
         )
 
     if settings.openai_api_key and settings.openai_api_key.strip():
@@ -156,7 +158,7 @@ def resolve_openai_provider_access(
             is_available=True,
             source="project",
             provider=LLMProvider.OPENAI.value,
-            model=model,
+            model=project_model,
             api_key=settings.openai_api_key,
         )
 
@@ -164,7 +166,7 @@ def resolve_openai_provider_access(
         is_available=False,
         source="project",
         provider=LLMProvider.OPENAI.value,
-        model=model,
+        model=project_model,
         api_key=None,
         reason_code="project_key_missing",
         reason_message="Проектный ключ OpenAI не настроен в конфигурации приложения.",
@@ -177,56 +179,117 @@ def build_provider_unavailable_message(access: ResolvedProviderAccess | None) ->
     return access.reason_message or "Сейчас для этого действия нет доступного LLM-провайдера."
 
 
-def create_extraction_service_for_api_key(*, settings: Settings, api_key: str) -> JournalExtractionService:
-    settings_copy = settings.model_copy(update={"openai_api_key": api_key})
-    return create_extraction_service(settings_copy)
+def create_extraction_service_for_access(
+    *,
+    settings: Settings,
+    access: ResolvedProviderAccess,
+) -> JournalExtractionService:
+    if access.provider == LLMProvider.OPENAI.value and access.api_key is not None:
+        settings_copy = settings.model_copy(
+            update={"openai_api_key": access.api_key, "llm_model": access.model}
+        )
+        return create_extraction_service(settings_copy)
+    if access.provider == LLMProvider.MISTRAL.value and access.api_key is not None and access.model is not None:
+        return create_extraction_service(
+            settings,
+            llm_client=MistralChatCompletionsExtractionClient(
+                api_key=access.api_key,
+                model=access.model,
+            ),
+        )
+    raise RuntimeError(f"Unsupported extraction provider access: {access.provider}")
 
 
-def create_nutrition_service_for_api_key(*, settings: Settings, api_key: str) -> NutritionEstimationService:
-    settings_copy = settings.model_copy(update={"openai_api_key": api_key})
-    return create_nutrition_service(settings_copy)
+def create_nutrition_service_for_access(
+    *,
+    settings: Settings,
+    access: ResolvedProviderAccess,
+) -> NutritionEstimationService:
+    if access.provider == LLMProvider.OPENAI.value and access.api_key is not None:
+        settings_copy = settings.model_copy(
+            update={"openai_api_key": access.api_key, "nutrition_model": access.model}
+        )
+        return create_nutrition_service(settings_copy)
+    if access.provider == LLMProvider.MISTRAL.value and access.api_key is not None and access.model is not None:
+        return create_nutrition_service(
+            settings,
+            llm_client=MistralChatCompletionsNutritionClient(
+                api_key=access.api_key,
+                model=access.model,
+            ),
+        )
+    raise RuntimeError(f"Unsupported nutrition provider access: {access.provider}")
 
 
-def create_conversation_service_for_api_key(*, settings: Settings, api_key: str) -> ConversationService:
-    settings_copy = settings.model_copy(update={"openai_api_key": api_key})
-    return create_conversation_service(settings_copy)
+def create_conversation_service_for_access(
+    *,
+    settings: Settings,
+    access: ResolvedProviderAccess,
+) -> ConversationService:
+    if access.provider == LLMProvider.OPENAI.value and access.api_key is not None:
+        settings_copy = settings.model_copy(
+            update={"openai_api_key": access.api_key, "conversation_model": access.model}
+        )
+        return create_conversation_service(settings_copy)
+    if access.provider == LLMProvider.MISTRAL.value and access.api_key is not None and access.model is not None:
+        return create_conversation_service(
+            settings,
+            llm_client=MistralChatCompletionsConversationClient(
+                api_key=access.api_key,
+                model=access.model,
+            ),
+        )
+    raise RuntimeError(f"Unsupported conversation provider access: {access.provider}")
 
 
-def _resolve_personal_openai_access(
+def _resolve_selected_personal_access(
     *,
     session: Session,
     settings: Settings,
     user_id: int,
-    model: str,
 ) -> ResolvedProviderAccess:
-    connection = UserLLMConnectionRepository(session).get_selected_for_user_provider_model(
-        user_id=user_id,
-        provider=LLMProvider.OPENAI,
-        model=model,
-    )
+    connection = UserLLMConnectionRepository(session).get_selected_for_user(user_id=user_id)
     if connection is None:
         return ResolvedProviderAccess(
             is_available=False,
             source="personal",
-            provider=LLMProvider.OPENAI.value,
-            model=model,
+            provider=None,
+            model=None,
             api_key=None,
             reason_code="personal_key_missing",
-            reason_message=(
-                "Для этого действия не найден выбранный персональный OpenAI-ключ "
-                f"для модели `{model}`."
-            ),
+            reason_message="Для этого действия не найдено выбранное персональное LLM-подключение.",
         )
 
     if not settings.personal_api_keys_secret or not settings.personal_api_keys_secret.strip():
         return ResolvedProviderAccess(
             is_available=False,
             source="personal",
-            provider=LLMProvider.OPENAI.value,
-            model=model,
+            provider=connection.provider.value,
+            model=connection.model,
             api_key=None,
             reason_code="personal_secret_missing",
             reason_message="В приложении не настроен секрет для расшифровки персональных API-ключей.",
+        )
+
+    if connection.provider is LLMProvider.OPENAI and not settings.enable_openai_provider:
+        return ResolvedProviderAccess(
+            is_available=False,
+            source="personal",
+            provider=connection.provider.value,
+            model=connection.model,
+            api_key=None,
+            reason_code="provider_disabled",
+            reason_message="Провайдер OpenAI сейчас отключён в конфигурации приложения.",
+        )
+    if connection.provider is LLMProvider.MISTRAL and not settings.enable_mistral_provider:
+        return ResolvedProviderAccess(
+            is_available=False,
+            source="personal",
+            provider=connection.provider.value,
+            model=connection.model,
+            api_key=None,
+            reason_code="provider_disabled",
+            reason_message="Провайдер Mistral сейчас отключён в конфигурации приложения.",
         )
 
     try:
@@ -235,17 +298,36 @@ def _resolve_personal_openai_access(
         return ResolvedProviderAccess(
             is_available=False,
             source="personal",
-            provider=LLMProvider.OPENAI.value,
-            model=model,
+            provider=connection.provider.value,
+            model=connection.model,
             api_key=None,
             reason_code="personal_key_decrypt_failed",
-            reason_message="Не удалось расшифровать персональный OpenAI-ключ.",
+            reason_message="Не удалось расшифровать персональный LLM-ключ.",
         )
 
     return ResolvedProviderAccess(
         is_available=True,
         source="personal",
-        provider=LLMProvider.OPENAI.value,
-        model=model,
+        provider=connection.provider.value,
+        model=connection.model,
         api_key=api_key,
+    )
+
+
+def resolve_openai_provider_access(
+    *,
+    session: Session,
+    settings: Settings,
+    user_id: int,
+    telegram_user_id: int,
+    admin_user_ids: tuple[int, ...],
+    model: str,
+) -> ResolvedProviderAccess:
+    return resolve_llm_provider_access(
+        session=session,
+        settings=settings,
+        user_id=user_id,
+        telegram_user_id=telegram_user_id,
+        admin_user_ids=admin_user_ids,
+        project_model=model,
     )

@@ -146,11 +146,25 @@ def _normalize_llm_raw_payload(raw_payload: str) -> str:
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        if entry.get("type") == "workout":
-            continue
-
         items = entry.get("items")
         if not isinstance(items, list):
+            continue
+
+        if entry.get("type") == "workout":
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                metrics = item.get("metrics")
+                if not isinstance(metrics, list):
+                    continue
+                filtered_metrics = [
+                    metric
+                    for metric in metrics
+                    if isinstance(metric, dict) and metric.get("code") == "workout_calories"
+                ]
+                if filtered_metrics != metrics:
+                    item["metrics"] = filtered_metrics
+                    normalized = True
             continue
 
         for item in items:

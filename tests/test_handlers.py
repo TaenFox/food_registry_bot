@@ -471,6 +471,39 @@ async def test_provider_save_marks_invalid_key_as_unusable() -> None:
     assert "проверка не пройдена" in message.answer.await_args.args[0]
 
 
+async def test_provider_save_mistral_stores_usable_connection() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        answer=AsyncMock(),
+    )
+    settings = make_settings(
+        personal_api_keys_secret="test-secret",
+        enable_mistral_provider=True,
+    )
+
+    await handle_provider_save(
+        message,
+        SimpleNamespace(args="mistral mistral-small mistral-test-key"),
+        session_factory,
+        settings=settings,
+        admin_user_ids=(ADMIN_ID,),
+        mistral_key_validator=make_openai_validator_result(is_valid=True, status="valid"),
+    )
+
+    with session_factory() as session:
+        user = session.query(User).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
+        connection = session.query(UserLLMConnection).filter_by(user_id=user.id).one()
+
+    assert connection.provider.value == "mistral"
+    assert connection.model == "mistral-small"
+    assert connection.validation_status.value == "valid"
+    assert connection.is_enabled is True
+    assert connection.is_selected is True
+    assert "Сохранил и проверил персональный ключ <code>mistral/mistral-small</code>." in message.answer.await_args.args[0]
+
+
 async def test_provider_command_escapes_validation_error_html() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
@@ -536,6 +569,29 @@ async def test_provider_command_for_external_user_shows_close_only() -> None:
     assert len(reply_markup.inline_keyboard) == 1
 
 
+async def test_provider_command_lists_mistral_when_provider_enabled() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
+    settings = make_settings(
+        personal_api_keys_secret="test-secret",
+        enable_mistral_provider=True,
+    )
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_provider(
+        message,
+        session_factory,
+        settings=settings,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    provider_text = message.answer.await_args.args[0]
+    assert "Доступные значения provider: openai, mistral" in provider_text
+
+
 async def test_external_user_gets_personal_provider_stub_for_conversation_message() -> None:
     session_factory = create_session_factory()
     with session_factory() as session:
@@ -573,7 +629,7 @@ async def test_external_user_gets_personal_provider_stub_for_conversation_messag
 
     message.answer.assert_awaited_once()
     response_text = message.answer.await_args.args[0]
-    assert "нужен персональный OpenAI-ключ" in response_text
+    assert "нужен персональный LLM-ключ" in response_text
     assert "/provider_save" in response_text
     assert "Управление сохранёнными подключениями" in response_text
     assert "можно выбрать или удалить добавленный ключ" in response_text

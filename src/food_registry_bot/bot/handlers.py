@@ -107,7 +107,12 @@ from food_registry_bot.extraction import (
 from food_registry_bot.exchange.service import FileLimitExceededError
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_PARTIAL
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_WORKOUT
-from food_registry_bot.llm_access import OpenAIKeyValidationResult, SecretCipher, validate_openai_api_key
+from food_registry_bot.llm_access import (
+    OpenAIKeyValidationResult,
+    SecretCipher,
+    validate_mistral_api_key,
+    validate_openai_api_key,
+)
 from food_registry_bot.llm_access.resolver import (
     build_provider_unavailable_message,
     build_user_llm_runtime_bundle,
@@ -193,7 +198,7 @@ ADMIN_LLM_ISSUE_PAGE_SIZE = 5
 LLM_MODEL_PLACEHOLDER = "<MODEL>"
 API_KEY_PLACEHOLDER = "<API_KEY>"
 PROVIDER_PLACEHOLDER = "<PROVIDER>"
-SUPPORTED_PERSONAL_PROVIDERS = (LLMProvider.OPENAI,)
+SUPPORTED_PERSONAL_PROVIDERS = (LLMProvider.OPENAI, LLMProvider.MISTRAL)
 
 
 class FoodWriteFlowError(RuntimeError):
@@ -497,12 +502,13 @@ def build_provider_settings_response(
     account_category: str,
     selection_mode: str,
     project_openai_enabled: bool,
-    personal_openai_enabled: bool,
+    personal_connections_enabled: bool,
     connections: list,
     admin_user_ids: tuple[int, ...],
     can_use_project: bool,
+    supported_personal_providers: tuple[LLMProvider, ...],
 ) -> str:
-    supported_provider_values = ", ".join(provider.value for provider in SUPPORTED_PERSONAL_PROVIDERS)
+    supported_provider_values = ", ".join(provider.value for provider in supported_personal_providers)
     escaped_provider_placeholder = html.escape(PROVIDER_PLACEHOLDER)
     escaped_model_placeholder = html.escape(LLM_MODEL_PLACEHOLDER)
     escaped_api_key_placeholder = html.escape(API_KEY_PLACEHOLDER)
@@ -510,7 +516,7 @@ def build_provider_settings_response(
     lines.append(f"- категория аккаунта: {resolve_effective_account_category(telegram_user_id=telegram_user_id, access_account_category=account_category, admin_user_ids=admin_user_ids)}")
     lines.append(f"- режим выбора: {selection_mode}")
     lines.append(f"- проектный OpenAI: {'доступен' if project_openai_enabled else 'недоступен'}")
-    lines.append(f"- персональные ключи OpenAI: {'доступны' if personal_openai_enabled else 'недоступны'}")
+    lines.append(f"- персональные LLM-подключения: {'доступны' if personal_connections_enabled else 'недоступны'}")
     if not connections:
         lines.extend(
             [
@@ -564,7 +570,7 @@ def build_personal_provider_required_message() -> str:
     escaped_model_placeholder = html.escape(LLM_MODEL_PLACEHOLDER)
     escaped_api_key_placeholder = html.escape(API_KEY_PLACEHOLDER)
     return (
-        "Для этого аккаунта нужен персональный OpenAI-ключ. "
+        "Для этого аккаунта нужен персональный LLM-ключ. "
         f"Сначала открой /provider и сохрани ключ командой /provider_save {escaped_provider_placeholder} {escaped_model_placeholder} {escaped_api_key_placeholder}. "
         "Управление сохранёнными подключениями тоже находится в /provider: там можно выбрать или удалить добавленный ключ."
     )
@@ -589,6 +595,15 @@ def resolve_supported_personal_provider(provider_value: str) -> LLMProvider | No
         if provider.value == normalized_value:
             return provider
     return None
+
+
+def resolve_enabled_personal_providers(settings: Settings) -> tuple[LLMProvider, ...]:
+    providers: list[LLMProvider] = []
+    if settings.enable_openai_provider:
+        providers.append(LLMProvider.OPENAI)
+    if settings.enable_mistral_provider:
+        providers.append(LLMProvider.MISTRAL)
+    return tuple(providers)
 
 
 def format_provider_name(provider: str) -> str:
@@ -2564,6 +2579,7 @@ async def handle_provider(
     if settings is None:
         await message.answer("Настройки провайдеров в этом окружении недоступны.")
         return
+    enabled_personal_providers = resolve_enabled_personal_providers(settings)
 
     telegram_user = message.from_user
     if telegram_user is None:
@@ -2585,8 +2601,8 @@ async def handle_provider(
         and settings.openai_api_key
         and account_category is AccountCategory.INTERNAL
     )
-    personal_openai_enabled = bool(
-        settings.enable_openai_provider and settings.personal_api_keys_secret
+    personal_connections_enabled = bool(
+        enabled_personal_providers and settings.personal_api_keys_secret
     )
     can_use_project = account_category is AccountCategory.INTERNAL
     await message.answer(
@@ -2597,10 +2613,11 @@ async def handle_provider(
             ),
             selection_mode=profile.selection_mode.value,
             project_openai_enabled=project_openai_enabled,
-            personal_openai_enabled=personal_openai_enabled,
+            personal_connections_enabled=personal_connections_enabled,
             connections=connections,
             admin_user_ids=admin_user_ids,
             can_use_project=can_use_project,
+            supported_personal_providers=enabled_personal_providers,
         ),
         reply_markup=build_provider_reply_markup(
             can_use_project=can_use_project,
@@ -2618,6 +2635,7 @@ async def handle_provider_save(
     settings: Settings | None = None,
     admin_user_ids: tuple[int, ...] = (),
     openai_key_validator=validate_openai_api_key,
+    mistral_key_validator=validate_mistral_api_key,
 ) -> None:
     if not await require_user_access(message, session_factory, admin_user_ids):
         return
@@ -2625,10 +2643,11 @@ async def handle_provider_save(
     if settings is None:
         await message.answer("Настройки провайдеров в этом окружении недоступны.")
         return
+    enabled_personal_providers = resolve_enabled_personal_providers(settings)
 
     parsed_args = parse_provider_save_command_args(command)
     if parsed_args is None:
-        supported_provider_values = ", ".join(provider.value for provider in SUPPORTED_PERSONAL_PROVIDERS)
+        supported_provider_values = ", ".join(provider.value for provider in enabled_personal_providers)
         await message.answer(
             "Использование: "
             f"<code>/provider_save {PROVIDER_PLACEHOLDER} {LLM_MODEL_PLACEHOLDER} {API_KEY_PLACEHOLDER}</code>\n"
@@ -2639,15 +2658,17 @@ async def handle_provider_save(
     provider_value, model, api_key = parsed_args
     provider = resolve_supported_personal_provider(provider_value)
     if provider is None:
-        supported_provider_values = ", ".join(provider.value for provider in SUPPORTED_PERSONAL_PROVIDERS)
+        supported_provider_values = ", ".join(provider.value for provider in enabled_personal_providers)
         await message.answer(
             f"Провайдер <code>{html.escape(provider_value)}</code> сейчас не поддержан.\n"
             f"Доступные значения provider: <code>{supported_provider_values}</code>"
         )
         return
 
-    if provider is LLMProvider.OPENAI and not settings.enable_openai_provider:
-        await message.answer("Класс провайдера OpenAI сейчас отключён в конфигурации приложения.")
+    if provider not in enabled_personal_providers:
+        await message.answer(
+            f"Класс провайдера {provider.value} сейчас отключён в конфигурации приложения."
+        )
         return
     if not settings.personal_api_keys_secret:
         await message.answer("В приложении не настроен секрет для хранения персональных API-ключей.")
@@ -2655,7 +2676,10 @@ async def handle_provider_save(
 
     cipher = SecretCipher(settings.personal_api_keys_secret)
     encrypted_api_key = cipher.encrypt(api_key)
-    validation_result: OpenAIKeyValidationResult = openai_key_validator(api_key=api_key, model=model)
+    if provider is LLMProvider.OPENAI:
+        validation_result: OpenAIKeyValidationResult = openai_key_validator(api_key=api_key, model=model)
+    else:
+        validation_result = mistral_key_validator(api_key=api_key, model=model)
     validation_status = LLMConnectionValidationStatus(validation_result.status)
     is_usable_connection = validation_result.is_valid
 
@@ -2847,10 +2871,13 @@ async def handle_provider_menu_callback(
             ),
             selection_mode=profile.selection_mode.value,
             project_openai_enabled=bool(settings.enable_openai_provider and settings.openai_api_key),
-            personal_openai_enabled=bool(settings.enable_openai_provider and settings.personal_api_keys_secret),
+            personal_connections_enabled=bool(
+                resolve_enabled_personal_providers(settings) and settings.personal_api_keys_secret
+            ),
             connections=connections,
             admin_user_ids=admin_user_ids,
             can_use_project=can_use_project,
+            supported_personal_providers=resolve_enabled_personal_providers(settings),
         ),
         reply_markup=build_provider_reply_markup(
             can_use_project=can_use_project,
