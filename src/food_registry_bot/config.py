@@ -101,6 +101,12 @@ class Settings(BaseSettings):
     nutrition_model: str = Field(default="gpt-5-mini", alias="NUTRITION_MODEL")
     conversation_model: str = Field(default="gpt-5-mini", alias="CONVERSATION_MODEL")
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
+    enable_openai_provider: bool = Field(default=True, alias="ENABLE_OPENAI_PROVIDER")
+    enable_mistral_provider: bool = Field(default=False, alias="ENABLE_MISTRAL_PROVIDER")
+    personal_api_keys_secret: Optional[str] = Field(
+        default=None,
+        alias="PERSONAL_API_KEYS_SECRET",
+    )
     data_exchange_dir: Path = Field(
         default_factory=resolve_default_data_exchange_dir,
         alias="DATA_EXCHANGE_DIR",

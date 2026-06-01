@@ -272,6 +272,27 @@ def test_llm_extraction_service_drops_food_metrics_before_validation() -> None:
     assert '"metrics"' not in result.raw_payload
 
 
+def test_llm_extraction_service_drops_non_workout_calorie_metrics_before_validation() -> None:
+    client = SimpleNamespace(
+        provider_name="mistral_chat_completions",
+        model_name="mistral-small-latest",
+        extract_journal_payload=lambda _request: (
+            '{"entries": [{"type": "workout", "items": [{"name": "тренировка", "quantity": 90, "unit": "min", '
+            '"metrics": [{"code": "workout_calories", "value": 757, "confidence": "high"}, '
+            '{"code": "avg_heart_rate", "value": 132, "confidence": "high"}]}]}]}'
+        ),
+    )
+    service = LLMExtractionService(client=client)
+
+    result = service.extract(JournalExtractionRequest(text="запиши тренировку"))
+
+    assert isinstance(result, ValidExtractionPayload)
+    metrics = result.payload.entries[0].items[0].metrics
+    assert len(metrics) == 1
+    assert metrics[0].code == "workout_calories"
+    assert '"avg_heart_rate"' not in result.raw_payload
+
+
 def test_llm_extraction_service_handles_client_errors() -> None:
     def raise_client_error(_request: JournalExtractionRequest) -> str:
         raise LLMExtractionClientError("boom")

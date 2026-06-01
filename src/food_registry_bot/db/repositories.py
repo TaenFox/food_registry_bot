@@ -8,10 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from food_registry_bot.db.models import (
+    AccountCategory,
     Entry,
     EntryItem,
     EntryItemMetric,
     EntryType,
+    LLMConnectionValidationStatus,
+    LLMProvider,
     LLMIssueLog,
     LLMIssueStage,
     MealType,
@@ -25,6 +28,9 @@ from food_registry_bot.db.models import (
     ConversationSession,
     User,
     UserAccess,
+    UserLLMConnection,
+    UserLLMProfile,
+    UserLLMSelectionMode,
     UserGoalPreference,
     UserSummaryPreference,
 )
@@ -68,6 +74,7 @@ class KnownUserAccessView:
     username: str | None
     has_profile: bool
     is_allowed: bool
+    account_category: str
 
 
 @dataclass(frozen=True)
@@ -88,6 +95,17 @@ class LLMIssueLogCreate:
     request_text: str | None = None
     raw_payload: str | None = None
     technical_message: str | None = None
+
+
+@dataclass(frozen=True)
+class UserLLMConnectionView:
+    provider: str
+    model: str
+    is_enabled: bool
+    is_selected: bool
+    validation_status: str
+    validation_error: str | None
+    has_encrypted_api_key: bool
 
 
 class UserRepository:
@@ -158,12 +176,19 @@ class UserAccessRepository:
         access = self.get_by_telegram_user_id(telegram_user_id)
         return bool(access and access.is_allowed)
 
+    def get_account_category(self, telegram_user_id: int) -> AccountCategory:
+        access = self.get_by_telegram_user_id(telegram_user_id)
+        if access is None:
+            return AccountCategory.UNASSIGNED
+        return access.account_category
+
     def set_access(
         self,
         *,
         telegram_user_id: int,
         username: str | None,
         is_allowed: bool,
+        account_category: AccountCategory | None = None,
     ) -> UserAccess:
         access = self.get_by_telegram_user_id(telegram_user_id)
         if access is None:
@@ -171,11 +196,43 @@ class UserAccessRepository:
                 telegram_user_id=telegram_user_id,
                 username=username,
                 is_allowed=is_allowed,
+                account_category=account_category or (
+                    AccountCategory.EXTERNAL if is_allowed else AccountCategory.UNASSIGNED
+                ),
             )
             self._session.add(access)
         else:
             access.username = username
             access.is_allowed = is_allowed
+            if account_category is not None:
+                access.account_category = account_category
+            elif is_allowed and access.account_category is AccountCategory.UNASSIGNED:
+                access.account_category = AccountCategory.EXTERNAL
+
+        self._session.flush()
+        return access
+
+    def set_account_category(
+        self,
+        *,
+        telegram_user_id: int,
+        username: str | None,
+        account_category: AccountCategory,
+    ) -> UserAccess:
+        access = self.get_by_telegram_user_id(telegram_user_id)
+        if access is None:
+            access = UserAccess(
+                telegram_user_id=telegram_user_id,
+                username=username,
+                is_allowed=account_category is not AccountCategory.UNASSIGNED,
+                account_category=account_category,
+            )
+            self._session.add(access)
+        else:
+            access.username = username
+            access.account_category = account_category
+            if account_category is AccountCategory.UNASSIGNED:
+                access.is_allowed = False
 
         self._session.flush()
         return access
@@ -204,10 +261,220 @@ class UserAccessRepository:
                     ),
                     has_profile=user is not None,
                     is_allowed=bool(access and access.is_allowed),
+                    account_category=(
+                        access.account_category.value
+                        if access is not None
+                        else AccountCategory.UNASSIGNED.value
+                    ),
                 )
             )
 
         return result
+
+
+class UserLLMProfileRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_by_user_id(self, user_id: int) -> Optional[UserLLMProfile]:
+        statement = select(UserLLMProfile).where(UserLLMProfile.user_id == user_id)
+        return self._session.scalar(statement)
+
+    def get_or_create(self, *, user_id: int) -> tuple[UserLLMProfile, bool]:
+        profile = self.get_by_user_id(user_id)
+        if profile is not None:
+            return profile, False
+
+        profile = UserLLMProfile(user_id=user_id, selection_mode=UserLLMSelectionMode.PROJECT)
+        self._session.add(profile)
+        self._session.flush()
+        return profile, True
+
+    def set_selection_mode(
+        self,
+        *,
+        user_id: int,
+        selection_mode: UserLLMSelectionMode,
+    ) -> UserLLMProfile:
+        profile, _created = self.get_or_create(user_id=user_id)
+        profile.selection_mode = selection_mode
+        self._session.flush()
+        return profile
+
+
+class UserLLMConnectionRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_by_user_provider_model(
+        self,
+        *,
+        user_id: int,
+        provider: LLMProvider,
+        model: str,
+    ) -> Optional[UserLLMConnection]:
+        statement = select(UserLLMConnection).where(
+            UserLLMConnection.user_id == user_id,
+            UserLLMConnection.provider == provider,
+            UserLLMConnection.model == model,
+        )
+        return self._session.scalar(statement)
+
+    def list_for_user(self, *, user_id: int) -> list[UserLLMConnection]:
+        statement = (
+            select(UserLLMConnection)
+            .where(UserLLMConnection.user_id == user_id)
+            .order_by(UserLLMConnection.provider.asc(), UserLLMConnection.model.asc())
+        )
+        return list(self._session.scalars(statement))
+
+    def list_views_for_user(self, *, user_id: int) -> list[UserLLMConnectionView]:
+        return [
+            UserLLMConnectionView(
+                provider=connection.provider.value,
+                model=connection.model,
+                is_enabled=connection.is_enabled,
+                is_selected=connection.is_selected,
+                validation_status=connection.validation_status.value,
+                validation_error=connection.validation_error,
+                has_encrypted_api_key=bool(connection.encrypted_api_key),
+            )
+            for connection in self.list_for_user(user_id=user_id)
+        ]
+
+    def upsert_connection(
+        self,
+        *,
+        user_id: int,
+        provider: LLMProvider,
+        model: str,
+        encrypted_api_key: str,
+        is_enabled: bool = True,
+        is_selected: bool = False,
+        validation_status: LLMConnectionValidationStatus = LLMConnectionValidationStatus.UNKNOWN,
+        validation_error: str | None = None,
+        last_validated_at: datetime | None = None,
+    ) -> UserLLMConnection:
+        connection = self.get_by_user_provider_model(
+            user_id=user_id,
+            provider=provider,
+            model=model,
+        )
+        if connection is None:
+            connection = UserLLMConnection(
+                user_id=user_id,
+                provider=provider,
+                model=model,
+                encrypted_api_key=encrypted_api_key,
+                is_enabled=is_enabled,
+                is_selected=is_selected,
+                validation_status=validation_status,
+                validation_error=validation_error,
+                last_validated_at=last_validated_at,
+            )
+            self._session.add(connection)
+        else:
+            connection.encrypted_api_key = encrypted_api_key
+            connection.is_enabled = is_enabled
+            connection.is_selected = is_selected
+            connection.validation_status = validation_status
+            connection.validation_error = validation_error
+            connection.last_validated_at = last_validated_at
+
+        if is_selected:
+            self._clear_selected_for_user_except(user_id=user_id, keep_connection=connection)
+
+        self._session.flush()
+        return connection
+
+    def select_provider(self, *, user_id: int, provider: LLMProvider) -> list[UserLLMConnection]:
+        connections = self.list_for_user(user_id=user_id)
+        updated_connections: list[UserLLMConnection] = []
+        for connection in connections:
+            should_select = connection.provider is provider and connection.is_enabled
+            connection.is_selected = should_select
+            if should_select:
+                updated_connections.append(connection)
+
+        self._session.flush()
+        return updated_connections
+
+    def select_connection(
+        self,
+        *,
+        user_id: int,
+        provider: LLMProvider,
+        model: str,
+    ) -> UserLLMConnection | None:
+        target_connection = self.get_by_user_provider_model(
+            user_id=user_id,
+            provider=provider,
+            model=model,
+        )
+        if target_connection is None or not target_connection.is_enabled:
+            return None
+
+        for connection in self.list_for_user(user_id=user_id):
+            connection.is_selected = connection.id == target_connection.id
+
+        self._session.flush()
+        return target_connection
+
+    def get_selected_for_user_provider_model(
+        self,
+        *,
+        user_id: int,
+        provider: LLMProvider,
+        model: str,
+    ) -> Optional[UserLLMConnection]:
+        statement = select(UserLLMConnection).where(
+            UserLLMConnection.user_id == user_id,
+            UserLLMConnection.provider == provider,
+            UserLLMConnection.model == model,
+            UserLLMConnection.is_selected.is_(True),
+            UserLLMConnection.is_enabled.is_(True),
+        )
+        return self._session.scalar(statement)
+
+    def get_selected_for_user(self, *, user_id: int) -> Optional[UserLLMConnection]:
+        statement = select(UserLLMConnection).where(
+            UserLLMConnection.user_id == user_id,
+            UserLLMConnection.is_selected.is_(True),
+            UserLLMConnection.is_enabled.is_(True),
+        )
+        return self._session.scalar(statement)
+
+    def delete_connection(
+        self,
+        *,
+        user_id: int,
+        provider: LLMProvider,
+        model: str,
+    ) -> bool:
+        connection = self.get_by_user_provider_model(
+            user_id=user_id,
+            provider=provider,
+            model=model,
+        )
+        if connection is None:
+            return False
+
+        self._session.delete(connection)
+        self._session.flush()
+        return True
+
+    def _clear_selected_for_user_except(
+        self,
+        *,
+        user_id: int,
+        keep_connection: UserLLMConnection,
+    ) -> None:
+        for connection in self.list_for_user(user_id=user_id):
+            if connection.id == keep_connection.id:
+                continue
+            if connection.provider is keep_connection.provider:
+                continue
+            connection.is_selected = False
 
 
 class UserSummaryPreferenceRepository:
