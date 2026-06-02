@@ -44,7 +44,13 @@ class MistralChatCompletionsNutritionClient:
                     {"role": "system", "content": self._build_system_prompt()},
                     {"role": "user", "content": self._build_user_content(request)},
                 ],
-                response_format={"type": "json_object"},
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "nutrition_estimation_payload",
+                        "schema": NutritionEstimationPayload.model_json_schema(),
+                    },
+                },
             )
         except MistralChatClientError as exc:
             raise LLMNutritionClientError(str(exc)) from exc
@@ -60,11 +66,9 @@ class MistralChatCompletionsNutritionClient:
 
     @staticmethod
     def _build_system_prompt() -> str:
-        schema = NutritionEstimationPayload.model_json_schema()
         return (
             "Estimate nutrition for each provided food item. "
-            "Return only valid json matching this schema exactly: "
-            f"{json.dumps(schema, ensure_ascii=False)}. "
+            "Return only the nutrition payload object and do not echo any schema description. "
             "Each response item must keep the same client_item_id as in the request. "
             "Return one result for every request item and do not omit or invent client_item_id values. "
             "Return the metrics calories, protein, fat, carbs, and fiber for every item. "

@@ -83,7 +83,13 @@ class MistralChatCompletionsConversationClient:
                         ),
                     },
                 ],
-                response_format={"type": "json_object"},
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "nutrition_coach_reply",
+                        "schema": NutritionCoachLLMReply.model_json_schema(),
+                    },
+                },
             )
         except MistralChatClientError as exc:
             raise LLMConversationClientError(str(exc)) from exc
@@ -95,7 +101,7 @@ class MistralChatCompletionsConversationClient:
         try:
             parsed = NutritionCoachLLMReply.model_validate_json(output_text)
         except Exception:
-            if output_text:
+            if output_text and not output_text.lstrip().startswith("{"):
                 return output_text, session_summary
             raise LLMConversationClientError("Mistral returned an invalid coach response payload")
 
@@ -130,7 +136,13 @@ class MistralChatCompletionsConversationClient:
                         ),
                     },
                 ],
-                response_format={"type": "json_object"},
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "nutrition_coach_post_entry_comment",
+                        "schema": NutritionCoachPostEntryComment.model_json_schema(),
+                    },
+                },
             )
         except MistralChatClientError as exc:
             raise LLMConversationClientError(str(exc)) from exc
@@ -142,7 +154,9 @@ class MistralChatCompletionsConversationClient:
         try:
             parsed = NutritionCoachPostEntryComment.model_validate_json(output_text)
         except Exception:
-            return output_text or None
+            if output_text and not output_text.lstrip().startswith("{"):
+                return output_text
+            raise LLMConversationClientError("Mistral returned an invalid post-entry comment payload")
 
         if parsed.comment_text is None:
             return None
@@ -215,23 +229,19 @@ class MistralChatCompletionsConversationClient:
 
     @staticmethod
     def _build_system_prompt() -> str:
-        schema = NutritionCoachLLMReply.model_json_schema()
         return (
             "You are a concise nutrition coach inside a Telegram bot. "
             "Reply in Russian unless the user clearly asks otherwise. "
             "Use the factual context as the source of truth for today's numbers and avoid inventing data. "
             "If the user asks about something missing from the factual context, say so plainly and provide a cautious general answer. "
-            "Return only valid json matching this schema exactly: "
-            f"{json.dumps(schema, ensure_ascii=False)}."
+            "Return only the reply object, not the schema description."
         )
 
     @staticmethod
     def _build_post_entry_system_prompt() -> str:
-        schema = NutritionCoachPostEntryComment.model_json_schema()
         return (
             "You write a short, helpful post-entry nutrition comment for a Telegram bot in Russian. "
             "Keep it brief, specific to the saved food items and metric deltas, and avoid repeating raw totals unless useful. "
             "If there is nothing useful to add, return comment_text as null. "
-            "Return only valid json matching this schema exactly: "
-            f"{json.dumps(schema, ensure_ascii=False)}."
+            "Return only the comment object, not the schema description."
         )
