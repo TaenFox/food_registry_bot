@@ -46,7 +46,13 @@ class MistralChatCompletionsExtractionClient:
                     {"role": "system", "content": self._build_system_prompt()},
                     {"role": "user", "content": self._build_user_content(request)},
                 ],
-                response_format={"type": "json_object"},
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "extracted_journal_payload",
+                        "schema": ExtractedJournalPayload.model_json_schema(),
+                    },
+                },
             )
         except MistralChatClientError as exc:
             raise LLMExtractionClientError(str(exc)) from exc
@@ -84,11 +90,9 @@ class MistralChatCompletionsExtractionClient:
 
     @staticmethod
     def _build_system_prompt() -> str:
-        schema = ExtractedJournalPayload.model_json_schema()
         return (
             "Extract journal entries from a user message or food photo. "
-            "Return only valid json matching this schema exactly: "
-            f"{json.dumps(schema, ensure_ascii=False)}. "
+            "Return only the extracted journal payload object and do not echo any schema description. "
             "Use 'food', 'water', or 'workout' for entry type and keep separate entries when one message contains mixed journal facts. "
             "For water entries, always set item.name to exactly 'water'. "
             "If water quantity is present, use unit 'ml'. "
