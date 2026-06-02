@@ -5,6 +5,7 @@ from food_registry_bot.config import Settings
 from food_registry_bot.conversation.context import NutritionCoachConversationTurn, NutritionCoachFactualContext
 from food_registry_bot.conversation.factory import create_conversation_service
 from food_registry_bot.conversation.llm_client import LLMConversationClientError
+from food_registry_bot.conversation.mistral_client import MistralChatCompletionsConversationClient
 from food_registry_bot.conversation.openai_client import OpenAIResponsesConversationClient
 from food_registry_bot.conversation.service import DisabledConversationService, LLMConversationService
 from food_registry_bot.extraction.request import ExtractionImageInput
@@ -343,6 +344,98 @@ def test_openai_conversation_client_returns_post_entry_comment_from_json_payload
     )
 
     assert comment == "После этой записи белок немного вырос, но до цели по белку ещё заметный запас."
+
+
+def test_mistral_conversation_client_requests_json_schema_response_format() -> None:
+    captured_kwargs = {}
+
+    class StubClient:
+        def complete(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"reply_text":"Нормальный ответ.","updated_session_summary":"summary"}'
+                        }
+                    }
+                ]
+            }
+
+    client = MistralChatCompletionsConversationClient(
+        api_key="test-key",
+        model="mistral-small-latest",
+        client=StubClient(),
+    )
+
+    reply_text, updated_summary = client.generate_reply(
+        user_message="что съесть на ужин?",
+        factual_context=NutritionCoachFactualContext(
+            summary_date="2026-05-20",
+            timezone="Europe/Moscow",
+            nutrition_day_start_hour=4,
+            day_totals={"calories": 1012.0, "protein": 52.0, "fat": 40.1, "carbs": 107.9, "fiber": 21.7, "water": 750.0},
+            goal_progress={},
+            recent_entries=[],
+            nutrition_summary_is_complete=True,
+            excluded_food_entry_count=0,
+            water_summary_is_complete=True,
+            excluded_water_entry_count=0,
+        ),
+        session_summary="говорили про ужин",
+        recent_turns=[],
+    )
+
+    assert reply_text == "Нормальный ответ."
+    assert updated_summary == "summary"
+    assert captured_kwargs["response_format"]["type"] == "json_schema"
+    assert captured_kwargs["response_format"]["json_schema"]["name"] == "nutrition_coach_reply"
+
+
+def test_mistral_conversation_client_rejects_schema_echo_payload() -> None:
+    class StubClient:
+        def complete(self, **_kwargs):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"additionalProperties": false, "properties": {"reply_text": {"type": "string"}}, '
+                                '"required": ["reply_text"], "title": "NutritionCoachLLMReply"}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+    client = MistralChatCompletionsConversationClient(
+        api_key="test-key",
+        model="mistral-small-latest",
+        client=StubClient(),
+    )
+
+    try:
+        client.generate_reply(
+            user_message="покажи топ 10 круп по клетчатке",
+            factual_context=NutritionCoachFactualContext(
+                summary_date="2026-05-20",
+                timezone="Europe/Moscow",
+                nutrition_day_start_hour=4,
+                day_totals={"calories": 1012.0, "protein": 52.0, "fat": 40.1, "carbs": 107.9, "fiber": 21.7, "water": 750.0},
+                goal_progress={},
+                recent_entries=[],
+                nutrition_summary_is_complete=True,
+                excluded_food_entry_count=0,
+                water_summary_is_complete=True,
+                excluded_water_entry_count=0,
+            ),
+            session_summary="говорили про крупы",
+            recent_turns=[],
+        )
+    except LLMConversationClientError as exc:
+        assert "invalid coach response payload" in str(exc)
+    else:
+        raise AssertionError("Expected schema echo payload to raise LLMConversationClientError")
 
 
 def test_llm_conversation_service_swallows_post_entry_comment_error() -> None:

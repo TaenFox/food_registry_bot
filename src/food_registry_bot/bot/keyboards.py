@@ -7,6 +7,7 @@ from food_registry_bot.bot.payloads import (
     DataExchangeFileCallback,
     GoalMessageCallback,
     PeriodReportCallback,
+    ProviderMenuCallback,
     RecentEntryActionCallback,
     RecentEntryDeleteCallback,
     SummarySettingsCallback,
@@ -616,6 +617,86 @@ def build_goal_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def build_provider_connections_keyboard(
+    *,
+    can_use_project: bool,
+    selection_mode: str,
+    connection_buttons: list[tuple[str, str, str]],
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if can_use_project:
+        project_prefix = "✓ " if selection_mode == "project" else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{project_prefix}Проектный",
+                    callback_data=ProviderMenuCallback(action="use_project").pack(),
+                )
+            ]
+        )
+
+    for button_text, provider, model in connection_buttons:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=button_text,
+                    callback_data=ProviderMenuCallback(
+                        action="open_connection",
+                        provider=provider,
+                        model=model,
+                    ).pack(),
+                )
+            ]
+        )
+
+    rows.append(_build_close_row(ProviderMenuCallback(action="close").pack()))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_provider_connection_actions_keyboard(
+    *,
+    provider: str,
+    model: str,
+    can_choose: bool,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if can_choose:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Выбрать",
+                    callback_data=ProviderMenuCallback(
+                        action="select_connection",
+                        provider=provider,
+                        model=model,
+                    ).pack(),
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Удалить",
+                callback_data=ProviderMenuCallback(
+                    action="delete_connection",
+                    provider=provider,
+                    model=model,
+                ).pack(),
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Назад",
+                callback_data=ProviderMenuCallback(action="back").pack(),
+            )
+        ]
+    )
+    rows.append(_build_close_row(ProviderMenuCallback(action="close").pack()))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def build_admin_user_list_keyboard(
     *,
     user_buttons: list[tuple[str, int]],
@@ -651,7 +732,14 @@ def build_admin_user_list_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_admin_user_actions_keyboard(*, telegram_user_id: int, page: int, is_allowed: bool, is_admin: bool) -> InlineKeyboardMarkup:
+def build_admin_user_actions_keyboard(
+    *,
+    telegram_user_id: int,
+    page: int,
+    is_allowed: bool,
+    is_admin: bool,
+    account_category: str,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if not is_admin:
         access_button_text = "Запретить доступ" if is_allowed else "Разрешить доступ"
@@ -666,6 +754,26 @@ def build_admin_user_actions_keyboard(*, telegram_user_id: int, page: int, is_al
                         page=page,
                     ).pack(),
                 )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"Internal{' · текущая' if account_category == 'internal' else ''}",
+                    callback_data=AdminPanelCallback(
+                        action="set_internal_category",
+                        telegram_user_id=telegram_user_id,
+                        page=page,
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text=f"External{' · текущая' if account_category == 'external' else ''}",
+                    callback_data=AdminPanelCallback(
+                        action="set_external_category",
+                        telegram_user_id=telegram_user_id,
+                        page=page,
+                    ).pack(),
+                ),
             ]
         )
     rows.extend(
