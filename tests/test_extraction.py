@@ -293,6 +293,26 @@ def test_llm_extraction_service_drops_non_workout_calorie_metrics_before_validat
     assert '"avg_heart_rate"' not in result.raw_payload
 
 
+def test_llm_extraction_service_drops_unsupported_food_unit_before_validation() -> None:
+    client = SimpleNamespace(
+        provider_name="openai_responses",
+        model_name="gpt-5-mini",
+        extract_journal_payload=lambda _request: (
+            '{"entries": [{"type": "food", "items": [{"name": "сосиска Вязанка", "quantity": 1, "unit": "шт"}]}]}'
+        ),
+    )
+    service = LLMExtractionService(client=client)
+    result = service.extract(JournalExtractionRequest(text="Добавь одну сосиску Вязанка"))
+
+    assert isinstance(result, ValidExtractionPayload)
+    item = result.payload.entries[0].items[0]
+    assert item.name == "сосиска Вязанка"
+    assert item.quantity is None
+    assert item.unit is None
+    assert '"quantity"' not in result.raw_payload
+    assert '"unit"' not in result.raw_payload
+
+
 def test_llm_extraction_service_handles_client_errors() -> None:
     def raise_client_error(_request: JournalExtractionRequest) -> str:
         raise LLMExtractionClientError("boom")

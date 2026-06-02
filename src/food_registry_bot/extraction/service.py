@@ -146,11 +146,12 @@ def _normalize_llm_raw_payload(raw_payload: str) -> str:
     for entry in entries:
         if not isinstance(entry, dict):
             continue
+        entry_type = entry.get("type")
         items = entry.get("items")
         if not isinstance(items, list):
             continue
 
-        if entry.get("type") == "workout":
+        if entry_type == "workout":
             for item in items:
                 if not isinstance(item, dict):
                     continue
@@ -171,8 +172,25 @@ def _normalize_llm_raw_payload(raw_payload: str) -> str:
             if not isinstance(item, dict):
                 continue
             if "metrics" not in item:
+                pass
+            else:
+                item.pop("metrics", None)
+                normalized = True
+
+            if entry_type != "food":
                 continue
-            item.pop("metrics", None)
+
+            quantity = item.get("quantity")
+            unit = item.get("unit")
+            if quantity is None or unit is None:
+                continue
+
+            normalized_unit = str(unit).strip().lower()
+            if normalized_unit in {"g", "гр", "г", "ml", "мл"}:
+                continue
+
+            item.pop("quantity", None)
+            item.pop("unit", None)
             normalized = True
 
     if not normalized:
