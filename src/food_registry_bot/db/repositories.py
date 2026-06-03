@@ -21,6 +21,7 @@ from food_registry_bot.db.models import (
     DataExchangeDirection,
     DataExchangeFile,
     DataExchangeStatus,
+    SupportedDiet,
     SupportedMetric,
     DailyGoalSnapshot,
     ConversationMessage,
@@ -32,6 +33,7 @@ from food_registry_bot.db.models import (
     UserLLMProfile,
     UserLLMSelectionMode,
     UserGoalPreference,
+    UserDietPreference,
     UserSummaryPreference,
 )
 if TYPE_CHECKING:
@@ -106,6 +108,14 @@ class UserLLMConnectionView:
     validation_status: str
     validation_error: str | None
     has_encrypted_api_key: bool
+
+
+@dataclass(frozen=True)
+class SupportedDietView:
+    code: str
+    name: str
+    is_enabled: bool
+    is_selected: bool
 
 
 class UserRepository:
@@ -1095,6 +1105,109 @@ class SupportedMetricRepository:
         statement = select(SupportedMetric).where(SupportedMetric.code.in_(codes))
         metrics = list(self._session.scalars(statement))
         return {metric.code: metric for metric in metrics}
+
+
+class SupportedDietRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def list_all(self) -> list[SupportedDiet]:
+        statement = select(SupportedDiet).order_by(SupportedDiet.id.asc())
+        return list(self._session.scalars(statement))
+
+    def list_enabled(self) -> list[SupportedDiet]:
+        statement = (
+            select(SupportedDiet)
+            .where(SupportedDiet.is_enabled.is_(True))
+            .order_by(SupportedDiet.id.asc())
+        )
+        return list(self._session.scalars(statement))
+
+    def get_by_code(self, *, code: str) -> SupportedDiet | None:
+        statement = select(SupportedDiet).where(SupportedDiet.code == code)
+        return self._session.scalar(statement)
+
+
+class UserDietPreferenceRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_by_user_and_diet(self, *, user_id: int, diet_id: int) -> UserDietPreference | None:
+        statement = select(UserDietPreference).where(
+            UserDietPreference.user_id == user_id,
+            UserDietPreference.diet_id == diet_id,
+        )
+        return self._session.scalar(statement)
+
+    def get_or_create(self, *, user_id: int, diet_id: int) -> tuple[UserDietPreference, bool]:
+        preference = self.get_by_user_and_diet(user_id=user_id, diet_id=diet_id)
+        if preference is not None:
+            return preference, False
+
+        preference = UserDietPreference(
+            user_id=user_id,
+            diet_id=diet_id,
+            is_enabled=False,
+        )
+        self._session.add(preference)
+        self._session.flush()
+        return preference, True
+
+    def set_enabled(
+        self,
+        *,
+        user_id: int,
+        diet_id: int,
+        is_enabled: bool,
+    ) -> UserDietPreference:
+        preference, _created = self.get_or_create(user_id=user_id, diet_id=diet_id)
+        preference.is_enabled = is_enabled
+        self._session.flush()
+        return preference
+
+    def toggle(
+        self,
+        *,
+        user_id: int,
+        diet_id: int,
+    ) -> UserDietPreference:
+        preference, _created = self.get_or_create(user_id=user_id, diet_id=diet_id)
+        preference.is_enabled = not preference.is_enabled
+        self._session.flush()
+        return preference
+
+    def list_diets_for_user(self, *, user_id: int) -> list[SupportedDietView]:
+        supported_diets = SupportedDietRepository(self._session).list_enabled()
+        preferences = list(
+            self._session.scalars(
+                select(UserDietPreference).where(UserDietPreference.user_id == user_id)
+            )
+        )
+        preferences_by_diet_id = {preference.diet_id: preference for preference in preferences}
+        return [
+            SupportedDietView(
+                code=diet.code,
+                name=diet.name,
+                is_enabled=diet.is_enabled,
+                is_selected=bool(
+                    preferences_by_diet_id.get(diet.id) and preferences_by_diet_id[diet.id].is_enabled
+                ),
+            )
+            for diet in supported_diets
+        ]
+
+    def list_enabled_for_user(self, *, user_id: int) -> list[SupportedDiet]:
+        statement = (
+            select(SupportedDiet)
+            .join(UserDietPreference, UserDietPreference.diet_id == SupportedDiet.id)
+            .where(
+                SupportedDiet.is_enabled.is_(True),
+                UserDietPreference.user_id == user_id,
+                UserDietPreference.is_enabled.is_(True),
+            )
+            .order_by(SupportedDiet.id.asc())
+        )
+        return list(self._session.scalars(statement))
 
 
 class EntryItemMetricRepository:

@@ -12,6 +12,7 @@ from food_registry_bot.db.models import (
     EntryItemMetric,
     EntryType,
     LLMIssueStage,
+    SupportedDiet,
     SupportedMetric,
     UserAccess,
     UserGoalPreference,
@@ -27,8 +28,10 @@ from food_registry_bot.db.repositories import (
     LLMIssueLogCreate,
     LLMIssueLogRepository,
     NutritionEstimatePersistenceService,
+    SupportedDietRepository,
     SupportedMetricRepository,
     UserAccessRepository,
+    UserDietPreferenceRepository,
     UserGoalPreferenceRepository,
     UserSummaryPreferenceRepository,
     UserRepository,
@@ -50,6 +53,7 @@ def create_test_session() -> Session:
     session = sessionmaker(bind=engine, expire_on_commit=False, class_=Session)()
     session.add_all(
         [
+            SupportedDiet(code="low_purine", name="Низкопуриновая", is_enabled=True),
             SupportedMetric(code="calories", name="Calories", unit="kcal"),
             SupportedMetric(code="protein", name="Protein", unit="g"),
             SupportedMetric(code="fat", name="Fat", unit="g"),
@@ -57,6 +61,7 @@ def create_test_session() -> Session:
             SupportedMetric(code="fiber", name="Fiber", unit="g"),
             SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
             SupportedMetric(code="workout_calorie_credit", name="Workout Calorie Credit", unit="kcal"),
+            SupportedMetric(code="low_purine_score", name="Low Purine Score", unit="score"),
         ]
     )
     session.commit()
@@ -633,7 +638,51 @@ def test_supported_metric_repository_lists_seeded_metrics() -> None:
         "fiber",
         "workout_calories",
         "workout_calorie_credit",
+        "low_purine_score",
     ]
+
+
+def test_supported_diet_repository_lists_seeded_diets() -> None:
+    session = create_test_session()
+
+    diets = SupportedDietRepository(session).list_all()
+
+    assert [(diet.code, diet.name, diet.is_enabled) for diet in diets] == [
+        ("low_purine", "Низкопуриновая", True),
+    ]
+
+
+def test_user_diet_preference_repository_toggles_supported_diet() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=506, username="diet_user")
+    diet = SupportedDietRepository(session).get_by_code(code="low_purine")
+    assert diet is not None
+    repository = UserDietPreferenceRepository(session)
+
+    first_state = repository.toggle(user_id=user.id, diet_id=diet.id).is_enabled
+    second_state = repository.toggle(user_id=user.id, diet_id=diet.id).is_enabled
+
+    assert first_state is True
+    assert second_state is False
+
+
+def test_user_diet_preference_repository_lists_enabled_diets_for_user() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=507, username="diet_view_user")
+    diet = SupportedDietRepository(session).get_by_code(code="low_purine")
+    assert diet is not None
+    repository = UserDietPreferenceRepository(session)
+
+    initial_view = repository.list_diets_for_user(user_id=user.id)
+    repository.set_enabled(user_id=user.id, diet_id=diet.id, is_enabled=True)
+    enabled_diets = repository.list_enabled_for_user(user_id=user.id)
+    updated_view = repository.list_diets_for_user(user_id=user.id)
+
+    assert [(view.code, view.is_selected) for view in initial_view] == [("low_purine", False)]
+    assert [(supported_diet.code, supported_diet.name) for supported_diet in enabled_diets] == [
+        ("low_purine", "Низкопуриновая"),
+    ]
+    assert [(view.code, view.is_selected) for view in updated_view] == [("low_purine", True)]
 
 
 def test_entry_item_metric_repository_upserts_metric_values() -> None:

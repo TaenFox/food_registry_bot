@@ -353,7 +353,7 @@ Diet score не должен вести себя как calories/protein/water g
 
 ### Этап 1. Зафиксировать ADR по diet registry, metric codes и comment contract
 
-Статус: `planned`
+Статус: `completed`
 
 Нужно определить:
 
@@ -373,7 +373,7 @@ Diet score не должен вести себя как calories/protein/water g
 
 ### Этап 2. Добавить доменную модель и миграции
 
-Статус: `planned`
+Статус: `completed`
 
 Нужно:
 
