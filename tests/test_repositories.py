@@ -625,6 +625,39 @@ def test_entry_repository_lists_incomplete_food_entry_ids() -> None:
     assert incomplete_ids == [incomplete_entry.id]
 
 
+def test_entry_repository_treats_additional_diet_metrics_as_complete() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=408, username="diet_complete")
+    repository = EntryRepository(session)
+
+    complete_entry = repository.create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        items=[EntryItemCreate(name="тунец")],
+    )
+
+    complete_item = session.query(EntryItem).filter_by(entry_id=complete_entry.id).one()
+    EntryItemMetricRepository(session).upsert_metrics(
+        entry_item_id=complete_item.id,
+        metric_values=[
+            EntryItemMetricValue(code="calories", value=116.0, confidence="medium"),
+            EntryItemMetricValue(code="protein", value=26.0, confidence="medium"),
+            EntryItemMetricValue(code="fat", value=1.0, confidence="medium"),
+            EntryItemMetricValue(code="carbs", value=0.0, confidence="medium"),
+            EntryItemMetricValue(code="fiber", value=0.0, confidence="medium"),
+            EntryItemMetricValue(code="low_purine_score", value=2.0, confidence="high"),
+        ],
+    )
+
+    incomplete_ids = repository.list_incomplete_food_entry_ids(
+        required_metric_codes=["calories", "protein", "fat", "carbs", "fiber"],
+        limit=10,
+    )
+
+    assert incomplete_ids == []
+
+
 def test_supported_metric_repository_lists_seeded_metrics() -> None:
     session = create_test_session()
 

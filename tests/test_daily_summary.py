@@ -22,6 +22,7 @@ def create_test_session() -> Session:
             SupportedMetric(code="fiber", name="Fiber", unit="g"),
             SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
             SupportedMetric(code="workout_calorie_credit", name="Workout Calorie Credit", unit="kcal"),
+            SupportedMetric(code="low_purine_score", name="Low Purine Score", unit="score"),
         ]
     )
     session.commit()
@@ -197,6 +198,44 @@ def test_daily_summary_excludes_incomplete_food_entries() -> None:
     assert summary.totals.fat == 14.0
     assert summary.totals.carbs == 12.0
     assert summary.totals.fiber == 4.0
+
+
+def test_daily_summary_ignores_additional_non_nutrition_metrics() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(
+        telegram_user_id=8005,
+        username="diet_user",
+        timezone="Europe/Moscow",
+    )
+    repository = EntryRepository(session)
+    entry = repository.create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+        items=[EntryItemCreate(name="тунец")],
+    )
+    save_metrics(entry, values=(116.0, 26.0, 1.0, 0.0, 0.0))
+    entry.items[0].metrics.append(
+        EntryItemMetric(entry_item_id=entry.items[0].id, metric_id=8, value=2.0, confidence="high")
+    )
+    session.commit()
+
+    summary = DailyNutritionSummaryUseCase(session).run(
+        user_id=user.id,
+        timezone_name=user.timezone,
+        summary_date=resolve_local_summary_date(
+            reference_at=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+            timezone_name=user.timezone,
+            nutrition_day_start_hour=4,
+        ),
+        nutrition_day_start_hour=4,
+    )
+
+    assert summary.is_complete is True
+    assert summary.included_entry_count == 1
+    assert summary.excluded_entry_count == 0
+    assert summary.totals.calories == 116.0
+    assert summary.totals.protein == 26.0
 
 
 def test_daily_summary_uses_custom_nutrition_day_start_hour() -> None:

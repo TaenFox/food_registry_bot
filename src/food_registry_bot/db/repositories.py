@@ -911,7 +911,7 @@ class EntryRepository:
                     for metric in item.metrics
                     if metric.metric is not None
                 }
-                if item_metric_codes != required_metric_code_set:
+                if not required_metric_code_set.issubset(item_metric_codes):
                     is_incomplete = True
                     break
 
@@ -946,7 +946,7 @@ class EntryRepository:
                     for metric in item.metrics
                     if metric.metric is not None
                 }
-                if item_metric_codes != required_metric_code_set:
+                if not required_metric_code_set.issubset(item_metric_codes):
                     count += 1
                     break
 

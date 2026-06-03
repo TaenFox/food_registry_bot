@@ -189,3 +189,43 @@ def test_backfill_use_case_recomputes_only_incomplete_entries() -> None:
     assert result.skipped_entry_ids == []
     assert result.failed_entries == []
     assert result.saved_metric_count == 5
+
+
+def test_backfill_use_case_skips_entries_with_additional_diet_metrics() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=705, username="diet_backfill_user")
+    complete_entry = EntryRepository(session).create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        items=[EntryItemCreate(name="тунец")],
+    )
+
+    complete_item = complete_entry.items[0]
+    session.add_all(
+        [
+            EntryItemMetric(entry_item_id=complete_item.id, metric_id=1, value=116.0, confidence="medium"),
+            EntryItemMetric(entry_item_id=complete_item.id, metric_id=2, value=26.0, confidence="medium"),
+            EntryItemMetric(entry_item_id=complete_item.id, metric_id=3, value=1.0, confidence="medium"),
+            EntryItemMetric(entry_item_id=complete_item.id, metric_id=4, value=0.0, confidence="medium"),
+            EntryItemMetric(entry_item_id=complete_item.id, metric_id=5, value=0.0, confidence="medium"),
+            EntryItemMetric(entry_item_id=complete_item.id, metric_id=8, value=2.0, confidence="high"),
+        ]
+    )
+    session.commit()
+
+    use_case = BackfillNutritionEstimationUseCase(
+        session,
+        StaticNutritionEstimationService(
+            raw_payload=build_metric_payload([f"entry-{complete_entry.id}:item-0"], confidence="low")
+        ),
+    )
+
+    result = use_case.run(limit=10)
+
+    assert isinstance(result, NutritionBackfillCompleted)
+    assert result.selected_entry_ids == []
+    assert result.processed_entry_ids == []
+    assert result.skipped_entry_ids == []
+    assert result.failed_entries == []
+    assert result.saved_metric_count == 0
