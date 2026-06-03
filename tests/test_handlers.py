@@ -65,15 +65,18 @@ from food_registry_bot.db.models import (
     EntryType,
     LLMIssueLog,
     LLMIssueStage,
+    SupportedDiet,
     SupportedMetric,
     User,
     UserAccess,
     UserLLMConnection,
     UserLLMProfile,
     UserGoalPreference,
+    UserDietPreference,
     UserSummaryPreference,
 )
 from food_registry_bot.config import Settings
+from food_registry_bot.diet import StaticDietEvaluationService
 from food_registry_bot.db.repositories import DataExchangeFileRepository
 from food_registry_bot.extraction import (
     ExtractedJournalEntry,
@@ -114,6 +117,7 @@ def create_session_factory() -> sessionmaker[Session]:
     with factory() as session:
         session.add_all(
             [
+                SupportedDiet(code="low_purine", name="Низкопуриновая", is_enabled=True),
                 SupportedMetric(code="calories", name="Calories", unit="kcal"),
                 SupportedMetric(code="protein", name="Protein", unit="g"),
                 SupportedMetric(code="fat", name="Fat", unit="g"),
@@ -121,6 +125,7 @@ def create_session_factory() -> sessionmaker[Session]:
                 SupportedMetric(code="fiber", name="Fiber", unit="g"),
                 SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
                 SupportedMetric(code="workout_calorie_credit", name="Workout Calorie Credit", unit="kcal"),
+                SupportedMetric(code="low_purine_score", name="Low Purine Score", unit="score"),
             ]
         )
         session.commit()
@@ -4393,6 +4398,8 @@ async def test_settings_returns_current_summary_preferences() -> None:
     assert message.answer.await_args.args == (
         "Настройки summary:\n"
         "- тренировки: выключено\n"
+        "Диеты:\n"
+        "- низкопуриновая: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -4407,11 +4414,12 @@ async def test_settings_returns_current_summary_preferences() -> None:
         "- порог заметных записей: 80%",
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
-    assert len(reply_markup.inline_keyboard) == 14
+    assert len(reply_markup.inline_keyboard) == 15
     assert all(len(row) == 1 for row in reply_markup.inline_keyboard)
     assert len(reply_markup.inline_keyboard[-1]) == 1
     button_texts = flatten_inline_button_texts(reply_markup)
     assert "Тренировки: off" in button_texts
+    assert "Диета: Низкопуриновая off" in button_texts
     assert "Калории: on" in button_texts
     assert "Белки: on" in button_texts
     assert "Жиры: on" in button_texts
@@ -4490,6 +4498,8 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
     assert callback.message.edit_text.await_args.args == (
         "Настройки summary:\n"
         "- тренировки: выключено\n"
+        "Диеты:\n"
+        "- низкопуриновая: выключено\n"
         "- калории: включено\n"
         "- белки: выключено\n"
         "- жиры: включено\n"
@@ -4507,6 +4517,56 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
     button_texts = flatten_inline_button_texts(reply_markup)
     assert "Калории: on" in button_texts
     assert "Белки: off" in button_texts
+    callback.answer.assert_awaited_once_with("Сохранил настройки.")
+
+
+async def test_toggle_diet_updates_preference_and_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "settings_diet_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="settings_diet_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="settings_diet_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_toggle_summary_metric(
+        callback,
+        SummarySettingsCallback(action="toggle_diet_low_purine"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_user = session.query(User).one()
+        saved_diet_preference = session.query(UserDietPreference).one()
+
+    assert saved_diet_preference.user_id == saved_user.id
+    assert saved_diet_preference.is_enabled is True
+    assert callback.message.edit_text.await_args.args == (
+        "Настройки summary:\n"
+        "- тренировки: выключено\n"
+        "Диеты:\n"
+        "- низкопуриновая: включено\n"
+        "- калории: включено\n"
+        "- белки: включено\n"
+        "- жиры: включено\n"
+        "- углеводы: включено\n"
+        "- клетчатка: включено\n"
+        "- вода: включено\n"
+        "- прогресс дня: выключено\n"
+        "- дельта записи: включено\n"
+        "- отображение: текст\n"
+        "- начало дня: 04:00\n"
+        "- допуск к цели: 10%\n"
+        "- порог заметных записей: 80%",
+    )
+    button_texts = flatten_inline_button_texts(callback.message.edit_text.await_args.kwargs["reply_markup"])
+    assert "Диета: Низкопуриновая on" in button_texts
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -4552,6 +4612,8 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
     assert callback.message.edit_text.await_args.args == (
         "Настройки summary:\n"
         "- тренировки: выключено\n"
+        "Диеты:\n"
+        "- низкопуриновая: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -4612,6 +4674,8 @@ async def test_cycle_summary_display_mode_updates_preference_and_message() -> No
     assert callback.message.edit_text.await_args.args == (
         "Настройки summary:\n"
         "- тренировки: выключено\n"
+        "Диеты:\n"
+        "- низкопуриновая: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -4670,6 +4734,8 @@ async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -
     assert callback.message.edit_text.await_args.args == (
         "Настройки summary:\n"
         "- тренировки: выключено\n"
+        "Диеты:\n"
+        "- низкопуриновая: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -4730,6 +4796,8 @@ async def test_toggle_day_progress_bar_updates_preference_and_message() -> None:
     assert callback.message.edit_text.await_args.args == (
         "Настройки summary:\n"
         "- тренировки: выключено\n"
+        "Диеты:\n"
+        "- низкопуриновая: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -4842,6 +4910,8 @@ async def test_toggle_workout_logging_updates_user_and_message() -> None:
     assert callback.message.edit_text.await_args.args == (
         "Настройки summary:\n"
         "- тренировки: включено\n"
+        "Диеты:\n"
+        "- низкопуриновая: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -5559,7 +5629,7 @@ async def test_food_confirmation_appends_post_entry_nutrition_comment() -> None:
         "Кл: 5.1 / 25 г (+5.1 г)\n"
         "В: 0.0 / 2000 мл"
         "</pre>\n\n"
-        "Нутрициолог: После этой записи углеводы и клетчатка подросли, но по белку у тебя ещё заметный запас.",
+        "После этой записи углеводы и клетчатка подросли, но по белку у тебя ещё заметный запас.",
     )
 
 
@@ -5617,6 +5687,160 @@ async def test_food_confirmation_still_succeeds_when_post_entry_comment_fails() 
         "Кл: 5.1 / 25 г (+5.1 г)\n"
         "В: 0.0 / 2000 мл"
         "</pre>",
+    )
+
+
+async def test_food_write_saves_diet_scores_for_enabled_diet() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "diet_score_user")
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.FOOD,
+                        items=[ExtractedJournalItem(name="яблоко", quantity=180, unit="г")],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload='{"entries":[{"type":"food","items":[{"name":"яблоко","quantity":180,"unit":"г"}]}]}',
+        )
+    )
+    nutrition_service = StaticNutritionEstimationService(
+        raw_payload=build_metric_payload(["entry-1:item-0"])
+    )
+    diet_service = StaticDietEvaluationService(
+        raw_payload=(
+            '{"items":[{"client_item_id":"entry-1:item-0",'
+            '"scores":[{"code":"low_purine_score","value":9.0,"confidence":"high"}]}]}'
+        )
+    )
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="diet_score_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        supported_diet = session.query(SupportedDiet).filter_by(code="low_purine").one()
+        session.add(UserDietPreference(user_id=user.id, diet_id=supported_diet.id, is_enabled=True))
+        session.commit()
+
+    message = SimpleNamespace(
+        text="яблоко",
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="diet_score_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        nutrition_service=nutrition_service,
+        diet_service=diet_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_metric = (
+            session.query(EntryItemMetric)
+            .filter(EntryItemMetric.metric_id == 8)
+            .one()
+        )
+
+    assert saved_metric.value == 9.0
+
+
+async def test_recent_action_open_entry_shows_average_diet_score() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_diet_score_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="recent_diet_score_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            source_text="обед",
+            occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        first_item = EntryItem(entry_id=entry.id, position=0, name="рис", quantity=150, unit="g")
+        second_item = EntryItem(entry_id=entry.id, position=1, name="курица", quantity=120, unit="g")
+        session.add_all([first_item, second_item])
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=8, value=8.0, confidence="high"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=8, value=10.0, confidence="high"),
+            ]
+        )
+        session.commit()
+        entry_id = entry.id
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_diet_score_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_action_callback(
+        callback,
+        RecentEntryActionCallback(action="open_entry", entry_id=entry_id, page=0, count=5),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert callback.message.edit_text.await_args.args == (
+        "Запись еды:\n"
+        "\n"
+        "13:00 — рис (150 г), курица (120 г)\n"
+        "\n"
+        "Средний diet score: 9.0/10\n"
+        "\n"
+        "Блюда:\n"
+        "1. рис (150 г)\n"
+        "2. курица (120 г)\n"
+        "\n"
+        "Выбери блюдо.",
+    )
+
+
+async def test_recent_list_shows_average_diet_score() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_list_diet_score_user")
+    with session_factory() as session:
+        user = User(
+            telegram_user_id=ALLOWED_USER_ID,
+            username="recent_list_diet_score_user",
+            timezone="Europe/Moscow",
+        )
+        session.add(user)
+        session.flush()
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        item = EntryItem(entry_id=entry.id, position=0, name="яблоко", quantity=180, unit="g")
+        session.add(item)
+        session.flush()
+        session.add(EntryItemMetric(entry_item_id=item.id, metric_id=8, value=9.0, confidence="high"))
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_list_diet_score_user"),
+        answer=AsyncMock(),
+    )
+    command = SimpleNamespace(args=None)
+
+    await handle_recent(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
+
+    assert message.answer.await_args.args == (
+        "Последние записи (страница 1, по 5):\n\n18.05.2026\n1. 13:00 — яблоко (180 г) · diet 9.0/10",
     )
 
 

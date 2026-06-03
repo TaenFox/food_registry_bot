@@ -759,7 +759,11 @@ class EntryRepository:
         statement = (
             select(Entry)
             .where(Entry.user_id == user_id)
-            .options(selectinload(Entry.items))
+            .options(
+                selectinload(Entry.items)
+                .selectinload(EntryItem.metrics)
+                .selectinload(EntryItemMetric.metric)
+            )
             .order_by(Entry.occurred_at.desc(), Entry.id.desc())
             .offset(offset)
             .limit(limit)

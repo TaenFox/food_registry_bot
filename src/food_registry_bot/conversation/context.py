@@ -6,7 +6,7 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from food_registry_bot.db.repositories import EntryRepository
+from food_registry_bot.db.repositories import EntryRepository, UserDietPreferenceRepository
 from food_registry_bot.nutrition import (
     DailyNutritionGoalProgress,
     DailyNutritionGoalProgressUseCase,
@@ -63,6 +63,13 @@ class NutritionCoachWorkoutEntry(BaseModel):
     items: list[NutritionCoachWorkoutItem] = Field(default_factory=list)
 
 
+class NutritionCoachActiveDiet(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=128)
+
+
 class NutritionCoachFactualContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -71,6 +78,7 @@ class NutritionCoachFactualContext(BaseModel):
     nutrition_day_start_hour: int = Field(ge=0, le=23)
     day_totals: dict[str, float]
     goal_progress: dict[str, NutritionCoachMetricProgress]
+    active_diets: list[NutritionCoachActiveDiet] = Field(default_factory=list)
     workout_entries: list[NutritionCoachWorkoutEntry] = Field(default_factory=list)
     recent_entries: list[NutritionCoachRecentEntry] = Field(default_factory=list)
     nutrition_summary_is_complete: bool
@@ -154,6 +162,7 @@ class NutritionCoachContextBuilder:
             ),
         )
         workout_entries = []
+        active_diets = UserDietPreferenceRepository(self._session).list_enabled_for_user(user_id=user_id)
         if workout_logging_enabled:
             occurred_at_from, occurred_at_to = resolve_day_bounds_utc(
                 summary_date=summary_date,
@@ -180,6 +189,10 @@ class NutritionCoachContextBuilder:
                 "water": float(water_summary.total_ml),
             },
             goal_progress=_build_metric_progress_map(goal_progress),
+            active_diets=[
+                NutritionCoachActiveDiet(code=diet.code, name=diet.name)
+                for diet in active_diets
+            ],
             workout_entries=[
                 NutritionCoachWorkoutEntry(
                     entry_id=entry.id,

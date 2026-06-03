@@ -67,6 +67,16 @@ from food_registry_bot.conversation import (
     NutritionCoachContextBuilder,
 )
 from food_registry_bot.config import Settings, get_data_exchange_dir
+from food_registry_bot.diet import (
+    DietDefinitionInput,
+    DietEvaluationItemInput,
+    DietEvaluationRequest,
+    DietEvaluationService,
+    DisabledDietEvaluationService,
+    create_diet_service_for_provider_access,
+    get_supported_diet_definition,
+    get_supported_diet_metric_codes,
+)
 from food_registry_bot.db.models import (
     AccountCategory,
     ConversationMessageRole,
@@ -89,11 +99,14 @@ from food_registry_bot.db.repositories import (
     KnownUserAccessView,
     LLMIssueLogCreate,
     LLMIssueLogRepository,
+    SupportedDietRepository,
     UserGoalPreferenceRepository,
     UserAccessRepository,
+    UserDietPreferenceRepository,
     UserLLMConnectionRepository,
     UserLLMProfileRepository,
     UserRepository,
+    SupportedDietView,
     UserSummaryPreferenceRepository,
 )
 from food_registry_bot.exchange import DataExchangeService, DuplicateDataRowError, DuplicateFileError, UnsupportedExchangeFileError
@@ -149,8 +162,8 @@ logger = logging.getLogger(__name__)
 default_extraction_service = StructuredPayloadExtractionService()
 default_nutrition_service = StaticNutritionEstimationService(raw_payload="")
 default_conversation_service = DisabledConversationService()
+default_diet_service = DisabledDietEvaluationService()
 default_message_routing_service = RuleBasedMessageRoutingService()
-NUTRITION_COACH_DISPLAY_NAME = "Нутрициолог"
 RECENT_ENTRIES_DEFAULT_COUNT = 5
 RECENT_ENTRIES_MAX_COUNT = 60
 RECENT_ENTRY_LIST_TITLE_MAX_LENGTH = 48
@@ -200,6 +213,7 @@ LLM_MODEL_PLACEHOLDER = "<MODEL>"
 API_KEY_PLACEHOLDER = "<API_KEY>"
 PROVIDER_PLACEHOLDER = "<PROVIDER>"
 SUPPORTED_PERSONAL_PROVIDERS = (LLMProvider.OPENAI, LLMProvider.MISTRAL)
+SUPPORTED_DIET_METRIC_CODES = get_supported_diet_metric_codes()
 
 
 class FoodWriteFlowError(RuntimeError):
@@ -1058,8 +1072,27 @@ def build_write_confirmation_response(
     if day_report is not None:
         parts.append(day_report)
     if coach_comment:
-        parts.append(f"{NUTRITION_COACH_DISPLAY_NAME}: {coach_comment}")
+        parts.append(coach_comment)
     return "\n\n".join(parts)
+
+
+def resolve_entry_average_diet_score(entry) -> float | None:
+    scores: list[float] = []
+    for item in entry.items:
+        for metric in getattr(item, "metrics", []):
+            metric_code = metric.metric.code if metric.metric is not None else None
+            if metric_code in SUPPORTED_DIET_METRIC_CODES:
+                scores.append(metric.value)
+    if not scores:
+        return None
+    return round(sum(scores) / len(scores), 1)
+
+
+def format_entry_average_diet_score(entry) -> str | None:
+    average_score = resolve_entry_average_diet_score(entry)
+    if average_score is None:
+        return None
+    return f"{average_score}/10"
 
 
 def format_entry_timestamp(entry, timezone_name: str) -> str:
@@ -1109,7 +1142,9 @@ def build_recent_entry_button_label(entry, timezone_name: str) -> str:
 
 def build_recent_entry_display_line(*, index: int, entry, timezone_name: str) -> str:
     title = truncate_button_label(build_recent_entry_title(entry), max_length=RECENT_ENTRY_LIST_TITLE_MAX_LENGTH)
-    return f"{index}. {format_entry_timestamp(entry, timezone_name)} — {title}"
+    average_diet_score = format_entry_average_diet_score(entry)
+    suffix = f" · diet {average_diet_score}" if average_diet_score is not None else ""
+    return f"{index}. {format_entry_timestamp(entry, timezone_name)} — {title}{suffix}"
 
 
 def build_recent_entries_day_heading(*, entry, timezone_name: str, nutrition_day_start_hour: int) -> str:
@@ -1171,9 +1206,11 @@ def build_recent_food_entry_response(*, entry, timezone_name: str) -> str:
         "Запись еды:",
         "",
         f"{format_entry_timestamp(entry, timezone_name)} — {build_recent_entry_title(entry)}",
-        "",
-        "Блюда:",
     ]
+    average_diet_score = format_entry_average_diet_score(entry)
+    if average_diet_score is not None:
+        lines.extend(["", f"Средний diet score: {average_diet_score}"])
+    lines.extend(["", "Блюда:"])
     for index, item in enumerate(sorted(entry.items, key=lambda current: current.position), start=1):
         lines.append(f"{index}. {format_saved_item_line(item.name, item.quantity, item.unit).removeprefix('- ')}")
     lines.extend(["", "Выбери блюдо."])
@@ -1249,9 +1286,11 @@ def build_recent_non_food_entry_response(*, entry, timezone_name: str) -> str:
         title,
         "",
         f"{format_entry_timestamp(entry, timezone_name)} — {build_recent_entry_title(entry)}",
-        "",
-        "Для этой записи сейчас доступно удаление целиком.",
     ]
+    average_diet_score = format_entry_average_diet_score(entry)
+    if average_diet_score is not None:
+        lines.extend(["", f"Средний diet score: {average_diet_score}"])
+    lines.extend(["", "Для этой записи сейчас доступно удаление целиком."])
     return "\n".join(lines)
 
 
@@ -1381,6 +1420,7 @@ def get_enabled_summary_metric_codes(preference) -> tuple[str, ...]:
 def build_summary_settings_response(
     *,
     workout_logging_enabled: bool,
+    diets: list[SupportedDietView],
     show_calories: bool,
     show_protein: bool,
     show_fat: bool,
@@ -1398,10 +1438,18 @@ def build_summary_settings_response(
         True: "включено",
         False: "выключено",
     }
-    return "\n".join(
+    lines = [
+        "Настройки summary:",
+        f"- тренировки: {statuses[workout_logging_enabled]}",
+    ]
+    if diets:
+        lines.append("Диеты:")
+        lines.extend(
+            f"- {diet.name.lower()}: {statuses[diet.is_selected]}"
+            for diet in diets
+        )
+    lines.extend(
         [
-            "Настройки summary:",
-            f"- тренировки: {statuses[workout_logging_enabled]}",
             f"- калории: {statuses[show_calories]}",
             f"- белки: {statuses[show_protein]}",
             f"- жиры: {statuses[show_fat]}",
@@ -1416,6 +1464,7 @@ def build_summary_settings_response(
             f"- порог заметных записей: {report_noticeable_entry_percentile}%",
         ]
     )
+    return "\n".join(lines)
 
 
 def build_metric_progress_bar_line(
@@ -1524,6 +1573,90 @@ def payload_contains_workout_entries(payload) -> bool:
 
 def payload_contains_food_or_water_entries(payload) -> bool:
     return any(entry.type in {EntryType.FOOD, EntryType.WATER} for entry in payload.entries)
+
+
+def build_diet_buttons(diets: list[SupportedDietView]) -> list[tuple[str, str, bool]]:
+    return [(diet.code, diet.name, diet.is_selected) for diet in diets]
+
+
+def resolve_diet_service(
+    *,
+    settings: Settings | None,
+    runtime_bundle,
+    fallback_diet_service: DietEvaluationService,
+) -> DietEvaluationService:
+    if settings is None:
+        return fallback_diet_service
+    if runtime_bundle is None or runtime_bundle.conversation_access is None:
+        return fallback_diet_service
+    access = runtime_bundle.conversation_access
+    if not access.is_available or access.api_key is None or access.model is None:
+        return fallback_diet_service
+    return create_diet_service_for_provider_access(
+        provider=access.provider,
+        api_key=access.api_key,
+        model=access.model,
+        settings=settings,
+    )
+
+
+def build_diet_evaluation_request_for_supported_diets(entries: list, diets: list) -> DietEvaluationRequest | None:
+    if not entries or not diets:
+        return None
+
+    diet_inputs: list[DietDefinitionInput] = []
+    for diet in diets:
+        definition = get_supported_diet_definition(diet.code)
+        diet_inputs.append(
+            DietDefinitionInput(
+                code=definition.code,
+                name=definition.name,
+                metric_code=definition.metric_code,
+                description=definition.description,
+                scoring_guidance=definition.scoring_guidance,
+            )
+        )
+
+    items: list[DietEvaluationItemInput] = []
+    for entry in entries:
+        for item in sorted(entry.items, key=lambda current: current.position):
+            items.append(
+                DietEvaluationItemInput(
+                    client_item_id=f"entry-{entry.id}:item-{item.position}",
+                    name=item.name,
+                    quantity=item.quantity,
+                    unit=item.unit,
+                )
+            )
+
+    if not items:
+        return None
+
+    return DietEvaluationRequest(diets=diet_inputs, items=items)
+
+
+def persist_diet_scores(*, session: Session, entries: list, evaluation_payload) -> None:
+    item_id_by_client_item_id = {
+        f"entry-{entry.id}:item-{item.position}": item.id
+        for entry in entries
+        for item in entry.items
+    }
+    repository = EntryItemMetricRepository(session)
+    for item_result in evaluation_payload.items:
+        entry_item_id = item_id_by_client_item_id.get(item_result.client_item_id)
+        if entry_item_id is None:
+            continue
+        repository.upsert_metrics(
+            entry_item_id=entry_item_id,
+            metric_values=[
+                EntryItemMetricValue(
+                    code=score.code,
+                    value=score.value,
+                    confidence=score.confidence,
+                )
+                for score in item_result.scores
+            ],
+        )
 
 
 def resolve_metric_deltas(
@@ -3554,10 +3687,12 @@ async def handle_settings(
         if user is None:
             raise RuntimeError("User profile was not found after registration")
         preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+        diets = UserDietPreferenceRepository(session).list_diets_for_user(user_id=user_id)
 
     await message.answer(
         build_summary_settings_response(
             workout_logging_enabled=user.workout_logging_enabled,
+            diets=diets,
             show_calories=preference.show_calories,
             show_protein=preference.show_protein,
             show_fat=preference.show_fat,
@@ -3573,6 +3708,7 @@ async def handle_settings(
         ),
         reply_markup=build_summary_settings_keyboard(
             workout_logging_enabled=user.workout_logging_enabled,
+            diet_buttons=build_diet_buttons(diets),
             show_calories=preference.show_calories,
             show_protein=preference.show_protein,
             show_fat=preference.show_fat,
@@ -3602,6 +3738,7 @@ async def handle_toggle_summary_metric(
         return
     if not (
         callback_data.action.startswith("toggle_")
+        or callback_data.action.startswith("toggle_diet_")
         or callback_data.action == "cycle_summary_display_mode"
         or callback_data.action == "cycle_nutrition_day_start_hour"
         or callback_data.action == "cycle_report_goal_tolerance_percent"
@@ -3633,6 +3770,7 @@ async def handle_toggle_summary_metric(
             )
 
         preference_repository = UserSummaryPreferenceRepository(session)
+        diet_preference_repository = UserDietPreferenceRepository(session)
         if callback_data.action == "cycle_nutrition_day_start_hour":
             preference = preference_repository.cycle_nutrition_day_start_hour(user_id=user.id)
         elif callback_data.action == "cycle_summary_display_mode":
@@ -3648,17 +3786,27 @@ async def handle_toggle_summary_metric(
             preference = preference_repository.toggle_day_progress_bar(user_id=user.id)
         elif callback_data.action == "toggle_post_entry_delta_suffix":
             preference = preference_repository.toggle_post_entry_delta_suffix(user_id=user.id)
+        elif callback_data.action.startswith("toggle_diet_"):
+            diet_code = callback_data.action.removeprefix("toggle_diet_")
+            supported_diet_model = SupportedDietRepository(session).get_by_code(code=diet_code)
+            if supported_diet_model is None:
+                await callback.answer("Диета недоступна.", show_alert=True)
+                return
+            diet_preference_repository.toggle(user_id=user.id, diet_id=supported_diet_model.id)
+            preference, _created = preference_repository.get_or_create(user_id=user.id)
         else:
             metric_code = callback_data.action.removeprefix("toggle_")
             preference = preference_repository.toggle_metric_visibility(
                 user_id=user.id,
                 metric_code=metric_code,
             )
+        diets = diet_preference_repository.list_diets_for_user(user_id=user.id)
 
     if callback.message is not None:
         await callback.message.edit_text(
             build_summary_settings_response(
                 workout_logging_enabled=user.workout_logging_enabled,
+                diets=diets,
                 show_calories=preference.show_calories,
                 show_protein=preference.show_protein,
                 show_fat=preference.show_fat,
@@ -3674,6 +3822,7 @@ async def handle_toggle_summary_metric(
             ),
             reply_markup=build_summary_settings_keyboard(
                 workout_logging_enabled=user.workout_logging_enabled,
+                diet_buttons=build_diet_buttons(diets),
                 show_calories=preference.show_calories,
                 show_protein=preference.show_protein,
                 show_fat=preference.show_fat,
@@ -4256,6 +4405,8 @@ async def handle_document_upload(
 async def handle_water_250_ml(
     message: Message,
     session_factory: sessionmaker[Session],
+    diet_service: DietEvaluationService = default_diet_service,
+    settings: Settings | None = None,
     admin_user_ids: tuple[int, ...] = (),
 ) -> None:
     if not await require_user_access(message, session_factory, admin_user_ids):
@@ -4270,13 +4421,40 @@ async def handle_water_250_ml(
             raise RuntimeError("User profile was not found after registration")
         preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
         occurred_at = datetime.now(timezone.utc)
-        EntryRepository(session).create(
+        runtime_bundle = None
+        if settings is not None:
+            runtime_bundle = build_user_llm_runtime_bundle(
+                session=session,
+                settings=settings,
+                user_id=user_id,
+                telegram_user_id=message.from_user.id,
+                admin_user_ids=admin_user_ids,
+                fallback_extraction_service=default_extraction_service,
+                fallback_nutrition_service=default_nutrition_service,
+                fallback_conversation_service=default_conversation_service,
+            )
+        saved_entry = EntryRepository(session).create(
             user_id=user_id,
             entry_type=EntryType.WATER,
             occurred_at=occurred_at,
             source_text="250 мл",
             items=saved_items,
         )
+        enabled_diets = UserDietPreferenceRepository(session).list_enabled_for_user(user_id=user_id)
+        diet_request = build_diet_evaluation_request_for_supported_diets([saved_entry], enabled_diets)
+        if diet_request is not None:
+            evaluated_diet_service = resolve_diet_service(
+                settings=settings,
+                runtime_bundle=runtime_bundle,
+                fallback_diet_service=diet_service,
+            )
+            diet_result = await asyncio.to_thread(evaluated_diet_service.evaluate, diet_request)
+            if hasattr(diet_result, "payload"):
+                persist_diet_scores(
+                    session=session,
+                    entries=[saved_entry],
+                    evaluation_payload=diet_result.payload,
+                )
         summary_date = resolve_local_summary_date(
             reference_at=occurred_at,
             timezone_name=user.timezone,
@@ -4305,6 +4483,7 @@ async def handle_message(
     extraction_service: JournalExtractionService = default_extraction_service,
     nutrition_service: NutritionEstimationService = default_nutrition_service,
     conversation_service: ConversationService = default_conversation_service,
+    diet_service: DietEvaluationService = default_diet_service,
     message_routing_service: MessageRoutingService = default_message_routing_service,
     settings: Settings | None = None,
     admin_user_ids: tuple[int, ...] = (),
@@ -4586,6 +4765,7 @@ async def handle_message(
                     )
 
                 saved_food_entries: list = []
+                saved_diet_entries: list = []
                 saved_items = build_saved_items_from_payload(extraction_result.payload)
                 extracted_workout_metric_lines = build_extracted_workout_metric_lines(extraction_result.payload)
                 occurred_at_values: list[datetime] = []
@@ -4616,6 +4796,9 @@ async def handle_message(
                     occurred_at_values.append(occurred_at)
                     if extracted_entry.type is EntryType.FOOD:
                         saved_food_entries.append(saved_entry)
+                        saved_diet_entries.append(saved_entry)
+                    if extracted_entry.type is EntryType.WATER:
+                        saved_diet_entries.append(saved_entry)
                     if extracted_entry.type is EntryType.WORKOUT:
                         persisted_items = sorted(saved_entry.items, key=lambda current: current.position)
                         for persisted_item, extracted_item in zip(persisted_items, extracted_entry.items):
@@ -4665,6 +4848,22 @@ async def handle_message(
                     if isinstance(nutrition_flow_result, SkippedNutritionEstimation):
                         raise FoodWriteFlowError(nutrition_flow_result.reason)
                     nutrition_result = nutrition_flow_result
+
+                enabled_diets = UserDietPreferenceRepository(session).list_enabled_for_user(user_id=user_id)
+                diet_request = build_diet_evaluation_request_for_supported_diets(saved_diet_entries, enabled_diets)
+                if diet_request is not None:
+                    evaluated_diet_service = resolve_diet_service(
+                        settings=settings,
+                        runtime_bundle=runtime_bundle,
+                        fallback_diet_service=diet_service,
+                    )
+                    diet_result = await asyncio.to_thread(evaluated_diet_service.evaluate, diet_request)
+                    if hasattr(diet_result, "payload"):
+                        persist_diet_scores(
+                            session=session,
+                            entries=saved_diet_entries,
+                            evaluation_payload=diet_result.payload,
+                        )
 
                 summary_dates = resolve_summary_dates_for_occurred_at_values(
                     occurred_at_values=occurred_at_values,

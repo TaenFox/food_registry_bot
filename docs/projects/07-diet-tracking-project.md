@@ -389,7 +389,7 @@ Diet score не должен вести себя как calories/protein/water g
 
 ### Этап 3. Добавить `/settings`, item-level diet evaluation и общий post-entry comment
 
-Статус: `planned`
+Статус: `completed`
 
 Нужно:
 
