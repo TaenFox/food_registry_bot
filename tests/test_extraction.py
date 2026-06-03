@@ -15,6 +15,7 @@ from food_registry_bot.extraction import (
     ValidExtractionPayload,
     create_extraction_service,
 )
+from food_registry_bot.extraction.mistral_client import MistralChatCompletionsExtractionClient
 
 
 def test_structured_payload_service_returns_none_for_plain_text() -> None:
@@ -293,7 +294,26 @@ def test_llm_extraction_service_drops_non_workout_calorie_metrics_before_validat
     assert '"avg_heart_rate"' not in result.raw_payload
 
 
-def test_llm_extraction_service_drops_unsupported_food_unit_before_validation() -> None:
+def test_llm_extraction_service_converts_household_liquid_unit_before_validation() -> None:
+    client = SimpleNamespace(
+        provider_name="mistral_chat_completions",
+        model_name="mistral-small-latest",
+        extract_journal_payload=lambda _request: (
+            '{"entries": [{"type": "food", "items": [{"name": "томатный сок", "quantity": 1, "unit": "стакан"}]}]}'
+        ),
+    )
+    service = LLMExtractionService(client=client)
+    result = service.extract(JournalExtractionRequest(text="Стакан томатного сока"))
+
+    assert isinstance(result, ValidExtractionPayload)
+    item = result.payload.entries[0].items[0]
+    assert item.name == "томатный сок"
+    assert item.quantity == 250
+    assert item.unit == "ml"
+    assert '"unit": "ml"' in result.raw_payload
+
+
+def test_llm_extraction_service_converts_sausage_piece_to_grams_before_validation() -> None:
     client = SimpleNamespace(
         provider_name="openai_responses",
         model_name="gpt-5-mini",
@@ -307,6 +327,43 @@ def test_llm_extraction_service_drops_unsupported_food_unit_before_validation() 
     assert isinstance(result, ValidExtractionPayload)
     item = result.payload.entries[0].items[0]
     assert item.name == "сосиска Вязанка"
+    assert item.quantity == 60
+    assert item.unit == "g"
+    assert '"quantity": 60' in result.raw_payload
+    assert '"unit": "g"' in result.raw_payload
+
+
+def test_llm_extraction_service_converts_egg_piece_to_grams_before_validation() -> None:
+    client = SimpleNamespace(
+        provider_name="openai_responses",
+        model_name="gpt-5-mini",
+        extract_journal_payload=lambda _request: (
+            '{"entries": [{"type": "food", "items": [{"name": "яйца варёные", "quantity": 2, "unit": "шт"}]}]}'
+        ),
+    )
+    service = LLMExtractionService(client=client)
+    result = service.extract(JournalExtractionRequest(text="2 варёных яйца"))
+
+    assert isinstance(result, ValidExtractionPayload)
+    item = result.payload.entries[0].items[0]
+    assert item.quantity == 100
+    assert item.unit == "g"
+
+
+def test_llm_extraction_service_drops_unsupported_food_unit_when_estimate_is_unknown() -> None:
+    client = SimpleNamespace(
+        provider_name="openai_responses",
+        model_name="gpt-5-mini",
+        extract_journal_payload=lambda _request: (
+            '{"entries": [{"type": "food", "items": [{"name": "сэндвич", "quantity": 1, "unit": "шт"}]}]}'
+        ),
+    )
+    service = LLMExtractionService(client=client)
+    result = service.extract(JournalExtractionRequest(text="Один сэндвич"))
+
+    assert isinstance(result, ValidExtractionPayload)
+    item = result.payload.entries[0].items[0]
+    assert item.name == "сэндвич"
     assert item.quantity is None
     assert item.unit is None
     assert '"quantity"' not in result.raw_payload
@@ -445,6 +502,7 @@ def test_openai_client_builds_multimodal_input() -> None:
     assert "prefer grams for food and milliliters for water or drinks" in calls[0]["instructions"]
     assert "for liquid food items like dipping sauces, milliliters are also allowed" in calls[0]["instructions"]
     assert "Do not return a bare number without a unit" in calls[0]["instructions"]
+    assert "convert them into estimated milliliters or grams" in calls[0]["instructions"]
     assert "estimate the weight of one piece first and then sum them" in calls[0]["instructions"]
     assert "If a dipping sauce is served separately" in calls[0]["instructions"]
     assert "round to a reasonable step such as 25 grams" in calls[0]["instructions"]
@@ -453,3 +511,9 @@ def test_openai_client_builds_multimodal_input() -> None:
     assert content[1] == {"type": "input_text", "text": "омлет на фото"}
     assert content[2]["type"] == "input_image"
     assert content[2]["image_url"].startswith("data:image/jpeg;base64,")
+
+
+def test_mistral_client_prompt_requires_household_unit_conversion() -> None:
+    prompt = MistralChatCompletionsExtractionClient._build_system_prompt()
+
+    assert "convert them into estimated milliliters or grams" in prompt
