@@ -498,6 +498,7 @@ class UserSummaryPreferenceRepository:
             show_carbs=True,
             show_fiber=True,
             show_water=True,
+            show_day_progress_bar=False,
             show_post_entry_delta_suffix=True,
             summary_display_mode="text",
             nutrition_day_start_hour=4,
@@ -551,6 +552,12 @@ class UserSummaryPreferenceRepository:
     def toggle_post_entry_delta_suffix(self, *, user_id: int) -> UserSummaryPreference:
         preference, _created = self.get_or_create(user_id=user_id)
         preference.show_post_entry_delta_suffix = not preference.show_post_entry_delta_suffix
+        self._session.flush()
+        return preference
+
+    def toggle_day_progress_bar(self, *, user_id: int) -> UserSummaryPreference:
+        preference, _created = self.get_or_create(user_id=user_id)
+        preference.show_day_progress_bar = not preference.show_day_progress_bar
         self._session.flush()
         return preference
 

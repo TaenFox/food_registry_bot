@@ -4399,6 +4399,7 @@ async def test_settings_returns_current_summary_preferences() -> None:
         "- углеводы: включено\n"
         "- клетчатка: включено\n"
         "- вода: включено\n"
+        "- прогресс дня: выключено\n"
         "- дельта записи: включено\n"
         "- отображение: текст\n"
         "- начало дня: 04:00\n"
@@ -4406,7 +4407,7 @@ async def test_settings_returns_current_summary_preferences() -> None:
         "- порог заметных записей: 80%",
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
-    assert len(reply_markup.inline_keyboard) == 13
+    assert len(reply_markup.inline_keyboard) == 14
     assert all(len(row) == 1 for row in reply_markup.inline_keyboard)
     assert len(reply_markup.inline_keyboard[-1]) == 1
     button_texts = flatten_inline_button_texts(reply_markup)
@@ -4417,6 +4418,7 @@ async def test_settings_returns_current_summary_preferences() -> None:
     assert "Углеводы: on" in button_texts
     assert "Клетчатка: on" in button_texts
     assert "Вода: on" in button_texts
+    assert "Прогресс дня: off" in button_texts
     assert "Дельта записи: on" in button_texts
     assert "Отображение: текст" in button_texts
     assert "Начало дня: 04:00" in button_texts
@@ -4494,6 +4496,7 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
         "- углеводы: включено\n"
         "- клетчатка: включено\n"
         "- вода: включено\n"
+        "- прогресс дня: выключено\n"
         "- дельта записи: включено\n"
         "- отображение: текст\n"
         "- начало дня: 04:00\n"
@@ -4555,6 +4558,7 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
         "- углеводы: включено\n"
         "- клетчатка: включено\n"
         "- вода: включено\n"
+        "- прогресс дня: выключено\n"
         "- дельта записи: включено\n"
         "- отображение: текст\n"
         "- начало дня: 06:00\n"
@@ -4614,6 +4618,7 @@ async def test_cycle_summary_display_mode_updates_preference_and_message() -> No
         "- углеводы: включено\n"
         "- клетчатка: включено\n"
         "- вода: включено\n"
+        "- прогресс дня: выключено\n"
         "- дельта записи: включено\n"
         "- отображение: бары\n"
         "- начало дня: 04:00\n"
@@ -4671,6 +4676,7 @@ async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -
         "- углеводы: включено\n"
         "- клетчатка: включено\n"
         "- вода: включено\n"
+        "- прогресс дня: выключено\n"
         "- дельта записи: выключено\n"
         "- отображение: текст\n"
         "- начало дня: 04:00\n"
@@ -4679,6 +4685,66 @@ async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert "Дельта записи: off" in flatten_inline_button_texts(reply_markup)
+    callback.answer.assert_awaited_once_with("Сохранил настройки.")
+
+
+async def test_toggle_day_progress_bar_updates_preference_and_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "settings_day_progress_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="settings_day_progress_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(
+            UserSummaryPreference(
+                user_id=user.id,
+                show_calories=True,
+                show_protein=True,
+                show_fat=True,
+                show_carbs=True,
+                show_fiber=True,
+                show_water=True,
+                show_day_progress_bar=False,
+                show_post_entry_delta_suffix=True,
+            )
+        )
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="settings_day_progress_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_toggle_summary_metric(
+        callback,
+        SummarySettingsCallback(action="toggle_day_progress_bar"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_preference = session.query(UserSummaryPreference).one()
+
+    assert saved_preference.show_day_progress_bar is True
+    assert callback.message.edit_text.await_args.args == (
+        "Настройки summary:\n"
+        "- тренировки: выключено\n"
+        "- калории: включено\n"
+        "- белки: включено\n"
+        "- жиры: включено\n"
+        "- углеводы: включено\n"
+        "- клетчатка: включено\n"
+        "- вода: включено\n"
+        "- прогресс дня: включено\n"
+        "- дельта записи: включено\n"
+        "- отображение: текст\n"
+        "- начало дня: 04:00\n"
+        "- допуск к цели: 10%\n"
+        "- порог заметных записей: 80%",
+    )
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert "Прогресс дня: on" in flatten_inline_button_texts(reply_markup)
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -4782,6 +4848,7 @@ async def test_toggle_workout_logging_updates_user_and_message() -> None:
         "- углеводы: включено\n"
         "- клетчатка: включено\n"
         "- вода: включено\n"
+        "- прогресс дня: выключено\n"
         "- дельта записи: включено\n"
         "- отображение: текст\n"
         "- начало дня: 04:00\n"
@@ -4937,6 +5004,94 @@ async def test_today_shows_calorie_progress_bar_in_bars_mode() -> None:
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         "<pre>"
+        "Ккал   [█░░░░░░░░░] 17.8% 320.0/1800 ккал\n"
+        "Б      [██░░░░░░░░] 26.7% 24.0/90 г\n"
+        "Ж      [███░░░░░░░] 31.7% 19.0/60 г\n"
+        "У      [░░░░░░░░░░] 5.2% 11.0/210 г"
+        "</pre>",
+    )
+
+
+async def test_today_shows_day_progress_bar_first_when_enabled_in_bars_mode() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "today_day_progress_user")
+    with session_factory() as session:
+        user = User(
+            telegram_user_id=ALLOWED_USER_ID,
+            username="today_day_progress_user",
+            timezone="Europe/Moscow",
+        )
+        session.add(user)
+        session.flush()
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        item = EntryItem(entry_id=entry.id, position=0, name="омлет")
+        session.add(item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=item.id, metric_id=1, value=320.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=2, value=24.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=3, value=19.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=4, value=11.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=5, value=6.0, confidence="medium"),
+                UserSummaryPreference(
+                    user_id=user.id,
+                    show_calories=True,
+                    show_protein=True,
+                    show_fat=True,
+                    show_carbs=True,
+                    show_fiber=False,
+                    show_water=False,
+                    show_day_progress_bar=True,
+                    summary_display_mode="bars",
+                    nutrition_day_start_hour=4,
+                ),
+                UserGoalPreference(
+                    user_id=user.id,
+                    calorie_goal=1800,
+                    protein_goal=90,
+                    fat_goal=60,
+                    carbs_goal=210,
+                    fiber_goal=25,
+                    water_goal=2000,
+                ),
+                DailyGoalSnapshot(
+                    user_id=user.id,
+                    summary_date=datetime(2026, 5, 19, tzinfo=timezone.utc).date(),
+                    timezone="Europe/Moscow",
+                    nutrition_day_start_hour=4,
+                    calorie_goal=1800,
+                    protein_goal=90,
+                    fat_goal=60,
+                    carbs_goal=210,
+                    fiber_goal=25,
+                    water_goal=2000,
+                ),
+            ]
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="today_day_progress_user"),
+        answer=AsyncMock(),
+    )
+
+    await call_handle_today_at(
+        fixed_now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "<pre>"
+        "День   [████░░░░░░] 45.8%\n"
         "Ккал   [█░░░░░░░░░] 17.8% 320.0/1800 ккал\n"
         "Б      [██░░░░░░░░] 26.7% 24.0/90 г\n"
         "Ж      [███░░░░░░░] 31.7% 19.0/60 г\n"

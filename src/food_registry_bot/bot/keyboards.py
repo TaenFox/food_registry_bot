@@ -41,6 +41,7 @@ def build_summary_settings_keyboard(
     show_carbs: bool,
     show_fiber: bool,
     show_water: bool,
+    show_day_progress_bar: bool,
     show_post_entry_delta_suffix: bool,
     summary_display_mode: str,
     nutrition_day_start_hour: int,
@@ -89,6 +90,12 @@ def build_summary_settings_keyboard(
                 InlineKeyboardButton(
                     text=f"Вода: {'on' if show_water else 'off'}",
                     callback_data=SummarySettingsCallback(action="toggle_water").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Прогресс дня: {'on' if show_day_progress_bar else 'off'}",
+                    callback_data=SummarySettingsCallback(action="toggle_day_progress_bar").pack(),
                 )
             ],
             [

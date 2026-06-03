@@ -175,6 +175,7 @@ SUMMARY_DISPLAY_MODE_LABELS = {
     "bars": "бары",
 }
 BAR_MODE_LABELS = {
+    "День": "День",
     "К": "Ккал",
 }
 BAR_MODE_LABEL_WIDTH = 6
@@ -1295,6 +1296,7 @@ def build_today_summary_response_with_preferences(
     summary_display_mode: str = "text",
     goal_progress: DailyNutritionGoalProgress | None = None,
     water_summary: DailyWaterSummary | None = None,
+    day_progress_bar_line: str | None = None,
     metric_deltas: dict[str, float] | None = None,
     show_post_entry_delta_suffix: bool = True,
     force_render_summary: bool = False,
@@ -1311,6 +1313,8 @@ def build_today_summary_response_with_preferences(
     if not enabled_metric_codes:
         return "В summary сейчас всё скрыто. Включи хотя бы один показатель в /settings."
     lines: list[str] = []
+    if summary_display_mode == "bars" and day_progress_bar_line is not None:
+        lines.append(day_progress_bar_line)
     for metric_code, short_label, unit in SUMMARY_METRIC_LINES:
         if metric_code not in enabled_metric_codes:
             continue
@@ -1383,6 +1387,7 @@ def build_summary_settings_response(
     show_carbs: bool,
     show_fiber: bool,
     show_water: bool,
+    show_day_progress_bar: bool,
     show_post_entry_delta_suffix: bool,
     summary_display_mode: str,
     nutrition_day_start_hour: int,
@@ -1403,6 +1408,7 @@ def build_summary_settings_response(
             f"- углеводы: {statuses[show_carbs]}",
             f"- клетчатка: {statuses[show_fiber]}",
             f"- вода: {statuses[show_water]}",
+            f"- прогресс дня: {statuses[show_day_progress_bar]}",
             f"- дельта записи: {statuses[show_post_entry_delta_suffix]}",
             f"- отображение: {SUMMARY_DISPLAY_MODE_LABELS[summary_display_mode]}",
             f"- начало дня: {nutrition_day_start_hour:02d}:00",
@@ -1428,6 +1434,32 @@ def build_metric_progress_bar_line(
     percentage = round(progress_ratio * 100, 1)
     rendered_label = BAR_MODE_LABELS.get(short_label, short_label).ljust(BAR_MODE_LABEL_WIDTH)
     return f"{rendered_label} {base_bar}{overflow_bar} {percentage}% {round(consumed, 1)}/{goal} {unit}"
+
+
+def build_day_progress_bar_line(
+    *,
+    reference_at: datetime,
+    timezone_name: str,
+    summary_date: date,
+    nutrition_day_start_hour: int,
+) -> str:
+    day_start_at, day_end_at = resolve_day_bounds_utc(
+        summary_date=summary_date,
+        timezone_name=timezone_name,
+        nutrition_day_start_hour=nutrition_day_start_hour,
+    )
+    normalized_reference_at = (
+        reference_at if reference_at.tzinfo is not None else reference_at.replace(tzinfo=timezone.utc)
+    )
+    elapsed_seconds = max((normalized_reference_at - day_start_at).total_seconds(), 0.0)
+    total_seconds = max((day_end_at - day_start_at).total_seconds(), 1.0)
+    progress_ratio = min(elapsed_seconds / total_seconds, 1.0)
+    filled_cells = min(int(progress_ratio * 10), 10)
+    empty_cells = 10 - filled_cells
+    base_bar = "[" + ("█" * filled_cells) + ("░" * empty_cells) + "]"
+    percentage = round(progress_ratio * 100, 1)
+    rendered_label = BAR_MODE_LABELS["День"].ljust(BAR_MODE_LABEL_WIDTH)
+    return f"{rendered_label} {base_bar} {percentage}%"
 
 
 def build_metric_progress_delta_bar_line(
@@ -1539,6 +1571,7 @@ def build_daily_report_for_summary_date(
     summary_date: date,
     workout_logging_enabled: bool,
     summary_preference,
+    reference_at: datetime | None = None,
     metric_deltas: dict[str, float] | None = None,
 ) -> str:
     workout_entries = []
@@ -1588,12 +1621,30 @@ def build_daily_report_for_summary_date(
         snapshot=goal_snapshot,
         calorie_goal_adjustment=workout_calorie_credit_total,
     )
+    normalized_reference_at = reference_at or datetime.now(timezone.utc)
+    day_progress_bar_line = None
+    if (
+        summary_preference.show_day_progress_bar
+        and summary_preference.summary_display_mode == "bars"
+        and summary_date == resolve_local_summary_date(
+            reference_at=normalized_reference_at,
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        )
+    ):
+        day_progress_bar_line = build_day_progress_bar_line(
+            reference_at=normalized_reference_at,
+            timezone_name=timezone_name,
+            summary_date=summary_date,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        )
     summary_report = build_today_summary_response_with_preferences(
         summary,
         enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
         summary_display_mode=summary_preference.summary_display_mode,
         goal_progress=goal_progress,
         water_summary=water_summary,
+        day_progress_bar_line=day_progress_bar_line,
         metric_deltas=metric_deltas,
         show_post_entry_delta_suffix=summary_preference.show_post_entry_delta_suffix,
         force_render_summary=workout_calorie_credit_total > 0,
@@ -3513,6 +3564,7 @@ async def handle_settings(
             show_carbs=preference.show_carbs,
             show_fiber=preference.show_fiber,
             show_water=preference.show_water,
+            show_day_progress_bar=preference.show_day_progress_bar,
             show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
             summary_display_mode=preference.summary_display_mode,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
@@ -3527,6 +3579,7 @@ async def handle_settings(
             show_carbs=preference.show_carbs,
             show_fiber=preference.show_fiber,
             show_water=preference.show_water,
+            show_day_progress_bar=preference.show_day_progress_bar,
             show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
             summary_display_mode=preference.summary_display_mode,
             nutrition_day_start_hour=preference.nutrition_day_start_hour,
@@ -3591,6 +3644,8 @@ async def handle_toggle_summary_metric(
         elif callback_data.action == "toggle_workout_logging":
             user = UserRepository(session).toggle_workout_logging_enabled(user_id=user.id)
             preference, _created = preference_repository.get_or_create(user_id=user.id)
+        elif callback_data.action == "toggle_day_progress_bar":
+            preference = preference_repository.toggle_day_progress_bar(user_id=user.id)
         elif callback_data.action == "toggle_post_entry_delta_suffix":
             preference = preference_repository.toggle_post_entry_delta_suffix(user_id=user.id)
         else:
@@ -3610,6 +3665,7 @@ async def handle_toggle_summary_metric(
                 show_carbs=preference.show_carbs,
                 show_fiber=preference.show_fiber,
                 show_water=preference.show_water,
+                show_day_progress_bar=preference.show_day_progress_bar,
                 show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
                 summary_display_mode=preference.summary_display_mode,
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
@@ -3624,6 +3680,7 @@ async def handle_toggle_summary_metric(
                 show_carbs=preference.show_carbs,
                 show_fiber=preference.show_fiber,
                 show_water=preference.show_water,
+                show_day_progress_bar=preference.show_day_progress_bar,
                 show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
                 summary_display_mode=preference.summary_display_mode,
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
@@ -3666,6 +3723,7 @@ async def handle_today(
             summary_date=summary_date,
             workout_logging_enabled=user.workout_logging_enabled,
             summary_preference=preference,
+            reference_at=datetime.now(timezone.utc),
         )
 
     await message.answer(

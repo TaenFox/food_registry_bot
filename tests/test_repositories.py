@@ -218,6 +218,7 @@ def test_user_summary_preference_repository_creates_default_preferences_once() -
     assert preference.show_fat is True
     assert preference.show_carbs is True
     assert preference.show_water is True
+    assert preference.show_day_progress_bar is False
     assert preference.show_post_entry_delta_suffix is True
     assert preference.summary_display_mode == "text"
     assert preference.nutrition_day_start_hour == 4
@@ -243,9 +244,20 @@ def test_user_summary_preference_repository_cycles_nutrition_day_start_hour() ->
 
     first_hour = repository.cycle_nutrition_day_start_hour(user_id=user.id).nutrition_day_start_hour
     second_hour = repository.cycle_nutrition_day_start_hour(user_id=user.id).nutrition_day_start_hour
-
     assert first_hour == 6
     assert second_hour == 0
+
+
+def test_user_summary_preference_repository_toggles_day_progress_bar() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7007, username="prefs_day_progress_user")
+    repository = UserSummaryPreferenceRepository(session)
+
+    toggled_preference = repository.toggle_day_progress_bar(user_id=user.id)
+
+    assert toggled_preference.show_day_progress_bar is True
+    saved_preference = session.query(UserSummaryPreference).filter_by(user_id=user.id).one()
+    assert saved_preference.show_day_progress_bar is True
 
 
 def test_user_summary_preference_repository_cycles_summary_display_mode() -> None:
