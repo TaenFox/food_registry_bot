@@ -86,5 +86,8 @@ class OpenAIResponsesDietClient:
             "Scores use a 1-10 scale where 1 is strongly incompatible, 5 is neutral, and 10 is strongly compatible. "
             "Use only low, medium, or high for confidence. "
             "Use the provided quantity and unit when present. "
+            "The score must reflect compatibility of the consumed amount, not only the generic product category. "
+            "A larger problematic portion should usually score worse than a smaller one, "
+            "and a larger beneficial portion should usually score better than a smaller one. "
             "Do not add explanations, ranges, or extra fields."
         )

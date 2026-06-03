@@ -77,6 +77,7 @@ from food_registry_bot.diet import (
     create_diet_service_for_provider_access,
     get_supported_diet_definition,
     get_supported_diet_metric_codes,
+    resolve_weighted_average_diet_score,
     summarize_diet_scores,
 )
 from food_registry_bot.db.models import (
@@ -1079,15 +1080,7 @@ def build_write_confirmation_response(
 
 
 def resolve_entry_average_diet_score(entry) -> float | None:
-    scores: list[float] = []
-    for item in entry.items:
-        for metric in getattr(item, "metrics", []):
-            metric_code = metric.metric.code if metric.metric is not None else None
-            if metric_code in SUPPORTED_DIET_METRIC_CODES:
-                scores.append(metric.value)
-    if not scores:
-        return None
-    return round(sum(scores) / len(scores), 1)
+    return resolve_weighted_average_diet_score(entry)
 
 
 def format_entry_average_diet_score(entry) -> str | None:
@@ -1122,7 +1115,7 @@ def build_period_diet_scores_block(diet_score_summaries: list[DietScoreSummary])
             [
                 "",
                 "Diet score считается только по позициям с оценкой. "
-                "Часть записей периода без diet score исключена.",
+                "Часть записей периода без диетической оценки исключена.",
             ]
         )
     return "\n".join(lines)

@@ -22,7 +22,11 @@ from food_registry_bot.diet.service import (
     StaticDietEvaluationService,
     ValidDietEvaluationPayload,
 )
-from food_registry_bot.diet.summary import DietScoreSummary, summarize_diet_scores
+from food_registry_bot.diet.summary import (
+    DietScoreSummary,
+    resolve_weighted_average_diet_score,
+    summarize_diet_scores,
+)
 
 __all__ = [
     "DietDefinitionInput",
@@ -38,6 +42,7 @@ __all__ = [
     "LLMDietClientError",
     "LLMDietEvaluationService",
     "OpenAIResponsesDietClient",
+    "resolve_weighted_average_diet_score",
     "StaticDietEvaluationService",
     "SupportedDietDefinition",
     "ValidDietEvaluationPayload",

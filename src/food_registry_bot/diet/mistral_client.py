@@ -71,5 +71,8 @@ class MistralChatCompletionsDietClient:
             "Evaluate how well each provided item fits each requested diet. "
             "Return only the json payload and no extra text. "
             "Use a 1-10 compatibility score for each requested diet metric code. "
+            "Use quantity and unit when present, and score the consumed amount rather than only the generic product. "
+            "A larger problematic portion should usually score worse than a smaller one, "
+            "and a larger beneficial portion should usually score better than a smaller one. "
             "Water should score very high for low-purine diets when requested."
         )

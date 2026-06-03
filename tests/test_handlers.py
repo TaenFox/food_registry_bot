@@ -3555,7 +3555,7 @@ async def test_report_shows_diet_block_with_item_and_day_counts() -> None:
 
     rendered = message.answer.await_args.args[0]
     assert "Диеты:\n- низкопуриновая: 8.0/10, оценённых позиций: 1, дней с оценкой: 1" in rendered
-    assert "Часть записей периода без diet score исключена." in rendered
+    assert "Часть записей периода без диетической оценки исключена." in rendered
 
 
 async def test_report_callback_cycles_to_next_period() -> None:
@@ -5605,6 +5605,71 @@ async def test_water_button_shows_delta_bar_report_in_bars_mode() -> None:
     )
 
 
+async def test_food_write_shows_delta_bar_report_in_bars_mode() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "food_bar_user")
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.FOOD,
+                        items=[ExtractedJournalItem(name="яблоко", quantity=180, unit="г")],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload='{"entries":[{"type":"food","items":[{"name":"яблоко","quantity":180,"unit":"г"}]}]}',
+        )
+    )
+    nutrition_service = StaticNutritionEstimationService(
+        raw_payload=build_metric_payload(["entry-1:item-0"])
+    )
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="food_bar_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(
+            UserSummaryPreference(
+                user_id=user.id,
+                show_calories=True,
+                show_protein=True,
+                show_fat=True,
+                show_carbs=True,
+                show_fiber=True,
+                show_water=False,
+                summary_display_mode="bars",
+            )
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        text="яблоко",
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="food_bar_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        nutrition_service=nutrition_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert message.answer.await_args.args == (
+        "Сохранил:\n- яблоко (180 г)\n\n"
+        "<pre>"
+        "Ккал   [▓░░░░░░░░░] 12.2% 220.0/1800 ккал (+220.0 ккал)\n"
+        "Б      [░░░░░░░░░░] 8.4% 7.6/90 г (+7.6 г)\n"
+        "Ж      [░░░░░░░░░░] 3.7% 2.2/60 г (+2.2 г)\n"
+        "У      [▓▓░░░░░░░░] 20.4% 42.8/210 г (+42.8 г)\n"
+        "Кл     [▓▓░░░░░░░░] 20.4% 5.1/25 г (+5.1 г)"
+        "</pre>",
+    )
+
+
 async def test_confirmation_hides_delta_suffix_when_setting_is_disabled() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "delta_off_user")
@@ -5901,7 +5966,7 @@ async def test_recent_action_open_entry_shows_average_diet_score() -> None:
         "\n"
         "13:00 — рис (150 г), курица (120 г)\n"
         "\n"
-        "Средний diet score: 9.0/10\n"
+        "Средний diet score: 8.9/10\n"
         "\n"
         "Блюда:\n"
         "1. рис (150 г)\n"
@@ -5909,6 +5974,51 @@ async def test_recent_action_open_entry_shows_average_diet_score() -> None:
         "\n"
         "Выбери блюдо.",
     )
+
+
+async def test_recent_entry_average_diet_score_is_quantity_weighted() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_weighted_diet_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="recent_weighted_diet_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            source_text="смешанная запись",
+            occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        first_item = EntryItem(entry_id=entry.id, position=0, name="тунец", quantity=100, unit="g")
+        second_item = EntryItem(entry_id=entry.id, position=1, name="вода", quantity=500, unit="ml")
+        session.add_all([first_item, second_item])
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=first_item.id, metric_id=8, value=2.0, confidence="high"),
+                EntryItemMetric(entry_item_id=second_item.id, metric_id=8, value=10.0, confidence="high"),
+            ]
+        )
+        session.commit()
+        entry_id = entry.id
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_weighted_diet_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_action_callback(
+        callback,
+        RecentEntryActionCallback(action="open_entry", entry_id=entry_id, page=0, count=5),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert "Средний diet score: 8.7/10" in callback.message.edit_text.await_args.args[0]
 
 
 async def test_recent_list_shows_average_diet_score() -> None:
