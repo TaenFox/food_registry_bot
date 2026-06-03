@@ -71,11 +71,13 @@ from food_registry_bot.diet import (
     DietDefinitionInput,
     DietEvaluationItemInput,
     DietEvaluationRequest,
+    DietScoreSummary,
     DietEvaluationService,
     DisabledDietEvaluationService,
     create_diet_service_for_provider_access,
     get_supported_diet_definition,
     get_supported_diet_metric_codes,
+    summarize_diet_scores,
 )
 from food_registry_bot.db.models import (
     AccountCategory,
@@ -1095,6 +1097,37 @@ def format_entry_average_diet_score(entry) -> str | None:
     return f"{average_score}/10"
 
 
+def build_daily_diet_scores_block(diet_score_summaries: list[DietScoreSummary]) -> str | None:
+    if not diet_score_summaries:
+        return None
+
+    lines = ["Диеты за день:"]
+    for summary in diet_score_summaries:
+        lines.append(f"- {summary.name.lower()}: {summary.average_score}/10")
+    return "\n".join(lines)
+
+
+def build_period_diet_scores_block(diet_score_summaries: list[DietScoreSummary]) -> str | None:
+    if not diet_score_summaries:
+        return None
+
+    lines = ["Диеты:"]
+    for summary in diet_score_summaries:
+        lines.append(
+            f"- {summary.name.lower()}: {summary.average_score}/10, "
+            f"оценённых позиций: {summary.item_count}, дней с оценкой: {summary.day_count}"
+        )
+    if any(summary.has_missing_scores for summary in diet_score_summaries):
+        lines.extend(
+            [
+                "",
+                "Diet score считается только по позициям с оценкой. "
+                "Часть записей периода без diet score исключена.",
+            ]
+        )
+    return "\n".join(lines)
+
+
 def format_entry_timestamp(entry, timezone_name: str) -> str:
     occurred_at = entry.occurred_at
     if occurred_at.tzinfo is None:
@@ -1332,6 +1365,7 @@ def build_today_summary_response_with_preferences(
     summary: DailyNutritionSummary,
     *,
     enabled_metric_codes: tuple[str, ...],
+    diet_score_summaries: list[DietScoreSummary] | None = None,
     summary_display_mode: str = "text",
     goal_progress: DailyNutritionGoalProgress | None = None,
     water_summary: DailyWaterSummary | None = None,
@@ -1340,16 +1374,18 @@ def build_today_summary_response_with_preferences(
     show_post_entry_delta_suffix: bool = True,
     force_render_summary: bool = False,
 ) -> str:
+    diet_block = build_daily_diet_scores_block(diet_score_summaries or [])
     if (
         summary.included_entry_count == 0
         and summary.excluded_entry_count == 0
         and (water_summary is None or (
             water_summary.included_entry_count == 0 and water_summary.excluded_entry_count == 0
         ))
+        and diet_block is None
         and not force_render_summary
     ):
         return "За текущий день пока нет записей. Отправь еду, фото блюда или воду."
-    if not enabled_metric_codes:
+    if not enabled_metric_codes and diet_block is None:
         return "В summary сейчас всё скрыто. Включи хотя бы один показатель в /settings."
     lines: list[str] = []
     if summary_display_mode == "bars" and day_progress_bar_line is not None:
@@ -1392,7 +1428,11 @@ def build_today_summary_response_with_preferences(
             line += f" (+{round(metric_delta, 1)} {unit})"
         lines.append(line)
 
-    rendered_summary = "<pre>" + html.escape("\n".join(lines)) + "</pre>"
+    parts: list[str] = []
+    if lines:
+        parts.append("<pre>" + html.escape("\n".join(lines)) + "</pre>")
+    if diet_block is not None:
+        parts.append(diet_block)
 
     incompleteness_notes: list[str] = []
     if not summary.is_complete:
@@ -1404,9 +1444,9 @@ def build_today_summary_response_with_preferences(
             f"Есть записей воды с неподдерживаемым форматом: {water_summary.excluded_entry_count}. Итог воды пока неполный."
         )
     if incompleteness_notes:
-        return "\n\n".join([rendered_summary, *incompleteness_notes])
+        return "\n\n".join([*parts, *incompleteness_notes])
 
-    return rendered_summary
+    return "\n\n".join(parts)
 
 
 def get_enabled_summary_metric_codes(preference) -> tuple[str, ...]:
@@ -1707,14 +1747,14 @@ def build_daily_report_for_summary_date(
     reference_at: datetime | None = None,
     metric_deltas: dict[str, float] | None = None,
 ) -> str:
+    occurred_at_from, occurred_at_to = resolve_day_bounds_utc(
+        summary_date=summary_date,
+        timezone_name=timezone_name,
+        nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+    )
     workout_entries = []
     workout_calorie_credit_total = 0
     if workout_logging_enabled:
-        occurred_at_from, occurred_at_to = resolve_day_bounds_utc(
-            summary_date=summary_date,
-            timezone_name=timezone_name,
-            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-        )
         workout_entries = EntryRepository(session).list_workout_for_user_between(
             user_id=user_id,
             occurred_at_from=occurred_at_from,
@@ -1774,6 +1814,22 @@ def build_daily_report_for_summary_date(
     summary_report = build_today_summary_response_with_preferences(
         summary,
         enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
+        diet_score_summaries=summarize_diet_scores(
+            entries=[
+                *EntryRepository(session).list_food_for_user_between(
+                    user_id=user_id,
+                    occurred_at_from=occurred_at_from,
+                    occurred_at_to=occurred_at_to,
+                ),
+                *EntryRepository(session).list_water_for_user_between(
+                    user_id=user_id,
+                    occurred_at_from=occurred_at_from,
+                    occurred_at_to=occurred_at_to,
+                ),
+            ],
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        ),
         summary_display_mode=summary_preference.summary_display_mode,
         goal_progress=goal_progress,
         water_summary=water_summary,
@@ -1811,13 +1867,15 @@ def build_period_report_response(
     show_water = "water" in enabled_metric_codes
     has_any_metric_to_render = show_nutrition_metrics or show_water
     has_any_workout_data = workout_logging_enabled and report.workout_entry_count > 0
-    if not has_any_metric_to_render and not has_any_workout_data:
+    diet_block = build_period_diet_scores_block(report.diet_score_summaries)
+    if not has_any_metric_to_render and not has_any_workout_data and diet_block is None:
         return "В summary сейчас всё скрыто. Включи хотя бы один показатель в /settings."
 
     has_visible_data = (
         (show_nutrition_metrics and report.food_data_day_count > 0)
         or (show_water and report.water_data_day_count > 0)
         or has_any_workout_data
+        or diet_block is not None
     )
     if not has_visible_data:
         return "За этот период пока нет данных по включённым показателям."
@@ -1856,6 +1914,9 @@ def build_period_report_response(
 
     if average_lines:
         lines.extend(["", "Среднее по дням с данными", *average_lines])
+
+    if diet_block is not None:
+        lines.extend(["", diet_block])
 
     goal_lines: list[str] = []
     for metric_code in enabled_metric_codes:

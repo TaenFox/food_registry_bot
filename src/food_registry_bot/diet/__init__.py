@@ -22,6 +22,7 @@ from food_registry_bot.diet.service import (
     StaticDietEvaluationService,
     ValidDietEvaluationPayload,
 )
+from food_registry_bot.diet.summary import DietScoreSummary, summarize_diet_scores
 
 __all__ = [
     "DietDefinitionInput",
@@ -40,8 +41,10 @@ __all__ = [
     "StaticDietEvaluationService",
     "SupportedDietDefinition",
     "ValidDietEvaluationPayload",
+    "DietScoreSummary",
     "create_diet_service",
     "create_diet_service_for_provider_access",
     "get_supported_diet_definition",
     "get_supported_diet_metric_codes",
+    "summarize_diet_scores",
 ]

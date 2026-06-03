@@ -852,7 +852,11 @@ class EntryRepository:
                 Entry.occurred_at >= occurred_at_from,
                 Entry.occurred_at < occurred_at_to,
             )
-            .options(selectinload(Entry.items))
+            .options(
+                selectinload(Entry.items)
+                .selectinload(EntryItem.metrics)
+                .selectinload(EntryItemMetric.metric)
+            )
             .order_by(Entry.occurred_at.asc(), Entry.id.asc())
         )
         return list(self._session.scalars(statement))

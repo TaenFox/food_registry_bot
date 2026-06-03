@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from food_registry_bot.db.repositories import EntryRepository
+from food_registry_bot.diet import DietScoreSummary, summarize_diet_scores
 from food_registry_bot.nutrition.daily_summary import DailyNutritionSummaryUseCase, DailyNutritionTotals, resolve_day_bounds_utc, resolve_local_summary_date
 from food_registry_bot.nutrition.goals import DailyNutritionGoalSnapshotUseCase
 from food_registry_bot.nutrition.water_summary import DailyWaterSummaryUseCase
@@ -27,6 +28,7 @@ class PeriodReport(BaseModel):
     workout_entry_count: int = Field(ge=0)
     incomplete_food_day_count: int = Field(ge=0)
     incomplete_water_day_count: int = Field(ge=0)
+    diet_score_summaries: list[DietScoreSummary] = Field(default_factory=list)
     average_goal_values: dict[str, float] = Field(default_factory=dict)
     goal_hit_day_counts: dict[str, int] = Field(default_factory=dict)
     goal_applicable_day_counts: dict[str, int] = Field(default_factory=dict)
@@ -96,6 +98,16 @@ class PeriodReportUseCase:
             raise ValueError("period_day_count must be positive")
 
         summary_date_from = summary_date_to - timedelta(days=period_day_count - 1)
+        occurred_at_from, _ignored = resolve_day_bounds_utc(
+            summary_date=summary_date_from,
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
+        )
+        _ignored_from, occurred_at_to = resolve_day_bounds_utc(
+            summary_date=summary_date_to + timedelta(days=1),
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
+        )
         nutrition_totals_sum = DailyNutritionTotals()
         water_total_ml = 0
         food_data_day_count = 0
@@ -207,20 +219,26 @@ class PeriodReportUseCase:
             for metric_code in goal_value_sums
             if goal_value_day_counts[metric_code] > 0
         }
+        diet_score_summaries = summarize_diet_scores(
+            entries=[
+                *self._entry_repository.list_food_for_user_between(
+                    user_id=user_id,
+                    occurred_at_from=occurred_at_from,
+                    occurred_at_to=occurred_at_to,
+                ),
+                *self._entry_repository.list_water_for_user_between(
+                    user_id=user_id,
+                    occurred_at_from=occurred_at_from,
+                    occurred_at_to=occurred_at_to,
+                ),
+            ],
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
+        )
 
         workout_day_count = 0
         workout_entry_count = 0
         if workout_logging_enabled:
-            occurred_at_from, _ignored = resolve_day_bounds_utc(
-                summary_date=summary_date_from,
-                timezone_name=timezone_name,
-                nutrition_day_start_hour=nutrition_day_start_hour,
-            )
-            _ignored_from, occurred_at_to = resolve_day_bounds_utc(
-                summary_date=summary_date_to + timedelta(days=1),
-                timezone_name=timezone_name,
-                nutrition_day_start_hour=nutrition_day_start_hour,
-            )
             workout_entries = self._entry_repository.list_workout_for_user_between(
                 user_id=user_id,
                 occurred_at_from=occurred_at_from,
@@ -250,6 +268,7 @@ class PeriodReportUseCase:
             workout_entry_count=workout_entry_count,
             incomplete_food_day_count=incomplete_food_day_count,
             incomplete_water_day_count=incomplete_water_day_count,
+            diet_score_summaries=diet_score_summaries,
             average_goal_values=average_goal_values,
             goal_hit_day_counts=goal_hit_day_counts,
             goal_applicable_day_counts=goal_applicable_day_counts,

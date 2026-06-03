@@ -3231,6 +3231,51 @@ async def test_today_returns_daily_nutrition_totals_for_allowed_user() -> None:
     )
 
 
+async def test_today_shows_daily_diet_score_block() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "today_diet_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="today_diet_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+
+        item = EntryItem(entry_id=entry.id, position=0, name="яблоко")
+        session.add(item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=item.id, metric_id=1, value=100.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=2, value=1.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=3, value=0.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=4, value=20.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=5, value=4.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=8, value=9.0, confidence="high"),
+            ]
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="today_diet_user"),
+        answer=AsyncMock(),
+    )
+
+    await call_handle_today_at(
+        fixed_now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
+
+    assert "Диеты за день:\n- низкопуриновая: 9.0/10" in message.answer.await_args.args[0]
+
+
 async def test_report_returns_period_averages_by_days_with_data() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "report_user")
@@ -3453,6 +3498,64 @@ async def test_report_uses_goal_status_prefixes_for_average_lines() -> None:
     assert "🎯 углеводы: 210.0 г" in rendered
     assert "🎯 клетчатка: 25.0 г" in rendered
     assert "📈 вода: 2500.0 мл" in rendered
+
+
+async def test_report_shows_diet_block_with_item_and_day_counts() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "report_diet_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="report_diet_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        scored_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc),
+        )
+        historical_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 25, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add_all([scored_entry, historical_entry])
+        session.flush()
+
+        scored_item = EntryItem(entry_id=scored_entry.id, position=0, name="омлет")
+        historical_item = EntryItem(entry_id=historical_entry.id, position=0, name="тост")
+        session.add_all([scored_item, historical_item])
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=scored_item.id, metric_id=1, value=200.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=scored_item.id, metric_id=2, value=15.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=scored_item.id, metric_id=3, value=10.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=scored_item.id, metric_id=4, value=12.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=scored_item.id, metric_id=5, value=2.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=scored_item.id, metric_id=8, value=8.0, confidence="high"),
+                EntryItemMetric(entry_item_id=historical_item.id, metric_id=1, value=100.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=historical_item.id, metric_id=2, value=4.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=historical_item.id, metric_id=3, value=3.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=historical_item.id, metric_id=4, value=10.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=historical_item.id, metric_id=5, value=1.0, confidence="medium"),
+            ]
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="report_diet_user"),
+        answer=AsyncMock(),
+    )
+
+    await call_handle_report_at(
+        fixed_now=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
+
+    rendered = message.answer.await_args.args[0]
+    assert "Диеты:\n- низкопуриновая: 8.0/10, оценённых позиций: 1, дней с оценкой: 1" in rendered
+    assert "Часть записей периода без diet score исключена." in rendered
 
 
 async def test_report_callback_cycles_to_next_period() -> None:
@@ -5748,6 +5851,7 @@ async def test_food_write_saves_diet_scores_for_enabled_diet() -> None:
         )
 
     assert saved_metric.value == 9.0
+    assert "Диеты за день:\n- низкопуриновая: 9.0/10" in message.answer.await_args.args[0]
 
 
 async def test_recent_action_open_entry_shows_average_diet_score() -> None:
