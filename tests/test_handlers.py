@@ -3276,6 +3276,64 @@ async def test_today_shows_daily_diet_score_block() -> None:
     assert "Диеты за день:\n- низкопуриновая: 9.0/10" in message.answer.await_args.args[0]
 
 
+async def test_today_shows_daily_diet_score_block_in_bars_mode() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "today_diet_bars_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="today_diet_bars_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(
+            UserSummaryPreference(
+                user_id=user.id,
+                show_calories=False,
+                show_protein=False,
+                show_fat=False,
+                show_carbs=False,
+                show_fiber=False,
+                show_water=False,
+                summary_display_mode="bars",
+            )
+        )
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+
+        item = EntryItem(entry_id=entry.id, position=0, name="яблоко")
+        session.add(item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=item.id, metric_id=1, value=100.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=2, value=1.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=3, value=0.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=4, value=20.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=5, value=4.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=8, value=9.0, confidence="high"),
+            ]
+        )
+        session.commit()
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="today_diet_bars_user"),
+        answer=AsyncMock(),
+    )
+
+    await call_handle_today_at(
+        fixed_now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+        message=message,
+        session_factory=session_factory,
+    )
+
+    assert message.answer.await_args.args == (
+        "Диеты за день:\n<pre>Низкоп [█████████░] 90.0% 9.0/10</pre>",
+    )
+
+
 async def test_report_returns_period_averages_by_days_with_data() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "report_user")
@@ -5917,6 +5975,71 @@ async def test_food_write_saves_diet_scores_for_enabled_diet() -> None:
 
     assert saved_metric.value == 9.0
     assert "Диеты за день:\n- низкопуриновая: 9.0/10" in message.answer.await_args.args[0]
+
+
+async def test_food_write_shows_daily_diet_score_block_in_bars_mode() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "diet_score_bars_user")
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.FOOD,
+                        items=[ExtractedJournalItem(name="яблоко", quantity=180, unit="г")],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload='{"entries":[{"type":"food","items":[{"name":"яблоко","quantity":180,"unit":"г"}]}]}',
+        )
+    )
+    nutrition_service = StaticNutritionEstimationService(
+        raw_payload=build_metric_payload(["entry-1:item-0"])
+    )
+    diet_service = StaticDietEvaluationService(
+        raw_payload=(
+            '{"items":[{"client_item_id":"entry-1:item-0",'
+            '"scores":[{"code":"low_purine_score","value":9.0,"confidence":"high"}]}]}'
+        )
+    )
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="diet_score_bars_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        session.add(
+            UserSummaryPreference(
+                user_id=user.id,
+                show_calories=False,
+                show_protein=False,
+                show_fat=False,
+                show_carbs=False,
+                show_fiber=False,
+                show_water=False,
+                summary_display_mode="bars",
+            )
+        )
+        supported_diet = session.query(SupportedDiet).filter_by(code="low_purine").one()
+        session.add(UserDietPreference(user_id=user.id, diet_id=supported_diet.id, is_enabled=True))
+        session.commit()
+
+    message = SimpleNamespace(
+        text="яблоко",
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="diet_score_bars_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        nutrition_service=nutrition_service,
+        diet_service=diet_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert "Диеты за день:\n<pre>Низкоп [█████████░] 90.0% 9.0/10</pre>" in message.answer.await_args.args[0]
 
 
 async def test_recent_action_open_entry_shows_average_diet_score() -> None:

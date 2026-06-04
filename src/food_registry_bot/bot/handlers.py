@@ -1090,11 +1090,32 @@ def format_entry_average_diet_score(entry) -> str | None:
     return f"{average_score}/10"
 
 
-def build_daily_diet_scores_block(diet_score_summaries: list[DietScoreSummary]) -> str | None:
+def build_diet_score_bar_line(summary: DietScoreSummary) -> str:
+    score = summary.average_score
+    progress_ratio = score / 10
+    filled_cells = min(int(progress_ratio * 10), 10)
+    empty_cells = 10 - filled_cells
+    base_bar = "[" + ("█" * filled_cells) + ("░" * empty_cells) + "]"
+    percentage = round(progress_ratio * 100, 1)
+    rendered_label = summary.name[:BAR_MODE_LABEL_WIDTH].ljust(BAR_MODE_LABEL_WIDTH)
+    return f"{rendered_label} {base_bar} {percentage}% {score}/10"
+
+
+def build_daily_diet_scores_block(
+    diet_score_summaries: list[DietScoreSummary],
+    *,
+    summary_display_mode: str,
+) -> str | None:
     if not diet_score_summaries:
         return None
 
     lines = ["Диеты за день:"]
+    if summary_display_mode == "bars":
+        lines.append(
+            "<pre>" + html.escape("\n".join(build_diet_score_bar_line(summary) for summary in diet_score_summaries)) + "</pre>"
+        )
+        return "\n".join(lines)
+
     for summary in diet_score_summaries:
         lines.append(f"- {summary.name.lower()}: {summary.average_score}/10")
     return "\n".join(lines)
@@ -1367,7 +1388,10 @@ def build_today_summary_response_with_preferences(
     show_post_entry_delta_suffix: bool = True,
     force_render_summary: bool = False,
 ) -> str:
-    diet_block = build_daily_diet_scores_block(diet_score_summaries or [])
+    diet_block = build_daily_diet_scores_block(
+        diet_score_summaries or [],
+        summary_display_mode=summary_display_mode,
+    )
     if (
         summary.included_entry_count == 0
         and summary.excluded_entry_count == 0
