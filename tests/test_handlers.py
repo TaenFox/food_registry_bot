@@ -3330,7 +3330,7 @@ async def test_today_shows_daily_diet_score_block_in_bars_mode() -> None:
     )
 
     assert message.answer.await_args.args == (
-        "Диеты за день:\n<pre>Низкоп [█████████░] 90.0% 9.0/10</pre>",
+        "Диеты за день:\n<pre>Н.пур  [█████████░] 90.0% 9.0/10</pre>",
     )
 
 
@@ -6039,7 +6039,7 @@ async def test_food_write_shows_daily_diet_score_block_in_bars_mode() -> None:
         admin_user_ids=(ADMIN_ID,),
     )
 
-    assert "Диеты за день:\n<pre>Низкоп [█████████░] 90.0% 9.0/10</pre>" in message.answer.await_args.args[0]
+    assert "Диеты за день:\n<pre>Н.пур  [█████████░] 90.0% 9.0/10</pre>" in message.answer.await_args.args[0]
 
 
 async def test_recent_action_open_entry_shows_average_diet_score() -> None:

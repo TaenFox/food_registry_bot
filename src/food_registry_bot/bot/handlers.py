@@ -1097,7 +1097,11 @@ def build_diet_score_bar_line(summary: DietScoreSummary) -> str:
     empty_cells = 10 - filled_cells
     base_bar = "[" + ("█" * filled_cells) + ("░" * empty_cells) + "]"
     percentage = round(progress_ratio * 100, 1)
-    rendered_label = summary.name[:BAR_MODE_LABEL_WIDTH].ljust(BAR_MODE_LABEL_WIDTH)
+    rendered_label = (
+        "Н.пур".ljust(BAR_MODE_LABEL_WIDTH)
+        if summary.code == "low_purine"
+        else summary.name[:BAR_MODE_LABEL_WIDTH].ljust(BAR_MODE_LABEL_WIDTH)
+    )
     return f"{rendered_label} {base_bar} {percentage}% {score}/10"
 
 
