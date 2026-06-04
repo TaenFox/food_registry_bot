@@ -1134,6 +1134,7 @@ def build_diet_score_bar_line(
     *,
     delta_score: float | None = None,
     show_delta_suffix: bool = True,
+    show_percentage: bool = True,
 ) -> str:
     score = summary.average_score
     progress_ratio = score / 10
@@ -1154,10 +1155,10 @@ def build_diet_score_bar_line(
     else:
         empty_cells = 10 - filled_cells
         base_bar = "[" + ("█" * filled_cells) + ("░" * empty_cells) + "]"
-    percentage = round(progress_ratio * 100, 1)
     short_label = DIET_BAR_MODE_LABELS.get(summary.code, summary.name[:BAR_MODE_LABEL_WIDTH])
     rendered_label = short_label.ljust(BAR_MODE_LABEL_WIDTH)
-    line = f"{rendered_label} {base_bar} {percentage}%"
+    rendered_value = f"{round(progress_ratio * 100, 1)}%" if show_percentage else f"{round(score, 1)}/10"
+    line = f"{rendered_label} {base_bar} {rendered_value}"
     if delta_score is not None and delta_score != 0 and show_delta_suffix:
         line += f" ({format_signed_score_delta(delta_score)})"
     return line
@@ -1169,11 +1170,13 @@ def build_daily_diet_scores_block(
     summary_display_mode: str,
     diet_score_deltas: dict[str, float] | None = None,
     show_post_entry_delta_suffix: bool = True,
+    title: str = "Диеты за день:",
+    show_bar_percentage: bool = True,
 ) -> str | None:
     if not diet_score_summaries:
         return None
 
-    lines = ["Диеты за день:"]
+    lines = [title]
     if summary_display_mode == "bars":
         lines.append(
             "<pre>"
@@ -1183,6 +1186,7 @@ def build_daily_diet_scores_block(
                         summary,
                         delta_score=None if diet_score_deltas is None else diet_score_deltas.get(summary.code),
                         show_delta_suffix=show_post_entry_delta_suffix,
+                        show_percentage=show_bar_percentage,
                     )
                     for summary in diet_score_summaries
                 )
@@ -1467,12 +1471,19 @@ def build_today_summary_response_with_preferences(
     diet_score_deltas: dict[str, float] | None = None,
     show_post_entry_delta_suffix: bool = True,
     force_render_summary: bool = False,
+    confirmation_mode: bool = False,
 ) -> str:
     diet_block = build_daily_diet_scores_block(
         diet_score_summaries or [],
         summary_display_mode=summary_display_mode,
         diet_score_deltas=diet_score_deltas,
         show_post_entry_delta_suffix=show_post_entry_delta_suffix,
+        title=(
+            "Средний балл пользы по диетам (0 - не полезно, 10 - полезно):"
+            if confirmation_mode
+            else "Диеты за день:"
+        ),
+        show_bar_percentage=not confirmation_mode,
     )
     if (
         summary.included_entry_count == 0
@@ -1919,6 +1930,7 @@ def build_daily_report_for_summary_date(
     reference_at: datetime | None = None,
     metric_deltas: dict[str, float] | None = None,
     diet_delta_entry_ids: set[int] | None = None,
+    confirmation_mode: bool = False,
 ) -> str:
     occurred_at_from, occurred_at_to = resolve_day_bounds_utc(
         summary_date=summary_date,
@@ -2019,6 +2031,7 @@ def build_daily_report_for_summary_date(
         diet_score_deltas=diet_score_deltas,
         show_post_entry_delta_suffix=summary_preference.show_post_entry_delta_suffix,
         force_render_summary=workout_calorie_credit_total > 0,
+        confirmation_mode=confirmation_mode,
     )
     if not workout_logging_enabled:
         return summary_report
@@ -4760,6 +4773,7 @@ async def handle_water_250_ml(
             summary_preference=preference,
             metric_deltas={"water": 250.0},
             diet_delta_entry_ids={saved_entry.id},
+            confirmation_mode=True,
         )
 
     await message.answer(
@@ -5219,6 +5233,7 @@ async def handle_message(
                             summary_preference=summary_preference,
                             metric_deltas=metric_deltas,
                             diet_delta_entry_ids={entry.id for entry in saved_diet_entries},
+                            confirmation_mode=True,
                         ),
                         coach_comment=coach_comment,
                     )

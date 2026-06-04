@@ -5787,7 +5787,10 @@ async def test_water_button_persists_fixed_diet_score_without_llm_call() -> None
         saved_metric = session.query(EntryItemMetric).filter(EntryItemMetric.metric_id == 8).one()
 
     assert saved_metric.value == 8.0
-    assert "Диеты за день:\n- низкопуриновая: 8.0/10 (+8.0)" in message.answer.await_args.args[0]
+    assert (
+        "Средний балл пользы по диетам (0 - не полезно, 10 - полезно):\n"
+        "- низкопуриновая: 8.0/10 (+8.0)"
+    ) in message.answer.await_args.args[0]
 
 
 async def test_food_write_shows_delta_bar_report_in_bars_mode() -> None:
@@ -6101,7 +6104,10 @@ async def test_food_write_saves_diet_scores_for_enabled_diet() -> None:
         )
 
     assert saved_metric.value == 9.0
-    assert "Диеты за день:\n- низкопуриновая: 9.0/10 (+9.0)" in message.answer.await_args.args[0]
+    assert (
+        "Средний балл пользы по диетам (0 - не полезно, 10 - полезно):\n"
+        "- низкопуриновая: 9.0/10 (+9.0)"
+    ) in message.answer.await_args.args[0]
 
 
 async def test_food_write_shows_daily_diet_score_block_in_bars_mode() -> None:
@@ -6166,7 +6172,10 @@ async def test_food_write_shows_daily_diet_score_block_in_bars_mode() -> None:
         admin_user_ids=(ADMIN_ID,),
     )
 
-    assert "Диеты за день:\n<pre>Н.пур  [▓▓▓▓▓▓▓▓▓░] 90.0% (+9.0)</pre>" in message.answer.await_args.args[0]
+    assert (
+        "Средний балл пользы по диетам (0 - не полезно, 10 - полезно):\n"
+        "<pre>Н.пур  [▓▓▓▓▓▓▓▓▓░] 9.0/10 (+9.0)</pre>"
+    ) in message.answer.await_args.args[0]
 
 
 async def test_food_write_shows_signed_diet_average_delta() -> None:
@@ -6239,7 +6248,10 @@ async def test_food_write_shows_signed_diet_average_delta() -> None:
         admin_user_ids=(ADMIN_ID,),
     )
 
-    assert "Диеты за день:\n- низкопуриновая: 6.0/10 (-4.0)" in message.answer.await_args.args[0]
+    assert (
+        "Средний балл пользы по диетам (0 - не полезно, 10 - полезно):\n"
+        "- низкопуриновая: 6.0/10 (-4.0)"
+    ) in message.answer.await_args.args[0]
 
 
 def test_build_diet_score_bar_line_marks_negative_delta_segment() -> None:
