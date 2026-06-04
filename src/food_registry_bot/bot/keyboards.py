@@ -291,6 +291,7 @@ def build_recent_food_entry_keyboard(
     entry_id: int,
     page: int,
     count: int,
+    parent_message_id: int = 0,
 ) -> InlineKeyboardMarkup:
     rows = [
         [
@@ -302,6 +303,8 @@ def build_recent_food_entry_keyboard(
                     item_position=item_position,
                     page=page,
                     count=count,
+                    open_in_new_message=1,
+                    parent_message_id=parent_message_id,
                 ).pack(),
             )
         ]
@@ -385,8 +388,10 @@ def build_recent_food_item_keyboard(
     item_position: int,
     unit: str | None,
     can_adjust_portion: bool,
+    adjustable_metric_codes: tuple[str, ...],
     page: int,
     count: int,
+    parent_message_id: int = 0,
 ) -> InlineKeyboardMarkup:
     rows = [
             [
@@ -398,6 +403,7 @@ def build_recent_food_item_keyboard(
                         item_position=item_position,
                         page=page,
                         count=count,
+                        parent_message_id=parent_message_id,
                     ).pack(),
                 )
             ],
@@ -410,6 +416,7 @@ def build_recent_food_item_keyboard(
                         item_position=item_position,
                         page=page,
                         count=count,
+                        parent_message_id=parent_message_id,
                     ).pack(),
                 )
             ],
@@ -428,6 +435,7 @@ def build_recent_food_item_keyboard(
                         item_position=item_position,
                         page=page,
                         count=count,
+                        parent_message_id=parent_message_id,
                     ).pack(),
                 ),
                 InlineKeyboardButton(
@@ -438,24 +446,59 @@ def build_recent_food_item_keyboard(
                         item_position=item_position,
                         page=page,
                         count=count,
+                        parent_message_id=parent_message_id,
+                    ).pack(),
+                ),
+            ]
+        )
+    metric_rows = {
+        "calories": ("-25 ккал/100г", "+25 ккал/100г", 25),
+        "protein": ("-5г Б/100г", "+5г Б/100г", 5),
+        "fat": ("-5г Ж/100г", "+5г Ж/100г", 5),
+        "carbs": ("-5г У/100г", "+5г У/100г", 5),
+    }
+    for metric_code in adjustable_metric_codes:
+        decrement_label, increment_label, delta = metric_rows[metric_code]
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=decrement_label,
+                    callback_data=RecentEntryActionCallback(
+                        action="adjust_100g",
+                        entry_id=entry_id,
+                        item_position=item_position,
+                        page=page,
+                        count=count,
+                        metric_code=metric_code,
+                        delta=-delta,
+                        parent_message_id=parent_message_id,
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text=increment_label,
+                    callback_data=RecentEntryActionCallback(
+                        action="adjust_100g",
+                        entry_id=entry_id,
+                        item_position=item_position,
+                        page=page,
+                        count=count,
+                        metric_code=metric_code,
+                        delta=delta,
+                        parent_message_id=parent_message_id,
                     ).pack(),
                 ),
             ]
         )
     rows.extend(
         [
-            [
-                InlineKeyboardButton(
-                    text="Назад к записи",
-                    callback_data=RecentEntryActionCallback(
-                        action="open_entry",
-                        entry_id=entry_id,
-                        page=page,
-                        count=count,
-                    ).pack(),
-                )
-            ],
-            _build_close_row(RecentEntryActionCallback(action="close", page=page, count=count).pack()),
+            _build_close_row(
+                RecentEntryActionCallback(
+                    action="close",
+                    page=page,
+                    count=count,
+                    parent_message_id=parent_message_id,
+                ).pack()
+            ),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -467,6 +510,7 @@ def build_recent_food_item_delete_confirmation_keyboard(
     item_position: int,
     page: int,
     count: int,
+    parent_message_id: int = 0,
 ) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -479,6 +523,7 @@ def build_recent_food_item_delete_confirmation_keyboard(
                         item_position=item_position,
                         page=page,
                         count=count,
+                        parent_message_id=parent_message_id,
                     ).pack(),
                 ),
                 InlineKeyboardButton(
@@ -489,10 +534,18 @@ def build_recent_food_item_delete_confirmation_keyboard(
                         item_position=item_position,
                         page=page,
                         count=count,
+                        parent_message_id=parent_message_id,
                     ).pack(),
                 ),
             ],
-            _build_close_row(RecentEntryActionCallback(action="close", page=page, count=count).pack()),
+            _build_close_row(
+                RecentEntryActionCallback(
+                    action="close",
+                    page=page,
+                    count=count,
+                    parent_message_id=parent_message_id,
+                ).pack()
+            ),
         ]
     )
 

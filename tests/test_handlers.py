@@ -2226,29 +2226,37 @@ async def test_recent_action_open_item_shows_food_item_screen() -> None:
 
     callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_item_view_user"),
-        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock(), message_id=777),
         answer=AsyncMock(),
     )
 
     await handle_recent_action_callback(
         callback,
-        RecentEntryActionCallback(action="open_item", entry_id=entry_id, item_position=0, page=0, count=5),
+        RecentEntryActionCallback(
+            action="open_item",
+            entry_id=entry_id,
+            item_position=0,
+            page=0,
+            count=5,
+            open_in_new_message=1,
+            parent_message_id=777,
+        ),
         session_factory,
         admin_user_ids=(ADMIN_ID,),
     )
 
-    assert callback.message.edit_text.await_args.args == (
+    assert callback.message.answer.await_args.args == (
         "Блюдо:\n"
         "\n"
         "13:00 — рис (150 г)",
     )
-    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    reply_markup = callback.message.answer.await_args.kwargs["reply_markup"]
     assert flatten_inline_button_texts(reply_markup) == [
         "Удалить блюдо",
         "Повторить сейчас",
-        "Назад к записи",
         "Закрыть",
     ]
+    callback.message.edit_text.assert_not_awaited()
 
 
 async def test_recent_action_delete_item_opens_confirmation_screen() -> None:
@@ -2333,13 +2341,26 @@ async def test_recent_action_confirm_delete_item_updates_entry_screen() -> None:
 
     callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_item_delete_confirm_user"),
-        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        message=SimpleNamespace(
+            edit_text=AsyncMock(),
+            answer=AsyncMock(),
+            delete=AsyncMock(),
+            bot=SimpleNamespace(edit_message_text=AsyncMock()),
+            chat=SimpleNamespace(id=5001),
+        ),
         answer=AsyncMock(),
     )
 
     await handle_recent_action_callback(
         callback,
-        RecentEntryActionCallback(action="confirm_delete_item", entry_id=entry_id, item_position=0, page=0, count=5),
+        RecentEntryActionCallback(
+            action="confirm_delete_item",
+            entry_id=entry_id,
+            item_position=0,
+            page=0,
+            count=5,
+            parent_message_id=901,
+        ),
         session_factory,
         admin_user_ids=(ADMIN_ID,),
     )
@@ -2351,8 +2372,10 @@ async def test_recent_action_confirm_delete_item_updates_entry_screen() -> None:
         assert [(item.name, item.position) for item in persisted_items] == [("курица", 1)]
         assert session.query(EntryItemMetric).count() == 1
 
-    assert callback.message.edit_text.await_args.args == (
-        "Запись еды:\n"
+    callback.message.bot.edit_message_text.assert_awaited_once_with(
+        chat_id=5001,
+        message_id=901,
+        text="Запись еды:\n"
         "\n"
         "13:00 — курица (120 г)\n"
         "\n"
@@ -2360,7 +2383,9 @@ async def test_recent_action_confirm_delete_item_updates_entry_screen() -> None:
         "1. курица (120 г)\n"
         "\n"
         "Выбери блюдо.",
+        reply_markup=callback.message.bot.edit_message_text.await_args.kwargs["reply_markup"],
     )
+    callback.message.delete.assert_awaited_once()
     callback.answer.assert_awaited_once_with("Блюдо удалено. Запись обновлена.")
 
 
@@ -2400,7 +2425,13 @@ async def test_recent_action_confirm_delete_last_item_removes_entry_and_returns_
 
     callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_item_delete_last_user"),
-        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        message=SimpleNamespace(
+            edit_text=AsyncMock(),
+            answer=AsyncMock(),
+            delete=AsyncMock(),
+            bot=SimpleNamespace(edit_message_text=AsyncMock()),
+            chat=SimpleNamespace(id=5002),
+        ),
         answer=AsyncMock(),
     )
 
@@ -2412,6 +2443,7 @@ async def test_recent_action_confirm_delete_last_item_removes_entry_and_returns_
             item_position=0,
             page=0,
             count=5,
+            parent_message_id=902,
         ),
         session_factory,
         admin_user_ids=(ADMIN_ID,),
@@ -2422,19 +2454,23 @@ async def test_recent_action_confirm_delete_last_item_removes_entry_and_returns_
         assert session.query(EntryItem).count() == 1
         assert session.query(EntryItemMetric).count() == 0
 
-    assert callback.message.edit_text.await_args.args == (
-        "Последние записи (страница 1, по 5):\n"
+    callback.message.bot.edit_message_text.assert_awaited_once_with(
+        chat_id=5002,
+        message_id=902,
+        text="Последние записи (страница 1, по 5):\n"
         "\n"
         "18.05.2026\n"
         "1. 14:00 — вода (250 мл)\n"
         "\n"
         "Выбери запись.",
+        reply_markup=callback.message.bot.edit_message_text.await_args.kwargs["reply_markup"],
     )
-    assert flatten_inline_button_texts(callback.message.edit_text.await_args.kwargs["reply_markup"]) == [
+    assert flatten_inline_button_texts(callback.message.bot.edit_message_text.await_args.kwargs["reply_markup"]) == [
         "14:00 · вода (250 мл)",
         "Назад",
         "Закрыть",
     ]
+    callback.message.delete.assert_awaited_once()
     callback.answer.assert_awaited_once_with(
         "Блюдо удалено. Если это была единственная позиция, запись тоже удалена."
     )
@@ -2500,11 +2536,7 @@ async def test_recent_action_repeat_item_creates_new_entry_and_copies_metrics() 
             (2, 4.5, "high"),
         ]
 
-    rendered_text = callback.message.edit_text.await_args.args[0]
-    assert rendered_text.startswith("Последние записи (страница 1, по 5):")
-    assert "1. " in rendered_text
-    assert "2. 13:00 — рис (150 г)" in rendered_text
-    assert rendered_text.count("рис (150 г)") == 2
+    callback.message.edit_text.assert_not_awaited()
     callback.answer.assert_awaited_once_with("Блюдо сохранено как новая запись.")
 
 
@@ -2808,21 +2840,28 @@ async def test_recent_action_open_item_without_supported_portion_hides_portion_b
 
     callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_item_nopotion_user"),
-        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock(), message_id=778),
         answer=AsyncMock(),
     )
 
     await handle_recent_action_callback(
         callback,
-        RecentEntryActionCallback(action="open_item", entry_id=entry_id, item_position=0, page=0, count=5),
+        RecentEntryActionCallback(
+            action="open_item",
+            entry_id=entry_id,
+            item_position=0,
+            page=0,
+            count=5,
+            open_in_new_message=1,
+            parent_message_id=778,
+        ),
         session_factory,
         admin_user_ids=(ADMIN_ID,),
     )
 
-    assert flatten_inline_button_texts(callback.message.edit_text.await_args.kwargs["reply_markup"]) == [
+    assert flatten_inline_button_texts(callback.message.answer.await_args.kwargs["reply_markup"]) == [
         "Удалить блюдо",
         "Повторить сейчас",
-        "Назад к записи",
         "Закрыть",
     ]
 
@@ -2877,9 +2916,93 @@ async def test_recent_action_increase_portion_updates_quantity_and_metrics() -> 
         "\n"
         "13:00 — рис (160 г)\n"
         "\n"
-        "Можно изменить порцию кнопками ниже.",
+        "За сохранённую порцию:\n"
+        "- калории: 213.3 ккал\n"
+        "- белки: 4.8 г\n"
+        "\n"
+        "На 100 г:\n"
+        "- калории: 133.3 ккал\n"
+        "- белки: 3 г\n"
+        "\n"
+        "Кнопки порции выше меняют вес блюда и пересчитывают сохранённые значения.\n"
+        "\n"
+        "Кнопки КБЖУ ниже меняют блок \"На 100 г\".\n"
+        "После нажатия бот пересчитывает сохранённые значения за текущую порцию.",
     )
     callback.answer.assert_awaited_once_with("Порция обновлена.")
+
+
+async def test_recent_action_adjust_100g_updates_saved_portion_metrics() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_item_adjust_100g_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="recent_item_adjust_100g_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        entry = Entry(user_id=user.id, entry_type=EntryType.FOOD, source_text="обед", occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc))
+        session.add(entry)
+        session.flush()
+        item = EntryItem(entry_id=entry.id, position=0, name="рис", quantity=150, unit="g")
+        session.add(item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=item.id, metric_id=1, value=200.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=2, value=4.5, confidence="high"),
+            ]
+        )
+        session.commit()
+        entry_id = entry.id
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_item_adjust_100g_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_action_callback(
+        callback,
+        RecentEntryActionCallback(
+            action="adjust_100g",
+            entry_id=entry_id,
+            item_position=0,
+            page=0,
+            count=5,
+            metric_code="protein",
+            delta=5,
+        ),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        updated_item = session.query(EntryItem).filter_by(entry_id=entry_id, position=0).one()
+        updated_metrics = session.query(EntryItemMetric).filter_by(entry_item_id=updated_item.id).order_by(EntryItemMetric.metric_id.asc()).all()
+        assert [(metric.metric_id, metric.value) for metric in updated_metrics] == [
+            (1, 200.0),
+            (2, 12.0),
+        ]
+
+    assert callback.message.edit_text.await_args.args == (
+        "Блюдо:\n"
+        "\n"
+        "13:00 — рис (150 г)\n"
+        "\n"
+        "За сохранённую порцию:\n"
+        "- калории: 200 ккал\n"
+        "- белки: 12 г\n"
+        "\n"
+        "На 100 г:\n"
+        "- калории: 133.3 ккал\n"
+        "- белки: 8 г\n"
+        "\n"
+        "Кнопки порции выше меняют вес блюда и пересчитывают сохранённые значения.\n"
+        "\n"
+        "Кнопки КБЖУ ниже меняют блок \"На 100 г\".\n"
+        "После нажатия бот пересчитывает сохранённые значения за текущую порцию.",
+    )
+    callback.answer.assert_awaited_once_with("КБЖУ на 100 г обновлены.")
 
 
 async def test_recent_action_decrease_portion_blocks_non_positive_result() -> None:

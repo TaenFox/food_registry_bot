@@ -173,6 +173,19 @@ default_message_routing_service = RuleBasedMessageRoutingService()
 RECENT_ENTRIES_DEFAULT_COUNT = 5
 RECENT_ENTRIES_MAX_COUNT = 60
 RECENT_ENTRY_LIST_TITLE_MAX_LENGTH = 48
+RECENT_ITEM_PORTION_ADJUSTABLE_METRIC_CODES = frozenset({"calories", "protein", "fat", "carbs", "fiber"})
+RECENT_ITEM_100G_ADJUSTMENT_STEPS = {
+    "calories": 25,
+    "protein": 5,
+    "fat": 5,
+    "carbs": 5,
+}
+RECENT_ITEM_METRIC_PRESENTATION = {
+    "calories": ("калории", "ккал"),
+    "protein": ("белки", "г"),
+    "fat": ("жиры", "г"),
+    "carbs": ("углеводы", "г"),
+}
 SUMMARY_METRIC_LINES = (
     ("calories", "К", "ккал"),
     ("protein", "Б", "г"),
@@ -373,8 +386,34 @@ async def safe_edit_message_text(message: Message, *, text: str, reply_markup) -
 
 
 async def safe_delete_message(message: Message) -> None:
+    delete = getattr(message, "delete", None)
+    if delete is None:
+        return
     with suppress(TelegramBadRequest):
-        await message.delete()
+        await delete()
+
+
+async def safe_edit_message_by_id(
+    bot,
+    *,
+    chat_id: int | None,
+    message_id: int,
+    text: str,
+    reply_markup,
+) -> None:
+    if bot is None or chat_id is None or message_id <= 0:
+        return
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc) or "message to edit not found" in str(exc):
+            return
+        raise
 
 
 def build_ambiguous_message_response() -> str:
@@ -1372,13 +1411,34 @@ def build_recent_entry_selection_response(entries: list, *, timezone_name: str, 
 
 
 def build_recent_food_item_response(*, entry, item, timezone_name: str) -> str:
+    metrics_by_code = get_recent_item_metrics_by_code(item)
     lines = [
         "Блюдо:",
         "",
         f"{format_entry_timestamp(entry, timezone_name)} — {format_saved_item_line(item.name, item.quantity, item.unit).removeprefix('- ')}",
     ]
+    if metrics_by_code:
+        lines.extend(["", "За сохранённую порцию:"])
+        for metric_code in ("calories", "protein", "fat", "carbs"):
+            metric = metrics_by_code.get(metric_code)
+            if metric is None:
+                continue
+            metric_label, unit = RECENT_ITEM_METRIC_PRESENTATION[metric_code]
+            lines.append(f"- {metric_label}: {format_recent_metric_value(metric.value)} {unit}")
+    adjustable_metric_codes = get_recent_item_100g_adjustable_metric_codes(item)
+    if adjustable_metric_codes:
+        lines.extend(["", "На 100 г:"])
+        for metric_code in adjustable_metric_codes:
+            metric_label, unit = RECENT_ITEM_METRIC_PRESENTATION[metric_code]
+            value_per_100g = calculate_recent_item_metric_per_100g(item=item, metric_code=metric_code)
+            if value_per_100g is None:
+                continue
+            lines.append(f"- {metric_label}: {format_recent_metric_value(value_per_100g)} {unit}")
     if supports_recent_item_portion_adjustment(item):
-        lines.extend(["", "Можно изменить порцию кнопками ниже."])
+        lines.extend(["", "Кнопки порции выше меняют вес блюда и пересчитывают сохранённые значения."])
+    if adjustable_metric_codes:
+        lines.extend(["", 'Кнопки КБЖУ ниже меняют блок "На 100 г".'])
+        lines.extend(["После нажатия бот пересчитывает сохранённые значения за текущую порцию."])
     return "\n".join(lines)
 
 
@@ -2313,7 +2373,39 @@ def delete_recent_entry_item(*, session: Session, entry_repository: EntryReposit
 
 def supports_recent_item_portion_adjustment(item) -> bool:
     normalized_unit = item.unit.strip().lower() if item.unit is not None else None
-    return item.quantity is not None and normalized_unit in {"g", "ml"} and bool(item.metrics)
+    return (
+        item.quantity is not None
+        and normalized_unit in {"g", "ml"}
+        and any(metric.metric.code in RECENT_ITEM_PORTION_ADJUSTABLE_METRIC_CODES for metric in item.metrics)
+    )
+
+
+def get_recent_item_metrics_by_code(item) -> dict[str, object]:
+    return {metric.metric.code: metric for metric in item.metrics if metric.metric.code in RECENT_ITEM_METRIC_PRESENTATION}
+
+
+def get_recent_item_100g_adjustable_metric_codes(item) -> tuple[str, ...]:
+    normalized_unit = item.unit.strip().lower() if item.unit is not None else None
+    if item.quantity is None or item.quantity <= 0 or normalized_unit != "g":
+        return ()
+    metrics_by_code = get_recent_item_metrics_by_code(item)
+    return tuple(metric_code for metric_code in ("calories", "protein", "fat", "carbs") if metric_code in metrics_by_code)
+
+
+def calculate_recent_item_metric_per_100g(*, item, metric_code: str) -> float | None:
+    if item.quantity is None or item.quantity <= 0:
+        return None
+    metric = get_recent_item_metrics_by_code(item).get(metric_code)
+    if metric is None:
+        return None
+    return round((metric.value * 100) / item.quantity, 1)
+
+
+def format_recent_metric_value(value: float) -> str:
+    rounded_value = round(value, 1)
+    if rounded_value.is_integer():
+        return str(int(rounded_value))
+    return f"{rounded_value:.1f}"
 
 
 def adjust_recent_entry_item_portion(*, selected_item, delta_quantity: int) -> bool:
@@ -2328,7 +2420,25 @@ def adjust_recent_entry_item_portion(*, selected_item, delta_quantity: int) -> b
     scale_ratio = new_quantity / current_quantity
     selected_item.quantity = new_quantity
     for metric in selected_item.metrics:
+        if metric.metric.code not in RECENT_ITEM_PORTION_ADJUSTABLE_METRIC_CODES:
+            continue
         metric.value = round(metric.value * scale_ratio, 4)
+    return True
+
+
+def adjust_recent_entry_item_metric_per_100g(*, selected_item, metric_code: str, delta: int) -> bool:
+    if metric_code not in RECENT_ITEM_100G_ADJUSTMENT_STEPS:
+        return False
+    current_per_100g = calculate_recent_item_metric_per_100g(item=selected_item, metric_code=metric_code)
+    if current_per_100g is None or selected_item.quantity is None or selected_item.quantity <= 0:
+        return False
+    new_per_100g = current_per_100g + delta
+    if new_per_100g < 0:
+        return False
+    target_metric = get_recent_item_metrics_by_code(selected_item).get(metric_code)
+    if target_metric is None:
+        return False
+    target_metric.value = round((new_per_100g * selected_item.quantity) / 100, 4)
     return True
 
 
@@ -3691,6 +3801,7 @@ async def handle_recent_action_callback(
                         entry_id=selected_entry.id,
                         page=page,
                         count=callback_data.count,
+                        parent_message_id=getattr(callback.message, "message_id", 0) or 0,
                     ),
                 )
             else:
@@ -3810,6 +3921,7 @@ async def handle_recent_action_callback(
                     item_position=selected_item.position,
                     page=page,
                     count=callback_data.count,
+                    parent_message_id=callback_data.parent_message_id,
                 ),
             )
             await callback.answer()
@@ -3820,28 +3932,6 @@ async def handle_recent_action_callback(
                 session=session,
                 user_id=user.id,
                 item=selected_item,
-            )
-            page, updated_recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
-                entry_repository=entry_repository,
-                user_id=user.id,
-                page=0,
-                page_size=callback_data.count,
-            )
-            await callback.message.edit_text(
-                build_recent_entries_response(
-                    updated_recent_entries,
-                    timezone_name=user.timezone,
-                    page=page,
-                    count=callback_data.count,
-                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-                ),
-                reply_markup=build_recent_entries_delete_keyboard(
-                    page=page,
-                    count=callback_data.count,
-                    has_previous_page=has_previous_page,
-                    has_next_page=has_next_page,
-                    has_entries=bool(updated_recent_entries),
-                ),
             )
             await callback.answer("Блюдо сохранено как новая запись.")
             return
@@ -3868,6 +3958,22 @@ async def handle_recent_action_callback(
             if updated_item is None:
                 await callback.answer("Это блюдо уже недоступно.", show_alert=True)
                 return
+            await safe_edit_message_by_id(
+                getattr(callback.message, "bot", None),
+                chat_id=getattr(getattr(callback.message, "chat", None), "id", None),
+                message_id=callback_data.parent_message_id,
+                text=build_recent_food_entry_response(entry=updated_entry, timezone_name=user.timezone),
+                reply_markup=build_recent_food_entry_keyboard(
+                    item_buttons=[
+                        (build_recent_entry_item_button_label(item), item.position)
+                        for item in sorted(updated_entry.items, key=lambda current: current.position)
+                    ],
+                    entry_id=updated_entry.id,
+                    page=page,
+                    count=callback_data.count,
+                    parent_message_id=callback_data.parent_message_id,
+                ),
+            )
             await callback.message.edit_text(
                 build_recent_food_item_response(
                     entry=updated_entry,
@@ -3879,11 +3985,55 @@ async def handle_recent_action_callback(
                     item_position=updated_item.position,
                     unit=updated_item.unit,
                     can_adjust_portion=supports_recent_item_portion_adjustment(updated_item),
+                    adjustable_metric_codes=get_recent_item_100g_adjustable_metric_codes(updated_item),
                     page=page,
                     count=callback_data.count,
+                    parent_message_id=callback_data.parent_message_id,
                 ),
             )
             await callback.answer("Порция обновлена.")
+            return
+
+        if callback_data.action == "adjust_100g":
+            if not adjust_recent_entry_item_metric_per_100g(
+                selected_item=selected_item,
+                metric_code=callback_data.metric_code,
+                delta=callback_data.delta,
+            ):
+                await callback.answer("Значение нельзя уменьшить дальше.", show_alert=True)
+                return
+            session.flush()
+            session.expire(selected_entry, ["items"])
+            updated_entry = resolve_recent_entry_for_callback(
+                entry_repository=entry_repository,
+                user_id=user.id,
+                entry_id=selected_entry.id,
+            )
+            if updated_entry is None:
+                await callback.answer("Запись уже недоступна.", show_alert=True)
+                return
+            updated_item = resolve_recent_entry_item(entry=updated_entry, item_position=selected_item.position)
+            if updated_item is None:
+                await callback.answer("Это блюдо уже недоступно.", show_alert=True)
+                return
+            await callback.message.edit_text(
+                build_recent_food_item_response(
+                    entry=updated_entry,
+                    item=updated_item,
+                    timezone_name=user.timezone,
+                ),
+                reply_markup=build_recent_food_item_keyboard(
+                    entry_id=updated_entry.id,
+                    item_position=updated_item.position,
+                    unit=updated_item.unit,
+                    can_adjust_portion=supports_recent_item_portion_adjustment(updated_item),
+                    adjustable_metric_codes=get_recent_item_100g_adjustable_metric_codes(updated_item),
+                    page=page,
+                    count=callback_data.count,
+                    parent_message_id=callback_data.parent_message_id,
+                ),
+            )
+            await callback.answer("КБЖУ на 100 г обновлены.")
             return
 
         if callback_data.action == "confirm_delete_item":
@@ -3908,8 +4058,11 @@ async def handle_recent_action_callback(
                 if updated_entry is None:
                     await callback.answer("Запись уже недоступна.", show_alert=True)
                     return
-                await callback.message.edit_text(
-                    build_recent_food_entry_response(entry=updated_entry, timezone_name=user.timezone),
+                await safe_edit_message_by_id(
+                    getattr(callback.message, "bot", None),
+                    chat_id=getattr(getattr(callback.message, "chat", None), "id", None),
+                    message_id=callback_data.parent_message_id,
+                    text=build_recent_food_entry_response(entry=updated_entry, timezone_name=user.timezone),
                     reply_markup=build_recent_food_entry_keyboard(
                         item_buttons=[
                             (build_recent_entry_item_button_label(item), item.position)
@@ -3918,13 +4071,18 @@ async def handle_recent_action_callback(
                         entry_id=updated_entry.id,
                         page=page,
                         count=callback_data.count,
+                        parent_message_id=callback_data.parent_message_id,
                     ),
                 )
+                await safe_delete_message(callback.message)
                 await callback.answer("Блюдо удалено. Запись обновлена.")
                 return
 
-            await callback.message.edit_text(
-                build_recent_entry_selection_response(
+            await safe_edit_message_by_id(
+                getattr(callback.message, "bot", None),
+                chat_id=getattr(getattr(callback.message, "chat", None), "id", None),
+                message_id=callback_data.parent_message_id,
+                text=build_recent_entry_selection_response(
                     updated_recent_entries,
                     timezone_name=user.timezone,
                     page=page,
@@ -3942,6 +4100,7 @@ async def handle_recent_action_callback(
                     has_next_page=has_next_page,
                 ),
             )
+            await safe_delete_message(callback.message)
             await callback.answer("Блюдо удалено. Если это была единственная позиция, запись тоже удалена.")
             return
 
@@ -3949,21 +4108,25 @@ async def handle_recent_action_callback(
             await callback.answer("Неизвестное действие.", show_alert=True)
             return
 
-        await callback.message.edit_text(
-            build_recent_food_item_response(
-                entry=selected_entry,
-                item=selected_item,
-                timezone_name=user.timezone,
-            ),
-            reply_markup=build_recent_food_item_keyboard(
-                entry_id=selected_entry.id,
-                item_position=selected_item.position,
-                unit=selected_item.unit,
-                can_adjust_portion=supports_recent_item_portion_adjustment(selected_item),
-                page=page,
-                count=callback_data.count,
-            ),
+        item_response_text = build_recent_food_item_response(
+            entry=selected_entry,
+            item=selected_item,
+            timezone_name=user.timezone,
         )
+        item_reply_markup = build_recent_food_item_keyboard(
+            entry_id=selected_entry.id,
+            item_position=selected_item.position,
+            unit=selected_item.unit,
+            can_adjust_portion=supports_recent_item_portion_adjustment(selected_item),
+            adjustable_metric_codes=get_recent_item_100g_adjustable_metric_codes(selected_item),
+            page=page,
+            count=callback_data.count,
+            parent_message_id=callback_data.parent_message_id,
+        )
+        if callback_data.open_in_new_message:
+            await callback.message.answer(item_response_text, reply_markup=item_reply_markup)
+        else:
+            await callback.message.edit_text(item_response_text, reply_markup=item_reply_markup)
         await callback.answer()
         return
 
