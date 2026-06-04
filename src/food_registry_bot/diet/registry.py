@@ -28,7 +28,7 @@ SUPPORTED_DIET_DEFINITIONS = {
             "Very low scores usually apply to organ meats, sardines, anchovies, strong meat broths, and beer. "
             "Higher scores usually apply to eggs, most vegetables, fruits, grains, and moderate dairy."
         ),
-        water_score=10.0,
+        water_score=8.0,
     ),
 }
 

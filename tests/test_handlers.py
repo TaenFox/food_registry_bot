@@ -5699,8 +5699,8 @@ async def test_water_button_persists_fixed_diet_score_without_llm_call() -> None
     with session_factory() as session:
         saved_metric = session.query(EntryItemMetric).filter(EntryItemMetric.metric_id == 8).one()
 
-    assert saved_metric.value == 10.0
-    assert "Диеты за день:\n- низкопуриновая: 10.0/10 (+10.0)" in message.answer.await_args.args[0]
+    assert saved_metric.value == 8.0
+    assert "Диеты за день:\n- низкопуриновая: 8.0/10 (+8.0)" in message.answer.await_args.args[0]
 
 
 async def test_food_write_shows_delta_bar_report_in_bars_mode() -> None:
