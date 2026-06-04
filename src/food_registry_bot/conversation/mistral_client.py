@@ -235,6 +235,7 @@ class MistralChatCompletionsConversationClient:
             "Use evidence-based nutrition and training guidance. "
             "Do not present speculative, faddish, or weakly supported methods as established fact. "
             "Use the factual context as the source of truth for today's numbers and avoid inventing data. "
+            "If factual_context.user_context_comment is present, treat it as persistent user-specific context for coaching. "
             "If active_diets are present in the factual context, treat them as active user food constraints. "
             "If the user asks about something missing from the factual context, say so plainly and provide a cautious general answer. "
             "Return only the reply object, not the schema description."
@@ -245,6 +246,7 @@ class MistralChatCompletionsConversationClient:
         return (
             "You write a short, helpful post-entry nutrition comment for a Telegram bot in Russian. "
             "Use evidence-based nutrition guidance and avoid presenting weakly supported methods as fact. "
+            "If factual_context.user_context_comment is present, take it into account as persistent user-specific context. "
             "If factual_context.active_diets is not empty, make the comment diet-aware and respect those constraints. "
             "Keep it brief, specific to the saved food items and metric deltas, and avoid repeating raw totals unless useful. "
             "If there is nothing useful to add, return comment_text as null. "

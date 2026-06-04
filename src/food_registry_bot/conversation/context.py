@@ -6,7 +6,11 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from food_registry_bot.db.repositories import EntryRepository, UserDietPreferenceRepository
+from food_registry_bot.db.repositories import (
+    EntryRepository,
+    UserDietPreferenceRepository,
+    UserLLMProfileRepository,
+)
 from food_registry_bot.nutrition import (
     DailyNutritionGoalProgress,
     DailyNutritionGoalProgressUseCase,
@@ -76,6 +80,7 @@ class NutritionCoachFactualContext(BaseModel):
     summary_date: date
     timezone: str = Field(min_length=1, max_length=64)
     nutrition_day_start_hour: int = Field(ge=0, le=23)
+    user_context_comment: Optional[str] = None
     day_totals: dict[str, float]
     goal_progress: dict[str, NutritionCoachMetricProgress]
     active_diets: list[NutritionCoachActiveDiet] = Field(default_factory=list)
@@ -180,6 +185,9 @@ class NutritionCoachContextBuilder:
             summary_date=summary_date,
             timezone=timezone_name,
             nutrition_day_start_hour=nutrition_day_start_hour,
+            user_context_comment=(
+                UserLLMProfileRepository(self._session).get_or_create(user_id=user_id)[0].user_context_comment
+            ),
             day_totals={
                 "calories": nutrition_summary.totals.calories,
                 "protein": nutrition_summary.totals.protein,

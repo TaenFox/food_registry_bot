@@ -24,6 +24,7 @@ from food_registry_bot.bot.handlers import (
     handle_goal,
     handle_goal_message_callback,
     handle_health,
+    handle_llm_context,
     handle_message,
     handle_provider,
     handle_provider_menu_callback,
@@ -283,6 +284,7 @@ async def test_start_creates_user_for_allowed_user() -> None:
         "- посмотреть и удалить последние записи: /recent;\n"
         "- посмотреть или изменить цели: /goal;\n"
         "- настроить summary: /settings;\n"
+        "- задать пользовательский контекст для ЛЛМ: /context;\n"
         "- управлять файлами импорта и экспорта: /files.",
     )
 
@@ -461,6 +463,56 @@ async def test_provider_command_shows_saved_connections() -> None:
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "✓ Проектный"
     assert reply_markup.inline_keyboard[1][0].text == "OPENAI / gpt-5-mini"
+
+
+async def test_llm_context_command_shows_empty_state() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "llm_context_user")
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="llm_context_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_llm_context(
+        message,
+        SimpleNamespace(args=None),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert message.answer.await_args.args == (
+        "Пользовательский контекст для LLM пока не задан.\n"
+        "Чтобы сохранить его, отправь команду:\n"
+        "<code>/context твой текст для ЛЛМ</code>",
+    )
+
+
+async def test_llm_context_command_saves_comment_and_renders_it() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "llm_context_set_user")
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="llm_context_set_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_llm_context(
+        message,
+        SimpleNamespace(args="Инсулинорезистентность и гастрит, хочу щадящие рекомендации."),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        user = session.query(User).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
+        profile = session.query(UserLLMProfile).filter_by(user_id=user.id).one()
+
+    assert profile.user_context_comment == "Инсулинорезистентность и гастрит, хочу щадящие рекомендации."
+    assert message.answer.await_args.args == (
+        "Сохранил пользовательский контекст для LLM.\n\n"
+        "Пользовательский контекст для LLM:\n"
+        "Инсулинорезистентность и гастрит, хочу щадящие рекомендации.\n\n"
+        "Чтобы заменить его, отправь /context с новым текстом.",
+    )
 
 
 async def test_provider_save_marks_invalid_key_as_unusable() -> None:

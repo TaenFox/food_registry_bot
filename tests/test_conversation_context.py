@@ -16,6 +16,7 @@ from food_registry_bot.db.models import (
     User,
     UserDietPreference,
     UserGoalPreference,
+    UserLLMProfile,
 )
 from food_registry_bot.db.repositories import SupportedDietRepository
 
@@ -76,6 +77,12 @@ def test_nutrition_coach_context_builder_uses_day_facts_and_recent_entries() -> 
                 water_goal=2500,
             )
         )
+        session.add(
+            UserLLMProfile(
+                user_id=user.id,
+                user_context_comment="Инсулинорезистентность и гастрит, нужен щадящий формат советов.",
+            )
+        )
         low_purine_diet = SupportedDietRepository(session).get_by_code(code="low_purine")
         assert low_purine_diet is not None
         session.add(UserDietPreference(user_id=user.id, diet_id=low_purine_diet.id, is_enabled=True))
@@ -130,6 +137,7 @@ def test_nutrition_coach_context_builder_uses_day_facts_and_recent_entries() -> 
     }
     assert context.goal_progress["protein"].goal_value == 120
     assert context.goal_progress["water"].remaining_value == 2000.0
+    assert context.user_context_comment == "Инсулинорезистентность и гастрит, нужен щадящий формат советов."
     assert [(diet.code, diet.name) for diet in context.active_diets] == [("low_purine", "Низкопуриновая")]
     assert len(context.recent_entries) == 2
     assert context.recent_entries[0].entry_type == "water"

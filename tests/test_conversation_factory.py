@@ -309,6 +309,48 @@ def test_openai_conversation_client_serializes_active_diets_from_factual_context
     assert updated_summary == "обсудили диету"
 
 
+def test_openai_conversation_client_serializes_user_context_comment_from_factual_context() -> None:
+    captured_kwargs = {}
+
+    def create_stub(**kwargs):
+        captured_kwargs.update(kwargs)
+        return SimpleNamespace(
+            output_text='{"reply_text":"Учитываю пользовательский контекст.","updated_session_summary":"обсудили ограничения"}'
+        )
+
+    sdk_client = SimpleNamespace(responses=SimpleNamespace(create=create_stub))
+    client = OpenAIResponsesConversationClient(
+        api_key="test-key",
+        model="gpt-5-mini",
+        client=sdk_client,
+    )
+
+    reply_text, updated_summary = client.generate_reply(
+        user_message="что приготовить на ужин?",
+        factual_context=NutritionCoachFactualContext(
+            summary_date="2026-05-20",
+            timezone="Europe/Moscow",
+            nutrition_day_start_hour=4,
+            user_context_comment="Инсулинорезистентность и гастрит, хочу щадящие рекомендации.",
+            day_totals={"calories": 1012.0, "protein": 52.0, "fat": 40.1, "carbs": 107.9, "fiber": 21.7, "water": 750.0},
+            goal_progress={},
+            recent_entries=[],
+            nutrition_summary_is_complete=True,
+            excluded_food_entry_count=0,
+            water_summary_is_complete=True,
+            excluded_water_entry_count=0,
+        ),
+        session_summary="говорили про ужин",
+        recent_turns=[],
+    )
+
+    serialized_payload = captured_kwargs["input"][0]["content"][2]["text"]
+    assert '"user_context_comment"' in serialized_payload
+    assert '"Инсулинорезистентность и гастрит, хочу щадящие рекомендации."' in serialized_payload
+    assert reply_text == "Учитываю пользовательский контекст."
+    assert updated_summary == "обсудили ограничения"
+
+
 def test_openai_conversation_client_serializes_input_images_for_multimodal_coaching() -> None:
     captured_kwargs = {}
 
@@ -486,7 +528,9 @@ def test_openai_conversation_prompt_requires_evidence_based_guidance() -> None:
 
     assert "evidence-based nutrition and training guidance" in prompt
     assert "weakly supported methods" in prompt
+    assert "factual_context.user_context_comment" in prompt
     assert "evidence-based nutrition guidance" in post_entry_prompt
+    assert "factual_context.user_context_comment" in post_entry_prompt
 
 
 def test_mistral_conversation_prompt_requires_evidence_based_guidance() -> None:
@@ -495,7 +539,9 @@ def test_mistral_conversation_prompt_requires_evidence_based_guidance() -> None:
 
     assert "evidence-based nutrition and training guidance" in prompt
     assert "weakly supported methods" in prompt
+    assert "factual_context.user_context_comment" in prompt
     assert "evidence-based nutrition guidance" in post_entry_prompt
+    assert "factual_context.user_context_comment" in post_entry_prompt
 
 
 def test_llm_conversation_service_swallows_post_entry_comment_error() -> None:

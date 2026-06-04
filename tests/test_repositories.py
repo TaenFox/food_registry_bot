@@ -32,6 +32,7 @@ from food_registry_bot.db.repositories import (
     SupportedMetricRepository,
     UserAccessRepository,
     UserDietPreferenceRepository,
+    UserLLMProfileRepository,
     UserGoalPreferenceRepository,
     UserSummaryPreferenceRepository,
     UserRepository,
@@ -239,6 +240,20 @@ def test_user_summary_preference_repository_creates_default_preferences_once() -
     assert preference.show_post_entry_delta_suffix is True
     assert preference.summary_display_mode == "text"
     assert preference.nutrition_day_start_hour == 4
+
+
+def test_user_llm_profile_repository_sets_user_context_comment() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=70041, username="llm_context_user")
+    repository = UserLLMProfileRepository(session)
+
+    profile = repository.set_user_context_comment(
+        user_id=user.id,
+        user_context_comment="Инсулинорезистентность и гастрит, без острых советов.",
+    )
+
+    assert profile.selection_mode.value == "project"
+    assert profile.user_context_comment == "Инсулинорезистентность и гастрит, без острых советов."
 
 
 def test_user_summary_preference_repository_toggles_metric_visibility() -> None:

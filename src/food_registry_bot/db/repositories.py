@@ -311,6 +311,17 @@ class UserLLMProfileRepository:
         self._session.flush()
         return profile
 
+    def set_user_context_comment(
+        self,
+        *,
+        user_id: int,
+        user_context_comment: str | None,
+    ) -> UserLLMProfile:
+        profile, _created = self.get_or_create(user_id=user_id)
+        profile.user_context_comment = user_context_comment
+        self._session.flush()
+        return profile
+
 
 class UserLLMConnectionRepository:
     def __init__(self, session: Session) -> None:

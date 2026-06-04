@@ -225,6 +225,7 @@ API_KEY_PLACEHOLDER = "<API_KEY>"
 PROVIDER_PLACEHOLDER = "<PROVIDER>"
 SUPPORTED_PERSONAL_PROVIDERS = (LLMProvider.OPENAI, LLMProvider.MISTRAL)
 SUPPORTED_DIET_METRIC_CODES = get_supported_diet_metric_codes()
+USER_LLM_CONTEXT_COMMENT_MAX_LENGTH = 1000
 
 
 class FoodWriteFlowError(RuntimeError):
@@ -509,6 +510,30 @@ def parse_provider_save_command_args(command: CommandObject | None) -> tuple[str
     if not provider.strip() or not model.strip() or not api_key.strip():
         return None
     return provider.strip(), model.strip(), api_key.strip()
+
+
+def parse_llm_context_command_arg(command: CommandObject | None) -> str | None:
+    if command is None or command.args is None:
+        return None
+    value = command.args.strip()
+    if not value:
+        return None
+    return value
+
+
+def build_llm_context_response(*, user_context_comment: str | None) -> str:
+    if user_context_comment is None:
+        return (
+            "Пользовательский контекст для LLM пока не задан.\n"
+            "Чтобы сохранить его, отправь команду:\n"
+            f"<code>/context твой текст для ЛЛМ</code>"
+        )
+
+    return (
+        "Пользовательский контекст для LLM:\n"
+        f"{html.escape(user_context_comment)}\n\n"
+        "Чтобы заменить его, отправь /context с новым текстом."
+    )
 
 
 def resolve_effective_account_category(
@@ -2934,6 +2959,7 @@ async def handle_start(
             "- посмотреть и удалить последние записи: /recent;\n"
             "- посмотреть или изменить цели: /goal;\n"
             "- настроить summary: /settings;\n"
+            "- задать пользовательский контекст для ЛЛМ: /context;\n"
             "- управлять файлами импорта и экспорта: /files.",
             reply_markup=build_main_keyboard(),
         )
@@ -2951,6 +2977,7 @@ async def handle_start(
         "- посмотреть и удалить последние записи: /recent;\n"
         "- посмотреть или изменить цели: /goal;\n"
         "- настроить summary: /settings;\n"
+        "- задать пользовательский контекст для ЛЛМ: /context;\n"
         "- управлять файлами импорта и экспорта: /files.",
         reply_markup=build_main_keyboard(),
     )
@@ -3026,6 +3053,45 @@ async def handle_provider(
             selection_mode=profile.selection_mode.value,
             connections=connections,
         ),
+    )
+
+
+@router.message(Command("context"))
+async def handle_llm_context(
+    message: Message,
+    command: CommandObject,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    parsed_comment = parse_llm_context_command_arg(command)
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        repository = UserLLMProfileRepository(session)
+        if parsed_comment is None:
+            profile, _created = repository.get_or_create(user_id=user_id)
+            await message.answer(
+                build_llm_context_response(user_context_comment=profile.user_context_comment)
+            )
+            return
+
+        if len(parsed_comment) > USER_LLM_CONTEXT_COMMENT_MAX_LENGTH:
+            await message.answer(
+                "Комментарий слишком длинный.\n"
+                f"Максимум: {USER_LLM_CONTEXT_COMMENT_MAX_LENGTH} символов."
+            )
+            return
+
+        profile = repository.set_user_context_comment(
+            user_id=user_id,
+            user_context_comment=parsed_comment,
+        )
+
+    await message.answer(
+        "Сохранил пользовательский контекст для LLM.\n\n"
+        + build_llm_context_response(user_context_comment=profile.user_context_comment)
     )
 
 

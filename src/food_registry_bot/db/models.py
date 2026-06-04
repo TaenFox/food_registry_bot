@@ -158,6 +158,7 @@ class UserLLMProfile(Base):
         Enum(UserLLMSelectionMode, name="user_llm_selection_mode", values_callable=enum_values),
         default=UserLLMSelectionMode.PROJECT,
     )
+    user_context_comment: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
