@@ -38,6 +38,7 @@ def create_session_factory() -> sessionmaker[Session]:
                     name="При инсулинорезистентности",
                     is_enabled=True,
                 ),
+                SupportedDiet(code="gastritis", name="При гастрите", is_enabled=True),
                 SupportedMetric(code="calories", name="Calories", unit="kcal"),
                 SupportedMetric(code="protein", name="Protein", unit="g"),
                 SupportedMetric(code="fat", name="Fat", unit="g"),
@@ -51,6 +52,7 @@ def create_session_factory() -> sessionmaker[Session]:
                     name="Insulin Resistance Score",
                     unit="score",
                 ),
+                SupportedMetric(code="gastritis_score", name="Gastritis Score", unit="score"),
             ]
         )
         session.commit()

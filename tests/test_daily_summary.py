@@ -28,6 +28,7 @@ def create_test_session() -> Session:
                 name="Insulin Resistance Score",
                 unit="score",
             ),
+            SupportedMetric(code="gastritis_score", name="Gastritis Score", unit="score"),
         ]
     )
     session.commit()

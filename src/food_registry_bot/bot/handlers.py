@@ -201,6 +201,7 @@ BAR_MODE_LABEL_WIDTH = 6
 DIET_BAR_MODE_LABELS = {
     "low_purine": "Н.пур",
     "insulin_resistance": "ИР",
+    "gastritis": "Гастр",
 }
 GOAL_STATUS_BELOW_EMOJI = "📉"
 GOAL_STATUS_WITHIN_EMOJI = "🎯"

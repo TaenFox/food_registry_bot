@@ -49,6 +49,25 @@ SUPPORTED_DIET_DEFINITIONS = {
         ),
         water_score=10.0,
     ),
+    "gastritis": SupportedDietDefinition(
+        code="gastritis",
+        name="При гастрите",
+        metric_code="gastritis_score",
+        description=(
+            "Питание с приоритетом щадящих блюд, умеренной температуры, без выраженно раздражающих "
+            "слизистую комбинаций и с осторожностью к грубой, острой и кислой пище."
+        ),
+        scoring_guidance=(
+            "Score 1 means the item strongly conflicts with a gastritis friendly diet. "
+            "Score 5 is neutral or unclear. "
+            "Score 10 means the item fits very well. "
+            "Very low scores usually apply to spicy dishes, deep fried foods, strong coffee on an empty stomach, "
+            "alcohol, heavily acidic foods, and very rough or irritating meals. "
+            "Higher scores usually apply to soft, mild, non-spicy dishes, porridges, soups, "
+            "lean proteins, cooked vegetables, and generally gentle meals."
+        ),
+        water_score=10.0,
+    ),
 }
 
 

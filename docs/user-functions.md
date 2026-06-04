@@ -939,6 +939,7 @@ Backfill nutrition завершён.
 Диеты:
 - низкопуриновая: выключено
 - при инсулинорезистентности: выключено
+- при гастрите: выключено
 - калории: включено
 - белки: включено
 - жиры: включено
@@ -957,6 +958,7 @@ Backfill nutrition завершён.
   - `Тренировки: on/off`
   - `Диета: Низкопуриновая on/off`
   - `Диета: При инсулинорезистентности on/off`
+  - `Диета: При гастрите on/off`
   - `Калории: on/off`
   - `Белки: on/off`
   - `Жиры: on/off`
@@ -1157,7 +1159,7 @@ Backfill nutrition завершён.
 - сохраняет уровень доверия для каждой метрики;
 - если у пользователя включена хотя бы одна поддержанная диета, после сохранения entry items дополнительно вызывает diet evaluation только для новых food entries;
 - для water entries вместо LLM использует фиксированное per-diet значение, заданное в коде;
-- сохраняет diet scores как item-level metrics в `entry_item_metrics`, например `low_purine_score` и `insulin_resistance_score`;
+- сохраняет diet scores как item-level metrics в `entry_item_metrics`, например `low_purine_score`, `insulin_resistance_score` и `gastritis_score`;
 - включает список активных диет пользователя в factual context для `nutrition coach`;
 - только после успешной записи и еды, и метрик возвращает ответ пользователю.
 - если запись относится к еде и для неё доступен conversational LLM, может дополнительно построить короткий `nutrition coach` comment по новой записи, текущему состоянию дня и активным диетам пользователя;

@@ -141,6 +141,7 @@
 
 - `low_purine_score`;
 - `insulin_resistance_score`;
+- `gastritis_score`;
 - далее по тому же правилу для новых диет.
 
 Это сохраняет консистентность модели:
