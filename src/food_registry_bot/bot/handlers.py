@@ -1108,8 +1108,22 @@ def build_diet_score_bar_line(
     score = summary.average_score
     progress_ratio = score / 10
     filled_cells = min(int(progress_ratio * 10), 10)
-    empty_cells = 10 - filled_cells
-    base_bar = "[" + ("█" * filled_cells) + ("░" * empty_cells) + "]"
+    if delta_score is not None and delta_score != 0:
+        previous_score = min(max(score - delta_score, 0.0), 10.0)
+        previous_ratio = previous_score / 10
+        previous_filled_cells = min(int(previous_ratio * 10), 10)
+        if delta_score > 0:
+            stable_cells = min(previous_filled_cells, filled_cells)
+            delta_cells = max(filled_cells - stable_cells, 0)
+            empty_cells = 10 - filled_cells
+            base_bar = "[" + ("█" * stable_cells) + ("▓" * delta_cells) + ("░" * empty_cells) + "]"
+        else:
+            removed_cells = max(previous_filled_cells - filled_cells, 0)
+            empty_cells = 10 - previous_filled_cells
+            base_bar = "[" + ("█" * filled_cells) + ("▒" * removed_cells) + ("░" * empty_cells) + "]"
+    else:
+        empty_cells = 10 - filled_cells
+        base_bar = "[" + ("█" * filled_cells) + ("░" * empty_cells) + "]"
     percentage = round(progress_ratio * 100, 1)
     rendered_label = (
         "Н.пур".ljust(BAR_MODE_LABEL_WIDTH)

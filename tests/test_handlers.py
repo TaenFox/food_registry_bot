@@ -15,6 +15,7 @@ from food_registry_bot.bot.handlers import (
     build_ambiguous_message_response,
     build_data_exchange_files_response,
     build_import_validation_response_text,
+    build_diet_score_bar_line,
     handle_admin,
     handle_admin_panel_callback,
     handle_admin_backfill_nutrition,
@@ -77,6 +78,7 @@ from food_registry_bot.db.models import (
 )
 from food_registry_bot.config import Settings
 from food_registry_bot.diet import StaticDietEvaluationService
+from food_registry_bot.diet.summary import DietScoreSummary
 from food_registry_bot.db.repositories import DataExchangeFileRepository
 from food_registry_bot.extraction import (
     ExtractedJournalEntry,
@@ -6079,7 +6081,7 @@ async def test_food_write_shows_daily_diet_score_block_in_bars_mode() -> None:
         admin_user_ids=(ADMIN_ID,),
     )
 
-    assert "Диеты за день:\n<pre>Н.пур  [█████████░] 90.0% (+9.0)</pre>" in message.answer.await_args.args[0]
+    assert "Диеты за день:\n<pre>Н.пур  [▓▓▓▓▓▓▓▓▓░] 90.0% (+9.0)</pre>" in message.answer.await_args.args[0]
 
 
 async def test_food_write_shows_signed_diet_average_delta() -> None:
@@ -6153,6 +6155,22 @@ async def test_food_write_shows_signed_diet_average_delta() -> None:
     )
 
     assert "Диеты за день:\n- низкопуриновая: 6.0/10 (-4.0)" in message.answer.await_args.args[0]
+
+
+def test_build_diet_score_bar_line_marks_negative_delta_segment() -> None:
+    rendered = build_diet_score_bar_line(
+        DietScoreSummary(
+            code="low_purine",
+            name="Низкопуриновая",
+            metric_code="low_purine_score",
+            average_score=6.0,
+            item_count=2,
+            day_count=1,
+        ),
+        delta_score=-4.0,
+    )
+
+    assert rendered == "Н.пур  [██████▒▒▒▒] 60.0% (-4.0)"
 
 
 async def test_recent_action_open_entry_shows_average_diet_score() -> None:
