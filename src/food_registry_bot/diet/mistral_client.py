@@ -70,6 +70,7 @@ class MistralChatCompletionsDietClient:
         return (
             "Evaluate how well each provided item fits each requested diet. "
             "Return only the json payload and no extra text. "
+            "Use evidence-based diet guidance and score against broadly established dietary principles, not fads. "
             "Use a 1-10 compatibility score for each requested diet metric code. "
             "Use quantity and unit when present, and score the consumed amount rather than only the generic product. "
             "A larger problematic portion should usually score worse than a smaller one, "

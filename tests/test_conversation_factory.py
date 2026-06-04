@@ -480,6 +480,24 @@ def test_mistral_conversation_client_rejects_schema_echo_payload() -> None:
         raise AssertionError("Expected schema echo payload to raise LLMConversationClientError")
 
 
+def test_openai_conversation_prompt_requires_evidence_based_guidance() -> None:
+    prompt = OpenAIResponsesConversationClient._build_system_prompt()
+    post_entry_prompt = OpenAIResponsesConversationClient._build_post_entry_system_prompt()
+
+    assert "evidence-based nutrition and training guidance" in prompt
+    assert "weakly supported methods" in prompt
+    assert "evidence-based nutrition guidance" in post_entry_prompt
+
+
+def test_mistral_conversation_prompt_requires_evidence_based_guidance() -> None:
+    prompt = MistralChatCompletionsConversationClient._build_system_prompt()
+    post_entry_prompt = MistralChatCompletionsConversationClient._build_post_entry_system_prompt()
+
+    assert "evidence-based nutrition and training guidance" in prompt
+    assert "weakly supported methods" in prompt
+    assert "evidence-based nutrition guidance" in post_entry_prompt
+
+
 def test_llm_conversation_service_swallows_post_entry_comment_error() -> None:
     settings = Settings.model_construct(
         openai_api_key=None,

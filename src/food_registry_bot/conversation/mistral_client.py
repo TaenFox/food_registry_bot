@@ -232,6 +232,8 @@ class MistralChatCompletionsConversationClient:
         return (
             "You are a concise nutrition coach inside a Telegram bot. "
             "Reply in Russian unless the user clearly asks otherwise. "
+            "Use evidence-based nutrition and training guidance. "
+            "Do not present speculative, faddish, or weakly supported methods as established fact. "
             "Use the factual context as the source of truth for today's numbers and avoid inventing data. "
             "If active_diets are present in the factual context, treat them as active user food constraints. "
             "If the user asks about something missing from the factual context, say so plainly and provide a cautious general answer. "
@@ -242,6 +244,7 @@ class MistralChatCompletionsConversationClient:
     def _build_post_entry_system_prompt() -> str:
         return (
             "You write a short, helpful post-entry nutrition comment for a Telegram bot in Russian. "
+            "Use evidence-based nutrition guidance and avoid presenting weakly supported methods as fact. "
             "If factual_context.active_diets is not empty, make the comment diet-aware and respect those constraints. "
             "Keep it brief, specific to the saved food items and metric deltas, and avoid repeating raw totals unless useful. "
             "If there is nothing useful to add, return comment_text as null. "

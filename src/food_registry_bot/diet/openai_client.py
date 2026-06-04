@@ -80,6 +80,7 @@ class OpenAIResponsesDietClient:
             "Evaluate how well each provided item fits each requested diet. "
             "Return only valid json matching this schema exactly: "
             f"{json.dumps(schema, ensure_ascii=False)}. "
+            "Use evidence-based diet guidance and score against broadly established dietary principles, not fads. "
             "Each response item must keep the same client_item_id as in the request. "
             "Return one result for every request item and do not omit or invent client_item_id values. "
             "For every item return one score entry for every requested diet metric code. "
