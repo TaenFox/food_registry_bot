@@ -98,6 +98,11 @@ DENIED_USER_ID = 2002
 LARGE_DENIED_USER_ID = 5517166158
 
 
+class FailingDietEvaluationService:
+    def evaluate(self, request):
+        raise AssertionError(f"Diet service should not be called for water-only scoring: {request}")
+
+
 def make_settings(**updates) -> Settings:
     settings = Settings(_env_file=None)
     for key, value in updates.items():
@@ -3330,7 +3335,7 @@ async def test_today_shows_daily_diet_score_block_in_bars_mode() -> None:
     )
 
     assert message.answer.await_args.args == (
-        "Диеты за день:\n<pre>Н.пур  [█████████░] 90.0% 9.0/10</pre>",
+        "Диеты за день:\n<pre>Н.пур  [█████████░] 90.0%</pre>",
     )
 
 
@@ -5663,6 +5668,41 @@ async def test_water_button_shows_delta_bar_report_in_bars_mode() -> None:
     )
 
 
+async def test_water_button_persists_fixed_diet_score_without_llm_call() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "water_diet_fixed_user")
+    with session_factory() as session:
+        user = User(
+            telegram_user_id=ALLOWED_USER_ID,
+            username="water_diet_fixed_user",
+            timezone="Europe/Moscow",
+        )
+        session.add(user)
+        session.flush()
+        supported_diet = session.query(SupportedDiet).filter_by(code="low_purine").one()
+        session.add(UserDietPreference(user_id=user.id, diet_id=supported_diet.id, is_enabled=True))
+        session.commit()
+
+    message = SimpleNamespace(
+        text=WATER_250_ML_BUTTON_TEXT,
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="water_diet_fixed_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_water_250_ml(
+        message,
+        session_factory,
+        diet_service=FailingDietEvaluationService(),
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_metric = session.query(EntryItemMetric).filter(EntryItemMetric.metric_id == 8).one()
+
+    assert saved_metric.value == 10.0
+    assert "Диеты за день:\n- низкопуриновая: 10.0/10 (+10.0)" in message.answer.await_args.args[0]
+
+
 async def test_food_write_shows_delta_bar_report_in_bars_mode() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "food_bar_user")
@@ -5974,7 +6014,7 @@ async def test_food_write_saves_diet_scores_for_enabled_diet() -> None:
         )
 
     assert saved_metric.value == 9.0
-    assert "Диеты за день:\n- низкопуриновая: 9.0/10" in message.answer.await_args.args[0]
+    assert "Диеты за день:\n- низкопуриновая: 9.0/10 (+9.0)" in message.answer.await_args.args[0]
 
 
 async def test_food_write_shows_daily_diet_score_block_in_bars_mode() -> None:
@@ -6039,7 +6079,80 @@ async def test_food_write_shows_daily_diet_score_block_in_bars_mode() -> None:
         admin_user_ids=(ADMIN_ID,),
     )
 
-    assert "Диеты за день:\n<pre>Н.пур  [█████████░] 90.0% 9.0/10</pre>" in message.answer.await_args.args[0]
+    assert "Диеты за день:\n<pre>Н.пур  [█████████░] 90.0% (+9.0)</pre>" in message.answer.await_args.args[0]
+
+
+async def test_food_write_shows_signed_diet_average_delta() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "diet_score_delta_user")
+    extraction_service = SimpleNamespace(
+        extract=lambda _request: ValidExtractionPayload(
+            payload=ExtractedJournalPayload(
+                entries=[
+                    ExtractedJournalEntry(
+                        type=EntryType.FOOD,
+                        items=[ExtractedJournalItem(name="тунец", quantity=100, unit="г")],
+                    )
+                ]
+            ),
+            extraction_provider="openai_responses",
+            extraction_model="gpt-5-mini",
+            raw_payload='{"entries":[{"type":"food","items":[{"name":"тунец","quantity":100,"unit":"г"}]}]}',
+        )
+    )
+    nutrition_service = StaticNutritionEstimationService(
+        raw_payload=build_metric_payload(["entry-2:item-0"])
+    )
+    diet_service = StaticDietEvaluationService(
+        raw_payload=(
+            '{"items":[{"client_item_id":"entry-2:item-0",'
+            '"scores":[{"code":"low_purine_score","value":2.0,"confidence":"high"}]}]}'
+        )
+    )
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="diet_score_delta_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        existing_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime.now(timezone.utc),
+        )
+        session.add(existing_entry)
+        session.flush()
+        existing_item = EntryItem(entry_id=existing_entry.id, position=0, name="рис", quantity=100, unit="г")
+        session.add(existing_item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=existing_item.id, metric_id=1, value=130.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=existing_item.id, metric_id=2, value=2.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=existing_item.id, metric_id=3, value=0.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=existing_item.id, metric_id=4, value=28.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=existing_item.id, metric_id=5, value=1.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=existing_item.id, metric_id=8, value=10.0, confidence="high"),
+            ]
+        )
+        supported_diet = session.query(SupportedDiet).filter_by(code="low_purine").one()
+        session.add(UserDietPreference(user_id=user.id, diet_id=supported_diet.id, is_enabled=True))
+        session.commit()
+
+    message = SimpleNamespace(
+        text="тунец",
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="diet_score_delta_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_message(
+        message,
+        session_factory,
+        extraction_service=extraction_service,
+        nutrition_service=nutrition_service,
+        diet_service=diet_service,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert "Диеты за день:\n- низкопуриновая: 6.0/10 (-4.0)" in message.answer.await_args.args[0]
 
 
 async def test_recent_action_open_entry_shows_average_diet_score() -> None:

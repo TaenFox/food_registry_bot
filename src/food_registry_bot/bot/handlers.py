@@ -70,10 +70,13 @@ from food_registry_bot.config import Settings, get_data_exchange_dir
 from food_registry_bot.diet import (
     DietDefinitionInput,
     DietEvaluationItemInput,
+    DietEvaluationItemResult,
+    DietEvaluationPayload,
     DietEvaluationRequest,
     DietScoreSummary,
     DietEvaluationService,
     DisabledDietEvaluationService,
+    DietScoreResult,
     create_diet_service_for_provider_access,
     get_supported_diet_definition,
     get_supported_diet_metric_codes,
@@ -1090,7 +1093,18 @@ def format_entry_average_diet_score(entry) -> str | None:
     return f"{average_score}/10"
 
 
-def build_diet_score_bar_line(summary: DietScoreSummary) -> str:
+def format_signed_score_delta(delta_value: float) -> str:
+    rounded_delta = round(delta_value, 1)
+    sign = "+" if rounded_delta >= 0 else ""
+    return f"{sign}{rounded_delta}"
+
+
+def build_diet_score_bar_line(
+    summary: DietScoreSummary,
+    *,
+    delta_score: float | None = None,
+    show_delta_suffix: bool = True,
+) -> str:
     score = summary.average_score
     progress_ratio = score / 10
     filled_cells = min(int(progress_ratio * 10), 10)
@@ -1102,13 +1116,18 @@ def build_diet_score_bar_line(summary: DietScoreSummary) -> str:
         if summary.code == "low_purine"
         else summary.name[:BAR_MODE_LABEL_WIDTH].ljust(BAR_MODE_LABEL_WIDTH)
     )
-    return f"{rendered_label} {base_bar} {percentage}% {score}/10"
+    line = f"{rendered_label} {base_bar} {percentage}%"
+    if delta_score is not None and delta_score != 0 and show_delta_suffix:
+        line += f" ({format_signed_score_delta(delta_score)})"
+    return line
 
 
 def build_daily_diet_scores_block(
     diet_score_summaries: list[DietScoreSummary],
     *,
     summary_display_mode: str,
+    diet_score_deltas: dict[str, float] | None = None,
+    show_post_entry_delta_suffix: bool = True,
 ) -> str | None:
     if not diet_score_summaries:
         return None
@@ -1116,12 +1135,27 @@ def build_daily_diet_scores_block(
     lines = ["Диеты за день:"]
     if summary_display_mode == "bars":
         lines.append(
-            "<pre>" + html.escape("\n".join(build_diet_score_bar_line(summary) for summary in diet_score_summaries)) + "</pre>"
+            "<pre>"
+            + html.escape(
+                "\n".join(
+                    build_diet_score_bar_line(
+                        summary,
+                        delta_score=None if diet_score_deltas is None else diet_score_deltas.get(summary.code),
+                        show_delta_suffix=show_post_entry_delta_suffix,
+                    )
+                    for summary in diet_score_summaries
+                )
+            )
+            + "</pre>"
         )
         return "\n".join(lines)
 
     for summary in diet_score_summaries:
-        lines.append(f"- {summary.name.lower()}: {summary.average_score}/10")
+        line = f"- {summary.name.lower()}: {summary.average_score}/10"
+        delta_score = None if diet_score_deltas is None else diet_score_deltas.get(summary.code)
+        if delta_score is not None and delta_score != 0 and show_post_entry_delta_suffix:
+            line += f" ({format_signed_score_delta(delta_score)})"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -1139,7 +1173,7 @@ def build_period_diet_scores_block(diet_score_summaries: list[DietScoreSummary])
         lines.extend(
             [
                 "",
-                "Diet score считается только по позициям с оценкой. "
+                "Диетический балл считается только по позициям с оценкой. "
                 "Часть записей периода без диетической оценки исключена.",
             ]
         )
@@ -1389,12 +1423,15 @@ def build_today_summary_response_with_preferences(
     water_summary: DailyWaterSummary | None = None,
     day_progress_bar_line: str | None = None,
     metric_deltas: dict[str, float] | None = None,
+    diet_score_deltas: dict[str, float] | None = None,
     show_post_entry_delta_suffix: bool = True,
     force_render_summary: bool = False,
 ) -> str:
     diet_block = build_daily_diet_scores_block(
         diet_score_summaries or [],
         summary_display_mode=summary_display_mode,
+        diet_score_deltas=diet_score_deltas,
+        show_post_entry_delta_suffix=show_post_entry_delta_suffix,
     )
     if (
         summary.included_entry_count == 0
@@ -1681,6 +1718,8 @@ def build_diet_evaluation_request_for_supported_diets(entries: list, diets: list
     items: list[DietEvaluationItemInput] = []
     for entry in entries:
         for item in sorted(entry.items, key=lambda current: current.position):
+            if item.name == "water":
+                continue
             items.append(
                 DietEvaluationItemInput(
                     client_item_id=f"entry-{entry.id}:item-{item.position}",
@@ -1694,6 +1733,41 @@ def build_diet_evaluation_request_for_supported_diets(entries: list, diets: list
         return None
 
     return DietEvaluationRequest(diets=diet_inputs, items=items)
+
+
+def build_fixed_diet_payload_for_water_entries(entries: list, diets: list) -> DietEvaluationPayload | None:
+    if not entries or not diets:
+        return None
+
+    item_results: list[DietEvaluationItemResult] = []
+    for entry in entries:
+        for item in sorted(entry.items, key=lambda current: current.position):
+            if item.name != "water":
+                continue
+            scores = []
+            for diet in diets:
+                definition = get_supported_diet_definition(diet.code)
+                if definition.water_score is None:
+                    continue
+                scores.append(
+                    DietScoreResult(
+                        code=definition.metric_code,
+                        value=definition.water_score,
+                        confidence="high",
+                    )
+                )
+            if not scores:
+                continue
+            item_results.append(
+                DietEvaluationItemResult(
+                    client_item_id=f"entry-{entry.id}:item-{item.position}",
+                    scores=scores,
+                )
+            )
+
+    if not item_results:
+        return None
+    return DietEvaluationPayload(items=item_results)
 
 
 def persist_diet_scores(*, session: Session, entries: list, evaluation_payload) -> None:
@@ -1757,6 +1831,42 @@ def resolve_summary_dates_for_occurred_at_values(
     }
 
 
+def resolve_diet_score_deltas(
+    *,
+    entries: list,
+    new_entry_ids: set[int],
+    timezone_name: str,
+    nutrition_day_start_hour: int,
+) -> dict[str, float]:
+    if not entries or not new_entry_ids:
+        return {}
+
+    current_by_code = {
+        summary.code: summary
+        for summary in summarize_diet_scores(
+            entries=entries,
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
+        )
+    }
+    previous_entries = [entry for entry in entries if entry.id not in new_entry_ids]
+    previous_by_code = {
+        summary.code: summary
+        for summary in summarize_diet_scores(
+            entries=previous_entries,
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
+        )
+    }
+
+    deltas: dict[str, float] = {}
+    for code, summary in current_by_code.items():
+        previous_summary = previous_by_code.get(code)
+        previous_average = 0.0 if previous_summary is None else previous_summary.average_score
+        deltas[code] = round(summary.average_score - previous_average, 1)
+    return deltas
+
+
 def build_daily_report_for_summary_date(
     *,
     session: Session,
@@ -1767,6 +1877,7 @@ def build_daily_report_for_summary_date(
     summary_preference,
     reference_at: datetime | None = None,
     metric_deltas: dict[str, float] | None = None,
+    diet_delta_entry_ids: set[int] | None = None,
 ) -> str:
     occurred_at_from, occurred_at_to = resolve_day_bounds_utc(
         summary_date=summary_date,
@@ -1816,6 +1927,29 @@ def build_daily_report_for_summary_date(
         calorie_goal_adjustment=workout_calorie_credit_total,
     )
     normalized_reference_at = reference_at or datetime.now(timezone.utc)
+    diet_entries = [
+        *EntryRepository(session).list_food_for_user_between(
+            user_id=user_id,
+            occurred_at_from=occurred_at_from,
+            occurred_at_to=occurred_at_to,
+        ),
+        *EntryRepository(session).list_water_for_user_between(
+            user_id=user_id,
+            occurred_at_from=occurred_at_from,
+            occurred_at_to=occurred_at_to,
+        ),
+    ]
+    diet_score_summaries = summarize_diet_scores(
+        entries=diet_entries,
+        timezone_name=timezone_name,
+        nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+    )
+    diet_score_deltas = resolve_diet_score_deltas(
+        entries=diet_entries,
+        new_entry_ids=diet_delta_entry_ids or set(),
+        timezone_name=timezone_name,
+        nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+    )
     day_progress_bar_line = None
     if (
         summary_preference.show_day_progress_bar
@@ -1835,27 +1969,13 @@ def build_daily_report_for_summary_date(
     summary_report = build_today_summary_response_with_preferences(
         summary,
         enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
-        diet_score_summaries=summarize_diet_scores(
-            entries=[
-                *EntryRepository(session).list_food_for_user_between(
-                    user_id=user_id,
-                    occurred_at_from=occurred_at_from,
-                    occurred_at_to=occurred_at_to,
-                ),
-                *EntryRepository(session).list_water_for_user_between(
-                    user_id=user_id,
-                    occurred_at_from=occurred_at_from,
-                    occurred_at_to=occurred_at_to,
-                ),
-            ],
-            timezone_name=timezone_name,
-            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-        ),
+        diet_score_summaries=diet_score_summaries,
         summary_display_mode=summary_preference.summary_display_mode,
         goal_progress=goal_progress,
         water_summary=water_summary,
         day_progress_bar_line=day_progress_bar_line,
         metric_deltas=metric_deltas,
+        diet_score_deltas=diet_score_deltas,
         show_post_entry_delta_suffix=summary_preference.show_post_entry_delta_suffix,
         force_render_summary=workout_calorie_credit_total > 0,
     )
@@ -4523,6 +4643,13 @@ async def handle_water_250_ml(
             items=saved_items,
         )
         enabled_diets = UserDietPreferenceRepository(session).list_enabled_for_user(user_id=user_id)
+        fixed_diet_payload = build_fixed_diet_payload_for_water_entries([saved_entry], enabled_diets)
+        if fixed_diet_payload is not None:
+            persist_diet_scores(
+                session=session,
+                entries=[saved_entry],
+                evaluation_payload=fixed_diet_payload,
+            )
         diet_request = build_diet_evaluation_request_for_supported_diets([saved_entry], enabled_diets)
         if diet_request is not None:
             evaluated_diet_service = resolve_diet_service(
@@ -4550,6 +4677,7 @@ async def handle_water_250_ml(
             workout_logging_enabled=user.workout_logging_enabled,
             summary_preference=preference,
             metric_deltas={"water": 250.0},
+            diet_delta_entry_ids={saved_entry.id},
         )
 
     await message.answer(
@@ -4932,6 +5060,13 @@ async def handle_message(
                     nutrition_result = nutrition_flow_result
 
                 enabled_diets = UserDietPreferenceRepository(session).list_enabled_for_user(user_id=user_id)
+                fixed_diet_payload = build_fixed_diet_payload_for_water_entries(saved_diet_entries, enabled_diets)
+                if fixed_diet_payload is not None:
+                    persist_diet_scores(
+                        session=session,
+                        entries=saved_diet_entries,
+                        evaluation_payload=fixed_diet_payload,
+                    )
                 diet_request = build_diet_evaluation_request_for_supported_diets(saved_diet_entries, enabled_diets)
                 if diet_request is not None:
                     evaluated_diet_service = resolve_diet_service(
@@ -5001,6 +5136,7 @@ async def handle_message(
                             workout_logging_enabled=user.workout_logging_enabled,
                             summary_preference=summary_preference,
                             metric_deltas=metric_deltas,
+                            diet_delta_entry_ids={entry.id for entry in saved_diet_entries},
                         ),
                         coach_comment=coach_comment,
                     )

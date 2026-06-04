@@ -10,6 +10,7 @@ class SupportedDietDefinition:
     metric_code: str
     description: str
     scoring_guidance: str
+    water_score: float | None = None
 
 
 SUPPORTED_DIET_DEFINITIONS = {
@@ -24,10 +25,10 @@ SUPPORTED_DIET_DEFINITIONS = {
             "Score 1 means the item strongly conflicts with a low-purine diet. "
             "Score 5 is neutral or unclear. "
             "Score 10 means the item fits very well. "
-            "Water should receive a very high score because hydration is beneficial for this diet. "
             "Very low scores usually apply to organ meats, sardines, anchovies, strong meat broths, and beer. "
-            "Higher scores usually apply to water, eggs, most vegetables, fruits, grains, and moderate dairy."
+            "Higher scores usually apply to eggs, most vegetables, fruits, grains, and moderate dairy."
         ),
+        water_score=10.0,
     ),
 }
 
