@@ -33,6 +33,11 @@ def create_session_factory() -> sessionmaker[Session]:
         session.add_all(
             [
                 SupportedDiet(code="low_purine", name="Низкопуриновая", is_enabled=True),
+                SupportedDiet(
+                    code="insulin_resistance",
+                    name="При инсулинорезистентности",
+                    is_enabled=True,
+                ),
                 SupportedMetric(code="calories", name="Calories", unit="kcal"),
                 SupportedMetric(code="protein", name="Protein", unit="g"),
                 SupportedMetric(code="fat", name="Fat", unit="g"),
@@ -41,6 +46,11 @@ def create_session_factory() -> sessionmaker[Session]:
                 SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
                 SupportedMetric(code="workout_calorie_credit", name="Workout Calorie Credit", unit="kcal"),
                 SupportedMetric(code="low_purine_score", name="Low Purine Score", unit="score"),
+                SupportedMetric(
+                    code="insulin_resistance_score",
+                    name="Insulin Resistance Score",
+                    unit="score",
+                ),
             ]
         )
         session.commit()

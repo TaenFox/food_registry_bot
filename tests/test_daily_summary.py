@@ -23,6 +23,11 @@ def create_test_session() -> Session:
             SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
             SupportedMetric(code="workout_calorie_credit", name="Workout Calorie Credit", unit="kcal"),
             SupportedMetric(code="low_purine_score", name="Low Purine Score", unit="score"),
+            SupportedMetric(
+                code="insulin_resistance_score",
+                name="Insulin Resistance Score",
+                unit="score",
+            ),
         ]
     )
     session.commit()

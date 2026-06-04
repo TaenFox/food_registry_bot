@@ -13,6 +13,7 @@ from sqlalchemy.pool import StaticPool
 from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.handlers import (
     build_ambiguous_message_response,
+    build_diet_evaluation_request_for_supported_diets,
     build_data_exchange_files_response,
     build_import_validation_response_text,
     build_diet_score_bar_line,
@@ -125,6 +126,11 @@ def create_session_factory() -> sessionmaker[Session]:
         session.add_all(
             [
                 SupportedDiet(code="low_purine", name="Низкопуриновая", is_enabled=True),
+                SupportedDiet(
+                    code="insulin_resistance",
+                    name="При инсулинорезистентности",
+                    is_enabled=True,
+                ),
                 SupportedMetric(code="calories", name="Calories", unit="kcal"),
                 SupportedMetric(code="protein", name="Protein", unit="g"),
                 SupportedMetric(code="fat", name="Fat", unit="g"),
@@ -133,6 +139,11 @@ def create_session_factory() -> sessionmaker[Session]:
                 SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
                 SupportedMetric(code="workout_calorie_credit", name="Workout Calorie Credit", unit="kcal"),
                 SupportedMetric(code="low_purine_score", name="Low Purine Score", unit="score"),
+                SupportedMetric(
+                    code="insulin_resistance_score",
+                    name="Insulin Resistance Score",
+                    unit="score",
+                ),
             ]
         )
         session.commit()
@@ -4568,6 +4579,7 @@ async def test_settings_returns_current_summary_preferences() -> None:
         "- тренировки: выключено\n"
         "Диеты:\n"
         "- низкопуриновая: выключено\n"
+        "- при инсулинорезистентности: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -4582,12 +4594,13 @@ async def test_settings_returns_current_summary_preferences() -> None:
         "- порог заметных записей: 80%",
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
-    assert len(reply_markup.inline_keyboard) == 15
+    assert len(reply_markup.inline_keyboard) == 16
     assert all(len(row) == 1 for row in reply_markup.inline_keyboard)
     assert len(reply_markup.inline_keyboard[-1]) == 1
     button_texts = flatten_inline_button_texts(reply_markup)
     assert "Тренировки: off" in button_texts
     assert "Диета: Низкопуриновая off" in button_texts
+    assert "Диета: При инсулинорезистентности off" in button_texts
     assert "Калории: on" in button_texts
     assert "Белки: on" in button_texts
     assert "Жиры: on" in button_texts
@@ -4668,6 +4681,7 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
         "- тренировки: выключено\n"
         "Диеты:\n"
         "- низкопуриновая: выключено\n"
+        "- при инсулинорезистентности: выключено\n"
         "- калории: включено\n"
         "- белки: выключено\n"
         "- жиры: включено\n"
@@ -4720,6 +4734,7 @@ async def test_toggle_diet_updates_preference_and_message() -> None:
         "- тренировки: выключено\n"
         "Диеты:\n"
         "- низкопуриновая: включено\n"
+        "- при инсулинорезистентности: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -4735,6 +4750,7 @@ async def test_toggle_diet_updates_preference_and_message() -> None:
     )
     button_texts = flatten_inline_button_texts(callback.message.edit_text.await_args.kwargs["reply_markup"])
     assert "Диета: Низкопуриновая on" in button_texts
+    assert "Диета: При инсулинорезистентности off" in button_texts
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -4782,6 +4798,7 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
         "- тренировки: выключено\n"
         "Диеты:\n"
         "- низкопуриновая: выключено\n"
+        "- при инсулинорезистентности: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -4844,6 +4861,7 @@ async def test_cycle_summary_display_mode_updates_preference_and_message() -> No
         "- тренировки: выключено\n"
         "Диеты:\n"
         "- низкопуриновая: выключено\n"
+        "- при инсулинорезистентности: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -4904,6 +4922,7 @@ async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -
         "- тренировки: выключено\n"
         "Диеты:\n"
         "- низкопуриновая: выключено\n"
+        "- при инсулинорезистентности: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -4966,6 +4985,7 @@ async def test_toggle_day_progress_bar_updates_preference_and_message() -> None:
         "- тренировки: выключено\n"
         "Диеты:\n"
         "- низкопуриновая: выключено\n"
+        "- при инсулинорезистентности: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -5080,6 +5100,7 @@ async def test_toggle_workout_logging_updates_user_and_message() -> None:
         "- тренировки: включено\n"
         "Диеты:\n"
         "- низкопуриновая: выключено\n"
+        "- при инсулинорезистентности: выключено\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
@@ -6171,6 +6192,23 @@ def test_build_diet_score_bar_line_marks_negative_delta_segment() -> None:
     )
 
     assert rendered == "Н.пур  [██████▒▒▒▒] 60.0% (-4.0)"
+
+
+def test_build_diet_evaluation_request_includes_insulin_resistance_definition() -> None:
+    entry = SimpleNamespace(
+        id=17,
+        items=[SimpleNamespace(position=0, name="гречка с курицей", quantity=250, unit="g")],
+    )
+    diet = SimpleNamespace(code="insulin_resistance")
+
+    request = build_diet_evaluation_request_for_supported_diets([entry], [diet])
+
+    assert request is not None
+    assert [(definition.code, definition.metric_code) for definition in request.diets] == [
+        ("insulin_resistance", "insulin_resistance_score")
+    ]
+    assert "умеренной гликемической нагрузки" in request.diets[0].description
+    assert request.items[0].client_item_id == "entry-17:item-0"
 
 
 async def test_recent_action_open_entry_shows_average_diet_score() -> None:

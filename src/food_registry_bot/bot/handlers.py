@@ -198,6 +198,10 @@ BAR_MODE_LABELS = {
     "К": "Ккал",
 }
 BAR_MODE_LABEL_WIDTH = 6
+DIET_BAR_MODE_LABELS = {
+    "low_purine": "Н.пур",
+    "insulin_resistance": "ИР",
+}
 GOAL_STATUS_BELOW_EMOJI = "📉"
 GOAL_STATUS_WITHIN_EMOJI = "🎯"
 GOAL_STATUS_ABOVE_EMOJI = "📈"
@@ -1125,11 +1129,8 @@ def build_diet_score_bar_line(
         empty_cells = 10 - filled_cells
         base_bar = "[" + ("█" * filled_cells) + ("░" * empty_cells) + "]"
     percentage = round(progress_ratio * 100, 1)
-    rendered_label = (
-        "Н.пур".ljust(BAR_MODE_LABEL_WIDTH)
-        if summary.code == "low_purine"
-        else summary.name[:BAR_MODE_LABEL_WIDTH].ljust(BAR_MODE_LABEL_WIDTH)
-    )
+    short_label = DIET_BAR_MODE_LABELS.get(summary.code, summary.name[:BAR_MODE_LABEL_WIDTH])
+    rendered_label = short_label.ljust(BAR_MODE_LABEL_WIDTH)
     line = f"{rendered_label} {base_bar} {percentage}%"
     if delta_score is not None and delta_score != 0 and show_delta_suffix:
         line += f" ({format_signed_score_delta(delta_score)})"

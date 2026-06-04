@@ -30,6 +30,25 @@ SUPPORTED_DIET_DEFINITIONS = {
         ),
         water_score=8.0,
     ),
+    "insulin_resistance": SupportedDietDefinition(
+        code="insulin_resistance",
+        name="При инсулинорезистентности",
+        metric_code="insulin_resistance_score",
+        description=(
+            "Питание с приоритетом умеренной гликемической нагрузки, достаточного белка, "
+            "клетчатки и менее обработанных источников углеводов."
+        ),
+        scoring_guidance=(
+            "Score 1 means the item strongly conflicts with an insulin resistance friendly diet. "
+            "Score 5 is neutral or unclear. "
+            "Score 10 means the item fits very well. "
+            "Very low scores usually apply to sugary drinks, desserts, large portions of refined carbs, "
+            "and combinations with high sugar and low fiber. "
+            "Higher scores usually apply to vegetables, legumes, eggs, fish, unsweetened dairy, "
+            "whole grains in moderate portions, and meals with clear protein and fiber."
+        ),
+        water_score=10.0,
+    ),
 }
 
 

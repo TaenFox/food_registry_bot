@@ -54,6 +54,11 @@ def create_test_session() -> Session:
     session.add_all(
         [
             SupportedDiet(code="low_purine", name="Низкопуриновая", is_enabled=True),
+            SupportedDiet(
+                code="insulin_resistance",
+                name="При инсулинорезистентности",
+                is_enabled=True,
+            ),
             SupportedMetric(code="calories", name="Calories", unit="kcal"),
             SupportedMetric(code="protein", name="Protein", unit="g"),
             SupportedMetric(code="fat", name="Fat", unit="g"),
@@ -62,6 +67,11 @@ def create_test_session() -> Session:
             SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
             SupportedMetric(code="workout_calorie_credit", name="Workout Calorie Credit", unit="kcal"),
             SupportedMetric(code="low_purine_score", name="Low Purine Score", unit="score"),
+            SupportedMetric(
+                code="insulin_resistance_score",
+                name="Insulin Resistance Score",
+                unit="score",
+            ),
         ]
     )
     session.commit()
@@ -672,6 +682,7 @@ def test_supported_metric_repository_lists_seeded_metrics() -> None:
         "workout_calories",
         "workout_calorie_credit",
         "low_purine_score",
+        "insulin_resistance_score",
     ]
 
 
@@ -682,6 +693,7 @@ def test_supported_diet_repository_lists_seeded_diets() -> None:
 
     assert [(diet.code, diet.name, diet.is_enabled) for diet in diets] == [
         ("low_purine", "Низкопуриновая", True),
+        ("insulin_resistance", "При инсулинорезистентности", True),
     ]
 
 
@@ -711,11 +723,17 @@ def test_user_diet_preference_repository_lists_enabled_diets_for_user() -> None:
     enabled_diets = repository.list_enabled_for_user(user_id=user.id)
     updated_view = repository.list_diets_for_user(user_id=user.id)
 
-    assert [(view.code, view.is_selected) for view in initial_view] == [("low_purine", False)]
+    assert [(view.code, view.is_selected) for view in initial_view] == [
+        ("low_purine", False),
+        ("insulin_resistance", False),
+    ]
     assert [(supported_diet.code, supported_diet.name) for supported_diet in enabled_diets] == [
         ("low_purine", "Низкопуриновая"),
     ]
-    assert [(view.code, view.is_selected) for view in updated_view] == [("low_purine", True)]
+    assert [(view.code, view.is_selected) for view in updated_view] == [
+        ("low_purine", True),
+        ("insulin_resistance", False),
+    ]
 
 
 def test_entry_item_metric_repository_upserts_metric_values() -> None:

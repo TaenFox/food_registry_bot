@@ -209,6 +209,7 @@ CSV должен содержать заголовки из текущей та�
 - `carbs`
 - `fiber`
 - `low_purine_score`
+- `insulin_resistance_score`
 
 Для метрики должны быть определены:
 
