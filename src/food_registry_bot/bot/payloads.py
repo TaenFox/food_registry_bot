@@ -31,6 +31,13 @@ class RecentEntryActionCallback(CallbackData, prefix="recent_action"):
     delta: int = 0
     open_in_new_message: int = 0
     parent_message_id: int = 0
+    origin: str = ""
+    root_entry_id: int = 0
+
+
+class RecentEntryStateCallback(CallbackData, prefix="recent_state"):
+    action: str
+    state_key: str
 
 
 class DataExchangeFileCallback(CallbackData, prefix="data_exchange"):
@@ -70,5 +77,6 @@ __all__ = [
     "ProviderMenuCallback",
     "RecentEntryActionCallback",
     "RecentEntryDeleteCallback",
+    "RecentEntryStateCallback",
     "SummarySettingsCallback",
 ]

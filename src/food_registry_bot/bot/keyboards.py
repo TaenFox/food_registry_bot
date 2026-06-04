@@ -244,341 +244,220 @@ def build_recent_entry_confirmation_keyboard(*, entry_id: int, page: int, count:
 
 def build_recent_entry_action_selection_keyboard(
     *,
-    entry_buttons: list[tuple[str, int]],
-    page: int,
-    count: int,
-    has_previous_page: bool,
-    has_next_page: bool,
+    entry_buttons: list[tuple[str, str]],
+    navigation_row: list[InlineKeyboardButton] | None,
+    back_callback_data: str,
+    close_callback_data: str,
 ) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
                 text=button_text,
-                callback_data=RecentEntryActionCallback(
-                    action="open_entry",
-                    entry_id=entry_id,
-                    page=page,
-                    count=count,
-                ).pack(),
+                callback_data=callback_data,
             )
         ]
-        for button_text, entry_id in entry_buttons
+        for button_text, callback_data in entry_buttons
     ]
-    navigation_row = _build_recent_entry_action_navigation_row(
-        page=page,
-        count=count,
-        action="open_entries",
-        has_previous_page=has_previous_page,
-        has_next_page=has_next_page,
-    )
     if navigation_row:
         rows.append(navigation_row)
     rows.append(
         [
             InlineKeyboardButton(
                 text="Назад",
-                callback_data=RecentEntryActionCallback(action="back_to_list", page=page, count=count).pack(),
+                callback_data=back_callback_data,
             )
         ]
     )
-    rows.append(_build_close_row(RecentEntryActionCallback(action="close", page=page, count=count).pack()))
+    rows.append(_build_close_row(close_callback_data))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_recent_food_entry_keyboard(
     *,
-    item_buttons: list[tuple[str, int]],
-    entry_id: int,
-    page: int,
-    count: int,
-    parent_message_id: int = 0,
+    item_buttons: list[tuple[str, str]],
+    repeat_entry_callback_data: str,
+    delete_entry_callback_data: str,
+    close_callback_data: str,
+    back_callback_data: str | None = None,
+    include_back_button: bool = True,
 ) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
                 text=button_text,
-                callback_data=RecentEntryActionCallback(
-                    action="open_item",
-                    entry_id=entry_id,
-                    item_position=item_position,
-                    page=page,
-                    count=count,
-                    open_in_new_message=1,
-                    parent_message_id=parent_message_id,
-                ).pack(),
+                callback_data=callback_data,
             )
         ]
-        for button_text, item_position in item_buttons
+        for button_text, callback_data in item_buttons
     ]
     rows.append(
         [
             InlineKeyboardButton(
                 text="Повторить запись целиком",
-                callback_data=RecentEntryActionCallback(
-                    action="repeat_entry",
-                    entry_id=entry_id,
-                    page=page,
-                    count=count,
-                ).pack(),
+                callback_data=repeat_entry_callback_data,
             ),
             InlineKeyboardButton(
                 text="Удалить запись",
-                callback_data=RecentEntryActionCallback(
-                    action="delete_entry",
-                    entry_id=entry_id,
-                    page=page,
-                    count=count,
-                ).pack(),
+                callback_data=delete_entry_callback_data,
             ),
         ]
     )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="Назад к записям",
-                callback_data=RecentEntryActionCallback(
-                    action="open_entries",
-                    page=page,
-                    count=count,
-                ).pack(),
-            )
-        ]
-    )
-    rows.append(_build_close_row(RecentEntryActionCallback(action="close", page=page, count=count).pack()))
+    if include_back_button and back_callback_data is not None:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Назад к записям",
+                    callback_data=back_callback_data,
+                )
+            ]
+        )
+    rows.append(_build_close_row(close_callback_data))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_recent_non_food_entry_keyboard(
     *,
-    entry_id: int,
-    page: int,
-    count: int,
+    delete_entry_callback_data: str,
+    close_callback_data: str,
+    back_callback_data: str | None = None,
+    include_back_button: bool = True,
 ) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    rows = [
             [
                 InlineKeyboardButton(
                     text="Удалить запись",
-                    callback_data=RecentEntryActionCallback(
-                        action="delete_entry",
-                        entry_id=entry_id,
-                        page=page,
-                        count=count,
-                    ).pack(),
+                    callback_data=delete_entry_callback_data,
                 )
             ],
+    ]
+    if include_back_button and back_callback_data is not None:
+        rows.append(
             [
                 InlineKeyboardButton(
                     text="Назад к записям",
-                    callback_data=RecentEntryActionCallback(
-                        action="open_entries",
-                        page=page,
-                        count=count,
-                    ).pack(),
+                    callback_data=back_callback_data,
                 )
-            ],
-            _build_close_row(RecentEntryActionCallback(action="close", page=page, count=count).pack()),
-        ]
-    )
+            ]
+        )
+    rows.append(_build_close_row(close_callback_data))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_recent_food_item_keyboard(
     *,
-    entry_id: int,
-    item_position: int,
     unit: str | None,
     can_adjust_portion: bool,
     adjustable_metric_codes: tuple[str, ...],
-    page: int,
-    count: int,
-    parent_message_id: int = 0,
+    delete_item_callback_data: str,
+    repeat_item_callback_data: str,
+    decrease_portion_callback_data: str | None,
+    increase_portion_callback_data: str | None,
+    metric_adjustment_buttons: list[tuple[str, str, str, str]],
+    close_callback_data: str,
 ) -> InlineKeyboardMarkup:
     rows = [
             [
                 InlineKeyboardButton(
                     text="Удалить блюдо",
-                    callback_data=RecentEntryActionCallback(
-                        action="delete_item",
-                        entry_id=entry_id,
-                        item_position=item_position,
-                        page=page,
-                        count=count,
-                        parent_message_id=parent_message_id,
-                    ).pack(),
+                    callback_data=delete_item_callback_data,
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="Повторить сейчас",
-                    callback_data=RecentEntryActionCallback(
-                        action="repeat_item",
-                        entry_id=entry_id,
-                        item_position=item_position,
-                        page=page,
-                        count=count,
-                        parent_message_id=parent_message_id,
-                    ).pack(),
+                    callback_data=repeat_item_callback_data,
                 )
             ],
     ]
     normalized_unit = unit.strip().lower() if unit is not None else None
-    if can_adjust_portion and normalized_unit in {"g", "ml"}:
+    if can_adjust_portion and normalized_unit in {"g", "ml"} and decrease_portion_callback_data and increase_portion_callback_data:
         decrement_label = "-10 г" if normalized_unit == "g" else "-10 мл"
         increment_label = "+10 г" if normalized_unit == "g" else "+10 мл"
         rows.append(
             [
                 InlineKeyboardButton(
                     text=decrement_label,
-                    callback_data=RecentEntryActionCallback(
-                        action="decrease_portion",
-                        entry_id=entry_id,
-                        item_position=item_position,
-                        page=page,
-                        count=count,
-                        parent_message_id=parent_message_id,
-                    ).pack(),
+                    callback_data=decrease_portion_callback_data,
                 ),
                 InlineKeyboardButton(
                     text=increment_label,
-                    callback_data=RecentEntryActionCallback(
-                        action="increase_portion",
-                        entry_id=entry_id,
-                        item_position=item_position,
-                        page=page,
-                        count=count,
-                        parent_message_id=parent_message_id,
-                    ).pack(),
+                    callback_data=increase_portion_callback_data,
                 ),
             ]
         )
-    metric_rows = {
-        "calories": ("-25 ккал/100г", "+25 ккал/100г", 25),
-        "protein": ("-5г Б/100г", "+5г Б/100г", 5),
-        "fat": ("-5г Ж/100г", "+5г Ж/100г", 5),
-        "carbs": ("-5г У/100г", "+5г У/100г", 5),
-    }
-    for metric_code in adjustable_metric_codes:
-        decrement_label, increment_label, delta = metric_rows[metric_code]
+    _ = adjustable_metric_codes
+    for decrement_label, decrement_callback_data, increment_label, increment_callback_data in metric_adjustment_buttons:
         rows.append(
             [
                 InlineKeyboardButton(
                     text=decrement_label,
-                    callback_data=RecentEntryActionCallback(
-                        action="adjust_100g",
-                        entry_id=entry_id,
-                        item_position=item_position,
-                        page=page,
-                        count=count,
-                        metric_code=metric_code,
-                        delta=-delta,
-                        parent_message_id=parent_message_id,
-                    ).pack(),
+                    callback_data=decrement_callback_data,
                 ),
                 InlineKeyboardButton(
                     text=increment_label,
-                    callback_data=RecentEntryActionCallback(
-                        action="adjust_100g",
-                        entry_id=entry_id,
-                        item_position=item_position,
-                        page=page,
-                        count=count,
-                        metric_code=metric_code,
-                        delta=delta,
-                        parent_message_id=parent_message_id,
-                    ).pack(),
+                    callback_data=increment_callback_data,
                 ),
             ]
         )
-    rows.extend(
-        [
-            _build_close_row(
-                RecentEntryActionCallback(
-                    action="close",
-                    page=page,
-                    count=count,
-                    parent_message_id=parent_message_id,
-                ).pack()
-            ),
-        ]
-    )
+    rows.append(_build_close_row(close_callback_data))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_recent_food_item_delete_confirmation_keyboard(
     *,
-    entry_id: int,
-    item_position: int,
-    page: int,
-    count: int,
-    parent_message_id: int = 0,
+    confirm_callback_data: str,
+    cancel_callback_data: str,
+    close_callback_data: str,
 ) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="Подтвердить",
-                    callback_data=RecentEntryActionCallback(
-                        action="confirm_delete_item",
-                        entry_id=entry_id,
-                        item_position=item_position,
-                        page=page,
-                        count=count,
-                        parent_message_id=parent_message_id,
-                    ).pack(),
+                    callback_data=confirm_callback_data,
                 ),
                 InlineKeyboardButton(
                     text="Отмена",
-                    callback_data=RecentEntryActionCallback(
-                        action="open_item",
-                        entry_id=entry_id,
-                        item_position=item_position,
-                        page=page,
-                        count=count,
-                        parent_message_id=parent_message_id,
-                    ).pack(),
+                    callback_data=cancel_callback_data,
                 ),
             ],
-            _build_close_row(
-                RecentEntryActionCallback(
-                    action="close",
-                    page=page,
-                    count=count,
-                    parent_message_id=parent_message_id,
-                ).pack()
-            ),
+            _build_close_row(close_callback_data),
         ]
     )
 
 
 def build_recent_food_entry_delete_confirmation_keyboard(
     *,
-    entry_id: int,
-    page: int,
-    count: int,
+    confirm_callback_data: str,
+    cancel_callback_data: str,
+    close_callback_data: str,
 ) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="Подтвердить",
-                    callback_data=RecentEntryActionCallback(
-                        action="confirm_delete_entry",
-                        entry_id=entry_id,
-                        page=page,
-                        count=count,
-                    ).pack(),
+                    callback_data=confirm_callback_data,
                 ),
                 InlineKeyboardButton(
                     text="Отмена",
-                    callback_data=RecentEntryActionCallback(
-                        action="open_entry",
-                        entry_id=entry_id,
-                        page=page,
-                        count=count,
-                    ).pack(),
+                    callback_data=cancel_callback_data,
                 ),
             ],
-            _build_close_row(RecentEntryActionCallback(action="close", page=page, count=count).pack()),
+            _build_close_row(close_callback_data),
+        ]
+    )
+
+
+def build_post_entry_details_keyboard(*, details_callback_data: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Подробнее",
+                    callback_data=details_callback_data,
+                )
+            ]
         ]
     )
 
@@ -609,27 +488,24 @@ def _build_recent_entries_navigation_row(
     return row
 
 
-def _build_recent_entry_action_navigation_row(
+def build_recent_entry_action_navigation_row(
     *,
-    page: int,
-    count: int,
-    action: str,
-    has_previous_page: bool,
-    has_next_page: bool,
+    previous_callback_data: str | None,
+    next_callback_data: str | None,
 ) -> list[InlineKeyboardButton]:
     row: list[InlineKeyboardButton] = []
-    if has_previous_page:
+    if previous_callback_data is not None:
         row.append(
             InlineKeyboardButton(
                 text="← Назад",
-                callback_data=RecentEntryActionCallback(action=action, page=page - 1, count=count).pack(),
+                callback_data=previous_callback_data,
             )
         )
-    if has_next_page:
+    if next_callback_data is not None:
         row.append(
             InlineKeyboardButton(
                 text="Вперёд →",
-                callback_data=RecentEntryActionCallback(action=action, page=page + 1, count=count).pack(),
+                callback_data=next_callback_data,
             )
         )
     return row

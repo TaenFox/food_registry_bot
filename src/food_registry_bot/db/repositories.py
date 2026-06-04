@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import secrets
 from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
@@ -9,6 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from food_registry_bot.db.models import (
     AccountCategory,
+    CallbackState,
     Entry,
     EntryItem,
     EntryItemMetric,
@@ -68,6 +71,12 @@ class EntryItemMetricValue:
     code: str
     value: float
     confidence: str
+
+
+@dataclass(frozen=True)
+class CallbackStatePayload:
+    scope: str
+    values: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -793,6 +802,7 @@ class EntryRepository:
         )
         return list(self._session.scalars(statement))
 
+
     def get_by_id_for_user(self, *, entry_id: int, user_id: int) -> Optional[Entry]:
         statement = (
             select(Entry)
@@ -966,6 +976,44 @@ class EntryRepository:
                     break
 
         return count
+
+
+class CallbackStateRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(
+        self,
+        *,
+        scope: str,
+        values: dict[str, object],
+    ) -> CallbackState:
+        state = CallbackState(
+            state_key=secrets.token_hex(5),
+            scope=scope,
+            payload_json=json.dumps(values, ensure_ascii=True, separators=(",", ":")),
+        )
+        self._session.add(state)
+        self._session.flush()
+        return state
+
+    def get_payload(
+        self,
+        *,
+        scope: str,
+        state_key: str,
+    ) -> CallbackStatePayload | None:
+        statement = select(CallbackState).where(
+            CallbackState.scope == scope,
+            CallbackState.state_key == state_key,
+        )
+        state = self._session.scalar(statement)
+        if state is None:
+            return None
+        return CallbackStatePayload(
+            scope=state.scope,
+            values=json.loads(state.payload_json),
+        )
 
 
 class ConversationSessionRepository:

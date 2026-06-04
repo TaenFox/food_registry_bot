@@ -29,11 +29,13 @@ from food_registry_bot.bot.keyboards import (
     build_data_exchange_files_keyboard,
     build_goal_keyboard,
     build_main_keyboard,
+    build_post_entry_details_keyboard,
     build_period_report_dynamics_keyboard,
     build_period_report_keyboard,
     build_period_report_noticeable_keyboard,
     build_provider_connection_actions_keyboard,
     build_provider_connections_keyboard,
+    build_recent_entry_action_navigation_row,
     build_recent_entries_delete_keyboard,
     build_recent_food_entry_keyboard,
     build_recent_food_entry_delete_confirmation_keyboard,
@@ -59,6 +61,7 @@ from food_registry_bot.bot.payloads import (
     ProviderMenuCallback,
     RecentEntryActionCallback,
     RecentEntryDeleteCallback,
+    RecentEntryStateCallback,
     SummarySettingsCallback,
 )
 from food_registry_bot.conversation import (
@@ -97,6 +100,7 @@ from food_registry_bot.db.session import session_scope
 from food_registry_bot.db.repositories import (
     ConversationMessageRepository,
     ConversationSessionRepository,
+    CallbackStateRepository,
     DataExchangeFileRepository,
     EntryItemCreate,
     EntryItemMetricRepository,
@@ -1149,6 +1153,88 @@ def build_write_confirmation_response(
     if coach_comment:
         parts.append(coach_comment)
     return "\n\n".join(parts)
+
+
+def build_saved_items_from_entry(entry) -> list[EntryItemCreate]:
+    return [
+        EntryItemCreate(
+            name=item.name,
+            quantity=item.quantity,
+            unit=item.unit,
+            confidence=item.confidence,
+            source_type=item.source_type,
+        )
+        for item in sorted(entry.items, key=lambda current: current.position)
+    ]
+
+
+def build_extracted_workout_metric_lines_for_entry(entry) -> list[str]:
+    if entry.entry_type is not EntryType.WORKOUT:
+        return []
+    lines: list[str] = []
+    workout_calories = resolve_workout_metric_value(entry, "workout_calories")
+    if workout_calories > 0:
+        lines.append(f"- калории тренировки: {round(workout_calories, 1)} ккал")
+        lines.append(
+            f"- к компенсации питания: {round(calculate_default_workout_calorie_credit(workout_calories), 1)} ккал"
+        )
+    return lines
+
+
+def resolve_metric_deltas_for_entry(entry) -> dict[str, float]:
+    metric_deltas: dict[str, float] = {}
+    if entry.entry_type is EntryType.FOOD:
+        for item in entry.items:
+            for metric in item.metrics:
+                if metric.metric.code in SUPPORTED_NUTRITION_METRIC_CODES:
+                    metric_deltas[metric.metric.code] = metric_deltas.get(metric.metric.code, 0.0) + metric.value
+    if entry.entry_type is EntryType.WATER:
+        water_delta = sum(
+            item.quantity
+            for item in entry.items
+            if item.name == "water" and item.unit == "ml" and item.quantity is not None and item.quantity > 0
+        )
+        if water_delta > 0:
+            metric_deltas["water"] = float(water_delta)
+    return metric_deltas
+
+
+def entry_is_credit_eligible_workout(entry) -> bool:
+    return entry.entry_type is EntryType.WORKOUT and resolve_workout_metric_value(entry, "workout_calories") > 0
+
+
+def build_post_entry_confirmation_response(
+    *,
+    session: Session,
+    user,
+    summary_preference,
+    entry,
+) -> str:
+    saved_items = build_saved_items_from_entry(entry)
+    day_report: str | None = None
+    if entry.entry_type in {EntryType.FOOD, EntryType.WATER} or entry_is_credit_eligible_workout(entry):
+        summary_date = resolve_local_summary_date(
+            reference_at=entry.occurred_at,
+            timezone_name=user.timezone,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        )
+        day_report = build_daily_report_for_summary_date(
+            session=session,
+            user_id=user.id,
+            timezone_name=user.timezone,
+            summary_date=summary_date,
+            workout_logging_enabled=user.workout_logging_enabled,
+            summary_preference=summary_preference,
+            metric_deltas=resolve_metric_deltas_for_entry(entry),
+            diet_delta_entry_ids={entry.id} if entry.entry_type in {EntryType.FOOD, EntryType.WATER} else None,
+            confirmation_mode=True,
+        )
+    return build_write_confirmation_response(
+        saved_items,
+        extra_lines=build_extracted_workout_metric_lines_for_entry(entry),
+        day_report=day_report,
+        coach_comment=entry.llm_comment,
+    )
 
 
 def resolve_entry_average_diet_score(entry) -> float | None:
@@ -2345,6 +2431,40 @@ def payload_contains_credit_eligible_workout_entries(payload) -> bool:
     return False
 
 
+RECENT_ACTION_STATE_SCOPE = "recent_action"
+
+
+def create_recent_action_callback_data(
+    *,
+    state_repository: CallbackStateRepository,
+    action: str,
+    values: dict[str, object],
+) -> str:
+    state = state_repository.create(scope=RECENT_ACTION_STATE_SCOPE, values=values)
+    return RecentEntryStateCallback(action=action, state_key=state.state_key).pack()
+
+
+def resolve_recent_action_callback_data(
+    *,
+    payload: dict[str, object] | None,
+    action: str,
+) -> RecentEntryActionCallback:
+    state_values = {} if payload is None else payload
+    return RecentEntryActionCallback(
+        action=action,
+        entry_id=int(state_values.get("entry_id", 0)),
+        item_position=int(state_values.get("item_position", 0)),
+        page=int(state_values.get("page", 0)),
+        count=int(state_values.get("count", 5)),
+        metric_code=str(state_values.get("metric_code", "")),
+        delta=int(state_values.get("delta", 0)),
+        open_in_new_message=int(state_values.get("open_in_new_message", 0)),
+        parent_message_id=int(state_values.get("parent_message_id", 0)),
+        origin=str(state_values.get("origin", "")),
+        root_entry_id=int(state_values.get("root_entry_id", 0)),
+    )
+
+
 def resolve_recent_entry_for_callback(
     *,
     entry_repository: EntryRepository,
@@ -2352,6 +2472,400 @@ def resolve_recent_entry_for_callback(
     entry_id: int,
 ):
     return entry_repository.get_by_id_for_user(entry_id=entry_id, user_id=user_id)
+
+
+async def render_post_entry_root_message(
+    *,
+    callback: CallbackQuery,
+    session: Session,
+    user,
+    summary_preference,
+    entry_repository: EntryRepository,
+    root_entry_id: int,
+) -> None:
+    root_entry = resolve_recent_entry_for_callback(
+        entry_repository=entry_repository,
+        user_id=user.id,
+        entry_id=root_entry_id,
+    )
+    if root_entry is None:
+        await callback.message.edit_text("Эта запись уже недоступна.", reply_markup=None)
+        return
+    await callback.message.edit_text(
+        build_post_entry_confirmation_response(
+            session=session,
+            user=user,
+            summary_preference=summary_preference,
+            entry=root_entry,
+        ),
+        reply_markup=build_post_entry_details_keyboard(
+            details_callback_data=create_recent_action_callback_data(
+                state_repository=CallbackStateRepository(session),
+                action="open_entry",
+                values={
+                    "entry_id": root_entry.id,
+                    "origin": "post_entry",
+                    "root_entry_id": root_entry.id,
+                },
+            )
+        ),
+    )
+
+
+def build_recent_action_selection_reply_markup(
+    *,
+    session: Session,
+    entries: list,
+    timezone_name: str,
+    page: int,
+    count: int,
+    has_previous_page: bool,
+    has_next_page: bool,
+    origin: str = "",
+    root_entry_id: int = 0,
+):
+    state_repository = CallbackStateRepository(session)
+    entry_buttons = [
+        (
+            build_recent_entry_button_label(entry, timezone_name),
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="open_entry",
+                values={
+                    "entry_id": entry.id,
+                    "page": page,
+                    "count": count,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            ),
+        )
+        for entry in entries
+    ]
+    navigation_row = build_recent_entry_action_navigation_row(
+        previous_callback_data=(
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="open_entries",
+                values={
+                    "page": page - 1,
+                    "count": count,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            )
+            if has_previous_page
+            else None
+        ),
+        next_callback_data=(
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="open_entries",
+                values={
+                    "page": page + 1,
+                    "count": count,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            )
+            if has_next_page
+            else None
+        ),
+    )
+    return build_recent_entry_action_selection_keyboard(
+        entry_buttons=entry_buttons,
+        navigation_row=navigation_row or None,
+        back_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="back_to_list",
+            values={
+                "page": page,
+                "count": count,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+        close_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="close",
+            values={
+                "page": page,
+                "count": count,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+    )
+
+
+def build_recent_food_entry_reply_markup(
+    *,
+    session: Session,
+    entry,
+    page: int,
+    count: int,
+    parent_message_id: int = 0,
+    origin: str = "",
+    root_entry_id: int = 0,
+    include_back_button: bool = True,
+):
+    state_repository = CallbackStateRepository(session)
+    item_buttons = [
+        (
+            build_recent_entry_item_button_label(item),
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="open_item",
+                values={
+                    "entry_id": entry.id,
+                    "item_position": item.position,
+                    "page": page,
+                    "count": count,
+                    "open_in_new_message": 1,
+                    "parent_message_id": parent_message_id,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            ),
+        )
+        for item in sorted(entry.items, key=lambda current: current.position)
+    ]
+    return build_recent_food_entry_keyboard(
+        item_buttons=item_buttons,
+        repeat_entry_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="repeat_entry",
+            values={
+                "entry_id": entry.id,
+                "page": page,
+                "count": count,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+        delete_entry_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="delete_entry",
+            values={
+                "entry_id": entry.id,
+                "page": page,
+                "count": count,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+        back_callback_data=(
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="open_entries",
+                values={
+                    "page": page,
+                    "count": count,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            )
+            if include_back_button
+            else None
+        ),
+        close_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="close",
+            values={
+                "page": page,
+                "count": count,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+        include_back_button=include_back_button,
+    )
+
+
+def build_recent_non_food_entry_reply_markup(
+    *,
+    session: Session,
+    entry,
+    page: int,
+    count: int,
+    origin: str = "",
+    root_entry_id: int = 0,
+    include_back_button: bool = True,
+):
+    state_repository = CallbackStateRepository(session)
+    return build_recent_non_food_entry_keyboard(
+        delete_entry_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="delete_entry",
+            values={
+                "entry_id": entry.id,
+                "page": page,
+                "count": count,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+        back_callback_data=(
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="open_entries",
+                values={
+                    "page": page,
+                    "count": count,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            )
+            if include_back_button
+            else None
+        ),
+        close_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="close",
+            values={
+                "page": page,
+                "count": count,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+        include_back_button=include_back_button,
+    )
+
+
+def build_recent_food_item_reply_markup(
+    *,
+    session: Session,
+    entry,
+    item,
+    page: int,
+    count: int,
+    parent_message_id: int = 0,
+    origin: str = "",
+    root_entry_id: int = 0,
+):
+    state_repository = CallbackStateRepository(session)
+    metric_button_specs = {
+        "calories": ("-25 ккал/100г", "+25 ккал/100г", 25),
+        "protein": ("-5г Б/100г", "+5г Б/100г", 5),
+        "fat": ("-5г Ж/100г", "+5г Ж/100г", 5),
+        "carbs": ("-5г У/100г", "+5г У/100г", 5),
+    }
+    adjustable_metric_codes = get_recent_item_100g_adjustable_metric_codes(item)
+    metric_adjustment_buttons = [
+        (
+            metric_button_specs[metric_code][0],
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="adjust_100g",
+                values={
+                    "entry_id": entry.id,
+                    "item_position": item.position,
+                    "page": page,
+                    "count": count,
+                    "metric_code": metric_code,
+                    "delta": -metric_button_specs[metric_code][2],
+                    "parent_message_id": parent_message_id,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            ),
+            metric_button_specs[metric_code][1],
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="adjust_100g",
+                values={
+                    "entry_id": entry.id,
+                    "item_position": item.position,
+                    "page": page,
+                    "count": count,
+                    "metric_code": metric_code,
+                    "delta": metric_button_specs[metric_code][2],
+                    "parent_message_id": parent_message_id,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            ),
+        )
+        for metric_code in adjustable_metric_codes
+    ]
+    return build_recent_food_item_keyboard(
+        unit=item.unit,
+        can_adjust_portion=supports_recent_item_portion_adjustment(item),
+        adjustable_metric_codes=adjustable_metric_codes,
+        delete_item_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="delete_item",
+            values={
+                "entry_id": entry.id,
+                "item_position": item.position,
+                "page": page,
+                "count": count,
+                "parent_message_id": parent_message_id,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+        repeat_item_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="repeat_item",
+            values={
+                "entry_id": entry.id,
+                "item_position": item.position,
+                "page": page,
+                "count": count,
+                "parent_message_id": parent_message_id,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+        decrease_portion_callback_data=(
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="decrease_portion",
+                values={
+                    "entry_id": entry.id,
+                    "item_position": item.position,
+                    "page": page,
+                    "count": count,
+                    "parent_message_id": parent_message_id,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            )
+            if supports_recent_item_portion_adjustment(item)
+            else None
+        ),
+        increase_portion_callback_data=(
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="increase_portion",
+                values={
+                    "entry_id": entry.id,
+                    "item_position": item.position,
+                    "page": page,
+                    "count": count,
+                    "parent_message_id": parent_message_id,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            )
+            if supports_recent_item_portion_adjustment(item)
+            else None
+        ),
+        metric_adjustment_buttons=metric_adjustment_buttons,
+        close_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="close",
+            values={
+                "page": page,
+                "count": count,
+                "parent_message_id": parent_message_id,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+    )
 
 
 def resolve_recent_entry_item(*, entry, item_position: int):
@@ -2724,7 +3238,9 @@ async def handle_admin_panel_callback(
         await callback.answer("Команда доступна только администратору.", show_alert=True)
         return
 
-    if callback_data.action == "close":
+    if callback_data.action == "close" and not (
+        callback_data.origin == "post_entry" and callback_data.parent_message_id == 0
+    ):
         await safe_delete_message(callback.message)
         await callback.answer()
         return
@@ -3555,7 +4071,9 @@ async def handle_recent_delete_callback(
     if callback.message is None:
         await callback.answer("Сообщение недоступно.", show_alert=True)
         return
-    if callback_data.action == "close":
+    if callback_data.action == "close" and not (
+        callback_data.origin == "post_entry" and callback_data.parent_message_id == 0
+    ):
         await safe_delete_message(callback.message)
         await callback.answer()
         return
@@ -3705,7 +4223,9 @@ async def handle_recent_action_callback(
     if callback.message is None:
         await callback.answer("Сообщение недоступно.", show_alert=True)
         return
-    if callback_data.action == "close":
+    if callback_data.action == "close" and not (
+        callback_data.origin == "post_entry" and callback_data.parent_message_id == 0
+    ):
         await safe_delete_message(callback.message)
         await callback.answer()
         return
@@ -3732,6 +4252,30 @@ async def handle_recent_action_callback(
             page=callback_data.page,
             page_size=callback_data.count,
         )
+
+        if callback_data.action == "close" and callback_data.origin == "post_entry":
+            await render_post_entry_root_message(
+                callback=callback,
+                session=session,
+                user=user,
+                summary_preference=summary_preference,
+                entry_repository=entry_repository,
+                root_entry_id=callback_data.root_entry_id,
+            )
+            await callback.answer()
+            return
+
+        if callback_data.origin == "post_entry" and callback_data.action in {"open_entries", "back_to_list"}:
+            await render_post_entry_root_message(
+                callback=callback,
+                session=session,
+                user=user,
+                summary_preference=summary_preference,
+                entry_repository=entry_repository,
+                root_entry_id=callback_data.root_entry_id,
+            )
+            await callback.answer()
+            return
 
         if callback_data.action == "back_to_list":
             await callback.message.edit_text(
@@ -3766,15 +4310,16 @@ async def handle_recent_action_callback(
                     count=callback_data.count,
                     nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                 ),
-                reply_markup=build_recent_entry_action_selection_keyboard(
-                    entry_buttons=[
-                        (build_recent_entry_button_label(entry, user.timezone), entry.id)
-                        for entry in recent_entries
-                    ],
+                reply_markup=build_recent_action_selection_reply_markup(
+                    session=session,
+                    entries=recent_entries,
+                    timezone_name=user.timezone,
                     page=page,
                     count=callback_data.count,
                     has_previous_page=has_previous_page,
                     has_next_page=has_next_page,
+                    origin=callback_data.origin,
+                    root_entry_id=callback_data.root_entry_id,
                 ),
             )
             await callback.answer()
@@ -3793,24 +4338,28 @@ async def handle_recent_action_callback(
             if selected_entry.entry_type is EntryType.FOOD:
                 await callback.message.edit_text(
                     build_recent_food_entry_response(entry=selected_entry, timezone_name=user.timezone),
-                    reply_markup=build_recent_food_entry_keyboard(
-                        item_buttons=[
-                            (build_recent_entry_item_button_label(item), item.position)
-                            for item in sorted(selected_entry.items, key=lambda current: current.position)
-                        ],
-                        entry_id=selected_entry.id,
+                    reply_markup=build_recent_food_entry_reply_markup(
+                        session=session,
+                        entry=selected_entry,
                         page=page,
                         count=callback_data.count,
                         parent_message_id=getattr(callback.message, "message_id", 0) or 0,
+                        origin=callback_data.origin,
+                        root_entry_id=callback_data.root_entry_id,
+                        include_back_button=callback_data.origin != "post_entry",
                     ),
                 )
             else:
                 await callback.message.edit_text(
                     build_recent_non_food_entry_response(entry=selected_entry, timezone_name=user.timezone),
-                    reply_markup=build_recent_non_food_entry_keyboard(
-                        entry_id=selected_entry.id,
+                    reply_markup=build_recent_non_food_entry_reply_markup(
+                        session=session,
+                        entry=selected_entry,
                         page=page,
                         count=callback_data.count,
+                        origin=callback_data.origin,
+                        root_entry_id=callback_data.root_entry_id,
+                        include_back_button=callback_data.origin != "post_entry",
                     ),
                 )
             await callback.answer()
@@ -3825,6 +4374,17 @@ async def handle_recent_action_callback(
                 user_id=user.id,
                 entry=selected_entry,
             )
+            if callback_data.origin == "post_entry":
+                await render_post_entry_root_message(
+                    callback=callback,
+                    session=session,
+                    user=user,
+                    summary_preference=summary_preference,
+                    entry_repository=entry_repository,
+                    root_entry_id=callback_data.root_entry_id,
+                )
+                await callback.answer("Запись сохранена как новый приём пищи.")
+                return
             page, updated_recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
                 entry_repository=entry_repository,
                 user_id=user.id,
@@ -3865,9 +4425,38 @@ async def handle_recent_action_callback(
             await callback.message.edit_text(
                 confirmation_text,
                 reply_markup=build_recent_food_entry_delete_confirmation_keyboard(
-                    entry_id=selected_entry.id,
-                    page=page,
-                    count=callback_data.count,
+                    confirm_callback_data=create_recent_action_callback_data(
+                        state_repository=CallbackStateRepository(session),
+                        action="confirm_delete_entry",
+                        values={
+                            "entry_id": selected_entry.id,
+                            "page": page,
+                            "count": callback_data.count,
+                            "origin": callback_data.origin,
+                            "root_entry_id": callback_data.root_entry_id,
+                        },
+                    ),
+                    cancel_callback_data=create_recent_action_callback_data(
+                        state_repository=CallbackStateRepository(session),
+                        action="open_entry",
+                        values={
+                            "entry_id": selected_entry.id,
+                            "page": page,
+                            "count": callback_data.count,
+                            "origin": callback_data.origin,
+                            "root_entry_id": callback_data.root_entry_id,
+                        },
+                    ),
+                    close_callback_data=create_recent_action_callback_data(
+                        state_repository=CallbackStateRepository(session),
+                        action="close",
+                        values={
+                            "page": page,
+                            "count": callback_data.count,
+                            "origin": callback_data.origin,
+                            "root_entry_id": callback_data.root_entry_id,
+                        },
+                    ),
                 ),
             )
             await callback.answer()
@@ -3875,6 +4464,17 @@ async def handle_recent_action_callback(
 
         if callback_data.action == "confirm_delete_entry":
             entry_repository.delete(selected_entry)
+            if callback_data.origin == "post_entry":
+                await render_post_entry_root_message(
+                    callback=callback,
+                    session=session,
+                    user=user,
+                    summary_preference=summary_preference,
+                    entry_repository=entry_repository,
+                    root_entry_id=callback_data.root_entry_id,
+                )
+                await callback.answer("Запись удалена. Список уже обновлён.")
+                return
             page, updated_recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
                 entry_repository=entry_repository,
                 user_id=user.id,
@@ -3917,11 +4517,43 @@ async def handle_recent_action_callback(
             await callback.message.edit_text(
                 build_recent_food_item_delete_confirmation(item=selected_item),
                 reply_markup=build_recent_food_item_delete_confirmation_keyboard(
-                    entry_id=selected_entry.id,
-                    item_position=selected_item.position,
-                    page=page,
-                    count=callback_data.count,
-                    parent_message_id=callback_data.parent_message_id,
+                    confirm_callback_data=create_recent_action_callback_data(
+                        state_repository=CallbackStateRepository(session),
+                        action="confirm_delete_item",
+                        values={
+                            "entry_id": selected_entry.id,
+                            "item_position": selected_item.position,
+                            "page": page,
+                            "count": callback_data.count,
+                            "parent_message_id": callback_data.parent_message_id,
+                            "origin": callback_data.origin,
+                            "root_entry_id": callback_data.root_entry_id,
+                        },
+                    ),
+                    cancel_callback_data=create_recent_action_callback_data(
+                        state_repository=CallbackStateRepository(session),
+                        action="open_item",
+                        values={
+                            "entry_id": selected_entry.id,
+                            "item_position": selected_item.position,
+                            "page": page,
+                            "count": callback_data.count,
+                            "parent_message_id": callback_data.parent_message_id,
+                            "origin": callback_data.origin,
+                            "root_entry_id": callback_data.root_entry_id,
+                        },
+                    ),
+                    close_callback_data=create_recent_action_callback_data(
+                        state_repository=CallbackStateRepository(session),
+                        action="close",
+                        values={
+                            "page": page,
+                            "count": callback_data.count,
+                            "parent_message_id": callback_data.parent_message_id,
+                            "origin": callback_data.origin,
+                            "root_entry_id": callback_data.root_entry_id,
+                        },
+                    ),
                 ),
             )
             await callback.answer()
@@ -3933,6 +4565,15 @@ async def handle_recent_action_callback(
                 user_id=user.id,
                 item=selected_item,
             )
+            if callback_data.origin == "post_entry" and callback_data.parent_message_id == 0:
+                await render_post_entry_root_message(
+                    callback=callback,
+                    session=session,
+                    user=user,
+                    summary_preference=summary_preference,
+                    entry_repository=entry_repository,
+                    root_entry_id=callback_data.root_entry_id,
+                )
             await callback.answer("Блюдо сохранено как новая запись.")
             return
 
@@ -3963,15 +4604,15 @@ async def handle_recent_action_callback(
                 chat_id=getattr(getattr(callback.message, "chat", None), "id", None),
                 message_id=callback_data.parent_message_id,
                 text=build_recent_food_entry_response(entry=updated_entry, timezone_name=user.timezone),
-                reply_markup=build_recent_food_entry_keyboard(
-                    item_buttons=[
-                        (build_recent_entry_item_button_label(item), item.position)
-                        for item in sorted(updated_entry.items, key=lambda current: current.position)
-                    ],
-                    entry_id=updated_entry.id,
+                reply_markup=build_recent_food_entry_reply_markup(
+                    session=session,
+                    entry=updated_entry,
                     page=page,
                     count=callback_data.count,
                     parent_message_id=callback_data.parent_message_id,
+                    origin=callback_data.origin,
+                    root_entry_id=callback_data.root_entry_id,
+                    include_back_button=callback_data.origin != "post_entry",
                 ),
             )
             await callback.message.edit_text(
@@ -3980,15 +4621,15 @@ async def handle_recent_action_callback(
                     item=updated_item,
                     timezone_name=user.timezone,
                 ),
-                reply_markup=build_recent_food_item_keyboard(
-                    entry_id=updated_entry.id,
-                    item_position=updated_item.position,
-                    unit=updated_item.unit,
-                    can_adjust_portion=supports_recent_item_portion_adjustment(updated_item),
-                    adjustable_metric_codes=get_recent_item_100g_adjustable_metric_codes(updated_item),
+                reply_markup=build_recent_food_item_reply_markup(
+                    session=session,
+                    entry=updated_entry,
+                    item=updated_item,
                     page=page,
                     count=callback_data.count,
                     parent_message_id=callback_data.parent_message_id,
+                    origin=callback_data.origin,
+                    root_entry_id=callback_data.root_entry_id,
                 ),
             )
             await callback.answer("Порция обновлена.")
@@ -4022,15 +4663,15 @@ async def handle_recent_action_callback(
                     item=updated_item,
                     timezone_name=user.timezone,
                 ),
-                reply_markup=build_recent_food_item_keyboard(
-                    entry_id=updated_entry.id,
-                    item_position=updated_item.position,
-                    unit=updated_item.unit,
-                    can_adjust_portion=supports_recent_item_portion_adjustment(updated_item),
-                    adjustable_metric_codes=get_recent_item_100g_adjustable_metric_codes(updated_item),
+                reply_markup=build_recent_food_item_reply_markup(
+                    session=session,
+                    entry=updated_entry,
+                    item=updated_item,
                     page=page,
                     count=callback_data.count,
                     parent_message_id=callback_data.parent_message_id,
+                    origin=callback_data.origin,
+                    root_entry_id=callback_data.root_entry_id,
                 ),
             )
             await callback.answer("КБЖУ на 100 г обновлены.")
@@ -4063,19 +4704,31 @@ async def handle_recent_action_callback(
                     chat_id=getattr(getattr(callback.message, "chat", None), "id", None),
                     message_id=callback_data.parent_message_id,
                     text=build_recent_food_entry_response(entry=updated_entry, timezone_name=user.timezone),
-                    reply_markup=build_recent_food_entry_keyboard(
-                        item_buttons=[
-                            (build_recent_entry_item_button_label(item), item.position)
-                            for item in sorted(updated_entry.items, key=lambda current: current.position)
-                        ],
-                        entry_id=updated_entry.id,
+                    reply_markup=build_recent_food_entry_reply_markup(
+                        session=session,
+                        entry=updated_entry,
                         page=page,
                         count=callback_data.count,
                         parent_message_id=callback_data.parent_message_id,
+                        origin=callback_data.origin,
+                        root_entry_id=callback_data.root_entry_id,
+                        include_back_button=callback_data.origin != "post_entry",
                     ),
                 )
                 await safe_delete_message(callback.message)
                 await callback.answer("Блюдо удалено. Запись обновлена.")
+                return
+
+            if callback_data.origin == "post_entry":
+                await safe_edit_message_by_id(
+                    getattr(callback.message, "bot", None),
+                    chat_id=getattr(getattr(callback.message, "chat", None), "id", None),
+                    message_id=callback_data.parent_message_id,
+                    text="Эта запись уже недоступна.",
+                    reply_markup=None,
+                )
+                await safe_delete_message(callback.message)
+                await callback.answer("Блюдо удалено. Если это была единственная позиция, запись тоже удалена.")
                 return
 
             await safe_edit_message_by_id(
@@ -4089,15 +4742,16 @@ async def handle_recent_action_callback(
                     count=callback_data.count,
                     nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                 ),
-                reply_markup=build_recent_entry_action_selection_keyboard(
-                    entry_buttons=[
-                        (build_recent_entry_button_label(entry, user.timezone), entry.id)
-                        for entry in updated_recent_entries
-                    ],
+                reply_markup=build_recent_action_selection_reply_markup(
+                    session=session,
+                    entries=updated_recent_entries,
+                    timezone_name=user.timezone,
                     page=page,
                     count=callback_data.count,
                     has_previous_page=has_previous_page,
                     has_next_page=has_next_page,
+                    origin=callback_data.origin,
+                    root_entry_id=callback_data.root_entry_id,
                 ),
             )
             await safe_delete_message(callback.message)
@@ -4113,15 +4767,15 @@ async def handle_recent_action_callback(
             item=selected_item,
             timezone_name=user.timezone,
         )
-        item_reply_markup = build_recent_food_item_keyboard(
-            entry_id=selected_entry.id,
-            item_position=selected_item.position,
-            unit=selected_item.unit,
-            can_adjust_portion=supports_recent_item_portion_adjustment(selected_item),
-            adjustable_metric_codes=get_recent_item_100g_adjustable_metric_codes(selected_item),
+        item_reply_markup = build_recent_food_item_reply_markup(
+            session=session,
+            entry=selected_entry,
+            item=selected_item,
             page=page,
             count=callback_data.count,
             parent_message_id=callback_data.parent_message_id,
+            origin=callback_data.origin,
+            root_entry_id=callback_data.root_entry_id,
         )
         if callback_data.open_in_new_message:
             await callback.message.answer(item_response_text, reply_markup=item_reply_markup)
@@ -4129,6 +4783,32 @@ async def handle_recent_action_callback(
             await callback.message.edit_text(item_response_text, reply_markup=item_reply_markup)
         await callback.answer()
         return
+
+
+@router.callback_query(RecentEntryStateCallback.filter())
+async def handle_recent_action_state_callback(
+    callback: CallbackQuery,
+    callback_data: RecentEntryStateCallback,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    with session_scope(session_factory) as session:
+        state_payload = CallbackStateRepository(session).get_payload(
+            scope=RECENT_ACTION_STATE_SCOPE,
+            state_key=callback_data.state_key,
+        )
+    if state_payload is None:
+        await callback.answer("Кнопка уже устарела. Открой экран заново.", show_alert=True)
+        return
+    await handle_recent_action_callback(
+        callback,
+        resolve_recent_action_callback_data(
+            payload=state_payload.values,
+            action=callback_data.action,
+        ),
+        session_factory,
+        admin_user_ids=admin_user_ids,
+    )
 
 
 
@@ -4874,6 +5554,7 @@ async def handle_water_250_ml(
 
     saved_items = [EntryItemCreate(name="water", quantity=250, unit="ml")]
     day_report: str | None = None
+    details_callback_data: str | None = None
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
         user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
@@ -4938,10 +5619,21 @@ async def handle_water_250_ml(
             diet_delta_entry_ids={saved_entry.id},
             confirmation_mode=True,
         )
+        details_callback_data = create_recent_action_callback_data(
+            state_repository=CallbackStateRepository(session),
+            action="open_entry",
+            values={
+                "entry_id": saved_entry.id,
+                "origin": "post_entry",
+                "root_entry_id": saved_entry.id,
+            },
+        )
 
     await message.answer(
         build_write_confirmation_response(saved_items, day_report=day_report),
-        reply_markup=build_main_keyboard(),
+        reply_markup=build_post_entry_details_keyboard(
+            details_callback_data=details_callback_data
+        ),
     )
 
 
@@ -5182,6 +5874,8 @@ async def handle_message(
 
         nutrition_result: SuccessfulNutritionEstimation | None = None
         confirmation_text: str | None = None
+        root_entry_id: int | None = None
+        details_callback_data: str | None = None
         try:
             with session_scope(session_factory) as session:
                 _, user_id = ensure_user_registered(message, session)
@@ -5235,6 +5929,7 @@ async def handle_message(
 
                 saved_food_entries: list = []
                 saved_diet_entries: list = []
+                saved_entries: list = []
                 saved_items = build_saved_items_from_payload(extraction_result.payload)
                 extracted_workout_metric_lines = build_extracted_workout_metric_lines(extraction_result.payload)
                 occurred_at_values: list[datetime] = []
@@ -5262,6 +5957,9 @@ async def handle_message(
                             for item in extracted_entry.items
                         ],
                     )
+                    saved_entries.append(saved_entry)
+                    if root_entry_id is None:
+                        root_entry_id = saved_entry.id
                     occurred_at_values.append(occurred_at)
                     if extracted_entry.type is EntryType.FOOD:
                         saved_food_entries.append(saved_entry)
@@ -5405,6 +6103,16 @@ async def handle_message(
                         saved_items,
                         extra_lines=extracted_workout_metric_lines,
                     )
+                if root_entry_id is not None:
+                    details_callback_data = create_recent_action_callback_data(
+                        state_repository=CallbackStateRepository(session),
+                        action="open_entry",
+                        values={
+                            "entry_id": root_entry_id,
+                            "origin": "post_entry",
+                            "root_entry_id": root_entry_id,
+                        },
+                    )
         except FoodWriteFlowError as exc:
             issue = getattr(exc, "issue", None)
             if issue is not None and issue.is_llm:
@@ -5426,7 +6134,11 @@ async def handle_message(
 
         await message.answer(
             confirmation_text,
-            reply_markup=build_main_keyboard(),
+            reply_markup=(
+                build_post_entry_details_keyboard(details_callback_data=details_callback_data)
+                if details_callback_data is not None
+                else build_main_keyboard()
+            ),
         )
     finally:
         if typing_task is not None:

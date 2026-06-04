@@ -49,6 +49,7 @@ from food_registry_bot.bot.payloads import (
     ProviderMenuCallback,
     RecentEntryActionCallback,
     RecentEntryDeleteCallback,
+    RecentEntryStateCallback,
     SummarySettingsCallback,
 )
 from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT
@@ -1682,6 +1683,106 @@ async def test_regular_message_saves_metrics_for_allowed_user() -> None:
         "В: 0.0 / 2000 мл"
         "</pre>",
     )
+    assert flatten_inline_button_texts(message.answer.await_args.kwargs["reply_markup"]) == ["Подробнее"]
+    details_callback_data = message.answer.await_args.kwargs["reply_markup"].inline_keyboard[0][0].callback_data
+    assert len(details_callback_data.encode()) <= 64
+    unpacked_callback = RecentEntryStateCallback.unpack(details_callback_data)
+    assert unpacked_callback.action == "open_entry"
+    assert len(unpacked_callback.state_key) == 10
+
+
+async def test_post_entry_details_open_and_close_return_to_confirmation() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "post_entry_details_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="post_entry_details_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            source_text="яблоко",
+            occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        item = EntryItem(entry_id=entry.id, position=0, name="яблоко", quantity=180, unit="g")
+        session.add(item)
+        session.flush()
+        session.add_all(
+            [
+                EntryItemMetric(entry_item_id=item.id, metric_id=1, value=220.0, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=2, value=7.6, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=3, value=2.2, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=4, value=42.8, confidence="medium"),
+                EntryItemMetric(entry_item_id=item.id, metric_id=5, value=5.1, confidence="medium"),
+            ]
+        )
+        session.commit()
+        entry_id = entry.id
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="post_entry_details_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock(), message_id=991),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_action_callback(
+        callback,
+        RecentEntryActionCallback(
+            action="open_entry",
+            entry_id=entry_id,
+            origin="post_entry",
+            root_entry_id=entry_id,
+        ),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert callback.message.edit_text.await_args.args == (
+        "Запись еды:\n"
+        "\n"
+        "13:00 — яблоко (180 г)\n"
+        "\n"
+        "Блюда:\n"
+        "1. яблоко (180 г)\n"
+        "\n"
+        "Выбери блюдо.",
+    )
+    assert flatten_inline_button_texts(callback.message.edit_text.await_args.kwargs["reply_markup"]) == [
+        "яблоко (180 г)",
+        "Повторить запись целиком",
+        "Удалить запись",
+        "Закрыть",
+    ]
+
+    callback.message.edit_text.reset_mock()
+    callback.answer.reset_mock()
+
+    await handle_recent_action_callback(
+        callback,
+        RecentEntryActionCallback(
+            action="close",
+            origin="post_entry",
+            root_entry_id=entry_id,
+        ),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert callback.message.edit_text.await_args.args == (
+        "Сохранил:\n- яблоко (180 г)\n\n"
+        "<pre>"
+        "К: 220.0 / 1800 ккал (+220.0 ккал)\n"
+        "Б: 7.6 / 90 г (+7.6 г)\n"
+        "Ж: 2.2 / 60 г (+2.2 г)\n"
+        "У: 42.8 / 210 г (+42.8 г)\n"
+        "Кл: 5.1 / 25 г (+5.1 г)\n"
+        "В: 0.0 / 2000 мл"
+        "</pre>",
+    )
+    assert flatten_inline_button_texts(callback.message.edit_text.await_args.kwargs["reply_markup"]) == ["Подробнее"]
+    callback.answer.assert_awaited_once_with()
 
 
 async def test_regular_message_denies_unallowed_user_before_processing() -> None:

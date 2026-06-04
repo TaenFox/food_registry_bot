@@ -437,6 +437,24 @@ class EntryItemMetric(Base):
     metric: Mapped["SupportedMetric"] = relationship(back_populates="entry_item_metrics")
 
 
+class CallbackState(Base):
+    __tablename__ = "callback_states"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    state_key: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    scope: Mapped[str] = mapped_column(String(64), index=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class DataExchangeFile(Base):
     __tablename__ = "data_exchange_files"
     __table_args__ = (
