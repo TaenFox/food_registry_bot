@@ -69,8 +69,16 @@ def build_settings_goals_keyboard(
                     callback_data=SummarySettingsCallback(action="goal_dec_calories").pack(),
                 ),
                 InlineKeyboardButton(
-                    text=f"Калории: {calorie_goal}",
+                    text="−50",
+                    callback_data=SummarySettingsCallback(action="goal_half_dec_calories").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="К",
                     callback_data=SummarySettingsCallback(action="noop").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="+50",
+                    callback_data=SummarySettingsCallback(action="goal_half_inc_calories").pack(),
                 ),
                 InlineKeyboardButton(
                     text="+100",
@@ -83,8 +91,16 @@ def build_settings_goals_keyboard(
                     callback_data=SummarySettingsCallback(action="goal_dec_protein").pack(),
                 ),
                 InlineKeyboardButton(
-                    text=f"Белки: {protein_goal}",
+                    text="−5",
+                    callback_data=SummarySettingsCallback(action="goal_half_dec_protein").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="Б",
                     callback_data=SummarySettingsCallback(action="noop").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="+5",
+                    callback_data=SummarySettingsCallback(action="goal_half_inc_protein").pack(),
                 ),
                 InlineKeyboardButton(
                     text="+10",
@@ -97,8 +113,16 @@ def build_settings_goals_keyboard(
                     callback_data=SummarySettingsCallback(action="goal_dec_fat").pack(),
                 ),
                 InlineKeyboardButton(
-                    text=f"Жиры: {fat_goal}",
+                    text="−5",
+                    callback_data=SummarySettingsCallback(action="goal_half_dec_fat").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="Ж",
                     callback_data=SummarySettingsCallback(action="noop").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="+5",
+                    callback_data=SummarySettingsCallback(action="goal_half_inc_fat").pack(),
                 ),
                 InlineKeyboardButton(
                     text="+10",
@@ -111,8 +135,16 @@ def build_settings_goals_keyboard(
                     callback_data=SummarySettingsCallback(action="goal_dec_carbs").pack(),
                 ),
                 InlineKeyboardButton(
-                    text=f"Углеводы: {carbs_goal}",
+                    text="−5",
+                    callback_data=SummarySettingsCallback(action="goal_half_dec_carbs").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="У",
                     callback_data=SummarySettingsCallback(action="noop").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="+5",
+                    callback_data=SummarySettingsCallback(action="goal_half_inc_carbs").pack(),
                 ),
                 InlineKeyboardButton(
                     text="+10",
@@ -125,8 +157,16 @@ def build_settings_goals_keyboard(
                     callback_data=SummarySettingsCallback(action="goal_dec_fiber").pack(),
                 ),
                 InlineKeyboardButton(
-                    text=f"Клетчатка: {fiber_goal}",
+                    text="−5",
+                    callback_data=SummarySettingsCallback(action="goal_half_dec_fiber").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="Кл",
                     callback_data=SummarySettingsCallback(action="noop").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="+5",
+                    callback_data=SummarySettingsCallback(action="goal_half_inc_fiber").pack(),
                 ),
                 InlineKeyboardButton(
                     text="+10",
@@ -139,8 +179,16 @@ def build_settings_goals_keyboard(
                     callback_data=SummarySettingsCallback(action="goal_dec_water").pack(),
                 ),
                 InlineKeyboardButton(
-                    text=f"Вода: {water_goal}",
+                    text="−50",
+                    callback_data=SummarySettingsCallback(action="goal_half_dec_water").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="В",
                     callback_data=SummarySettingsCallback(action="noop").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="+50",
+                    callback_data=SummarySettingsCallback(action="goal_half_inc_water").pack(),
                 ),
                 InlineKeyboardButton(
                     text="+100",

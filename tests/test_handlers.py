@@ -5817,7 +5817,7 @@ async def test_goal_returns_default_goals_when_preference_is_not_created() -> No
         "- вода: 2000 мл",
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
-    assert flatten_inline_button_texts(reply_markup)[:3] == ["−100", "Калории: 1800", "+100"]
+    assert flatten_inline_button_texts(reply_markup)[:5] == ["−100", "−50", "К", "+50", "+100"]
 
 
 async def test_goal_increment_updates_preference_via_settings_callback() -> None:
@@ -5841,6 +5841,30 @@ async def test_goal_increment_updates_preference_via_settings_callback() -> None
 
     assert saved_goal.calorie_goal == 1900
     assert "калории: 1900 ккал" in callback.message.edit_text.await_args.args[0]
+    callback.answer.assert_awaited_once_with("Сохранил настройки.")
+
+
+async def test_goal_half_increment_updates_preference_via_settings_callback() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "goal_half_user")
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="goal_half_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_toggle_summary_metric(
+        callback,
+        SummarySettingsCallback(action="goal_half_inc_calories"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    with session_factory() as session:
+        saved_goal = session.query(UserGoalPreference).one()
+
+    assert saved_goal.calorie_goal == 1850
+    assert "калории: 1850 ккал" in callback.message.edit_text.await_args.args[0]
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 

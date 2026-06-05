@@ -1999,7 +1999,33 @@ def build_diet_buttons(diets: list[SupportedDietView]) -> list[tuple[str, str, b
 
 
 def resolve_settings_section(action: str) -> str:
-    if action in {"open_goals", "goal_dec_calories", "goal_inc_calories", "goal_dec_protein", "goal_inc_protein", "goal_dec_fat", "goal_inc_fat", "goal_dec_carbs", "goal_inc_carbs", "goal_dec_fiber", "goal_inc_fiber", "goal_dec_water", "goal_inc_water"}:
+    if action in {
+        "open_goals",
+        "goal_dec_calories",
+        "goal_half_dec_calories",
+        "goal_half_inc_calories",
+        "goal_inc_calories",
+        "goal_dec_protein",
+        "goal_half_dec_protein",
+        "goal_half_inc_protein",
+        "goal_inc_protein",
+        "goal_dec_fat",
+        "goal_half_dec_fat",
+        "goal_half_inc_fat",
+        "goal_inc_fat",
+        "goal_dec_carbs",
+        "goal_half_dec_carbs",
+        "goal_half_inc_carbs",
+        "goal_inc_carbs",
+        "goal_dec_fiber",
+        "goal_half_dec_fiber",
+        "goal_half_inc_fiber",
+        "goal_inc_fiber",
+        "goal_dec_water",
+        "goal_half_dec_water",
+        "goal_half_inc_water",
+        "goal_inc_water",
+    }:
         return SETTINGS_SECTION_GOALS
     if action in {
         "open_metrics",
@@ -5200,16 +5226,28 @@ async def handle_toggle_summary_metric(
             goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
             goal_adjustments = {
                 "goal_dec_calories": ("calories", -100, 100),
+                "goal_half_dec_calories": ("calories", -50, 100),
+                "goal_half_inc_calories": ("calories", 50, 100),
                 "goal_inc_calories": ("calories", 100, 100),
                 "goal_dec_protein": ("protein", -10, 10),
+                "goal_half_dec_protein": ("protein", -5, 10),
+                "goal_half_inc_protein": ("protein", 5, 10),
                 "goal_inc_protein": ("protein", 10, 10),
                 "goal_dec_fat": ("fat", -10, 10),
+                "goal_half_dec_fat": ("fat", -5, 10),
+                "goal_half_inc_fat": ("fat", 5, 10),
                 "goal_inc_fat": ("fat", 10, 10),
                 "goal_dec_carbs": ("carbs", -10, 10),
+                "goal_half_dec_carbs": ("carbs", -5, 10),
+                "goal_half_inc_carbs": ("carbs", 5, 10),
                 "goal_inc_carbs": ("carbs", 10, 10),
                 "goal_dec_fiber": ("fiber", -10, 10),
+                "goal_half_dec_fiber": ("fiber", -5, 10),
+                "goal_half_inc_fiber": ("fiber", 5, 10),
                 "goal_inc_fiber": ("fiber", 10, 10),
                 "goal_dec_water": ("water", -100, 100),
+                "goal_half_dec_water": ("water", -50, 100),
+                "goal_half_inc_water": ("water", 50, 100),
                 "goal_inc_water": ("water", 100, 100),
             }
             metric_code, delta, minimum_value = goal_adjustments[callback_data.action]
