@@ -322,7 +322,11 @@ def build_recent_entries_delete_keyboard(
                 InlineKeyboardButton(
                     text="Открыть запись",
                     callback_data=RecentEntryActionCallback(action="open_entries", page=page, count=count).pack(),
-                )
+                ),
+                InlineKeyboardButton(
+                    text="Повторить блюдо",
+                    callback_data=RecentEntryActionCallback(action="open_unique_items", page=page, count=count).pack(),
+                ),
             ]
         )
     rows.append(_build_close_row(RecentEntryDeleteCallback(action="close", page=page, count=count).pack()))

@@ -1953,9 +1953,11 @@ async def test_recent_returns_latest_entries_for_allowed_user() -> None:
     assert message.answer.await_args.args == (
         "Последние записи (страница 1, по 5):\n\n18.05.2026\n1. 14:00 — вода (250 мл)\n2. 13:00 — яблоко",
     )
-    reply_markup = message.answer.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[0][0].text == "Открыть запись"
-    assert reply_markup.inline_keyboard[1][0].text == "Закрыть"
+    assert flatten_inline_button_texts(message.answer.await_args.kwargs["reply_markup"]) == [
+        "Открыть запись",
+        "Повторить блюдо",
+        "Закрыть",
+    ]
 
 
 async def test_recent_button_returns_latest_entries_for_allowed_user() -> None:
@@ -2030,8 +2032,12 @@ async def test_recent_shows_pagination_controls_for_next_page() -> None:
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Вперёд →"
-    assert reply_markup.inline_keyboard[1][0].text == "Открыть запись"
-    assert reply_markup.inline_keyboard[2][0].text == "Закрыть"
+    assert flatten_inline_button_texts(reply_markup) == [
+        "Вперёд →",
+        "Открыть запись",
+        "Повторить блюдо",
+        "Закрыть",
+    ]
 
 
 async def test_recent_accepts_requested_count() -> None:
@@ -2071,8 +2077,12 @@ async def test_recent_accepts_requested_count() -> None:
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Вперёд →"
-    assert reply_markup.inline_keyboard[1][0].text == "Открыть запись"
-    assert reply_markup.inline_keyboard[2][0].text == "Закрыть"
+    assert flatten_inline_button_texts(reply_markup) == [
+        "Вперёд →",
+        "Открыть запись",
+        "Повторить блюдо",
+        "Закрыть",
+    ]
 
 
 async def test_recent_returns_usage_for_invalid_count() -> None:
@@ -2347,6 +2357,70 @@ async def test_recent_action_open_entries_shows_all_records() -> None:
     assert reply_markup.inline_keyboard[1][0].text == "13:00 · яблоко"
     assert reply_markup.inline_keyboard[2][0].text == "Назад"
     assert reply_markup.inline_keyboard[3][0].text == "Закрыть"
+    callback.answer.assert_awaited_once_with()
+
+
+async def test_recent_action_open_unique_items_shows_last_unique_dishes() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_unique_items_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="recent_unique_items_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        latest_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            source_text="ужин",
+            occurred_at=datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc),
+        )
+        earlier_entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            source_text="обед",
+            occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        )
+        session.add_all([latest_entry, earlier_entry])
+        session.flush()
+        session.add_all(
+            [
+                EntryItem(entry_id=latest_entry.id, position=0, name="рис", quantity=180, unit="g"),
+                EntryItem(entry_id=latest_entry.id, position=1, name="курица", quantity=120, unit="g"),
+                EntryItem(entry_id=earlier_entry.id, position=0, name="рис", quantity=150, unit="g"),
+                EntryItem(entry_id=earlier_entry.id, position=1, name="салат", quantity=90, unit="g"),
+            ]
+        )
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_unique_items_user"),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_action_callback(
+        callback,
+        RecentEntryActionCallback(action="open_unique_items", page=0, count=5),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert callback.message.edit_text.await_args.args == (
+        "Последние уникальные блюда:\n"
+        "\n"
+        "1. рис (180 г)\n"
+        "2. курица (120 г)\n"
+        "3. салат (90 г)\n"
+        "\n"
+        "Выбери блюдо, чтобы добавить его отдельной записью.",
+    )
+    assert flatten_inline_button_texts(callback.message.edit_text.await_args.kwargs["reply_markup"]) == [
+        "рис (180 г)",
+        "курица (120 г)",
+        "салат (90 г)",
+        "Назад",
+        "Закрыть",
+    ]
     callback.answer.assert_awaited_once_with()
 
 
@@ -2820,13 +2894,20 @@ async def test_recent_action_repeat_item_creates_new_entry_and_copies_metrics() 
 
     callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_item_repeat_user"),
-        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock(), message_id=778),
         answer=AsyncMock(),
     )
 
     await handle_recent_action_callback(
         callback,
-        RecentEntryActionCallback(action="repeat_item", entry_id=entry_id, item_position=0, page=0, count=5),
+        RecentEntryActionCallback(
+            action="repeat_item",
+            entry_id=entry_id,
+            item_position=0,
+            page=0,
+            count=5,
+            parent_message_id=901,
+        ),
         session_factory,
         admin_user_ids=(ADMIN_ID,),
     )
@@ -2847,7 +2928,11 @@ async def test_recent_action_repeat_item_creates_new_entry_and_copies_metrics() 
         ]
 
     callback.message.edit_text.assert_not_awaited()
-    callback.answer.assert_awaited_once_with("Блюдо сохранено как новая запись.")
+    callback.message.answer.assert_awaited_once()
+    assert callback.message.answer.await_args.args[0].startswith("Сохранил:\n- рис (150 г)")
+    assert flatten_inline_button_texts(callback.message.answer.await_args.kwargs["reply_markup"]) == ["Подробнее"]
+    assert callback.message.answer.await_args.kwargs["reply_to_message_id"] == 901
+    callback.answer.assert_awaited_once_with()
 
 
 async def test_recent_action_repeat_item_without_metrics_creates_entry_without_metrics() -> None:
@@ -2876,7 +2961,7 @@ async def test_recent_action_repeat_item_without_metrics_creates_entry_without_m
 
     callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_item_repeat_nometrics_user"),
-        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock(), message_id=779),
         answer=AsyncMock(),
     )
 
@@ -2890,6 +2975,8 @@ async def test_recent_action_repeat_item_without_metrics_creates_entry_without_m
     with session_factory() as session:
         assert session.query(Entry).count() == 2
         assert session.query(EntryItemMetric).count() == 0
+    assert callback.message.answer.await_args.args[0].startswith("Сохранил:\n- яблоко")
+    assert callback.message.answer.await_args.kwargs["reply_to_message_id"] == 779
 
 
 async def test_recent_action_repeat_entry_creates_new_entry_with_all_items_and_metrics() -> None:
@@ -2928,7 +3015,7 @@ async def test_recent_action_repeat_entry_creates_new_entry_with_all_items_and_m
 
     callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_entry_repeat_user"),
-        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock(), message_id=780),
         answer=AsyncMock(),
     )
 
@@ -2958,10 +3045,12 @@ async def test_recent_action_repeat_entry_creates_new_entry_with_all_items_and_m
             (2, 25.0, "medium"),
         ]
 
-    rendered_text = callback.message.edit_text.await_args.args[0]
-    assert rendered_text.startswith("Последние записи (страница 1, по 5):")
-    assert rendered_text.count("рис (150 г), курица (120 г)") == 2
-    callback.answer.assert_awaited_once_with("Запись сохранена как новый приём пищи.")
+    callback.message.edit_text.assert_not_awaited()
+    callback.message.answer.assert_awaited_once()
+    assert callback.message.answer.await_args.args[0].startswith("Сохранил:\n- рис (150 г)\n- курица (120 г)")
+    assert flatten_inline_button_texts(callback.message.answer.await_args.kwargs["reply_markup"]) == ["Подробнее"]
+    assert callback.message.answer.await_args.kwargs["reply_to_message_id"] == 780
+    callback.answer.assert_awaited_once_with()
 
 
 async def test_recent_action_delete_entry_opens_confirmation_from_entry_screen() -> None:
@@ -3064,6 +3153,7 @@ async def test_recent_action_confirm_delete_entry_removes_food_entry_and_refresh
     )
     assert flatten_inline_button_texts(callback.message.edit_text.await_args.kwargs["reply_markup"]) == [
         "Открыть запись",
+        "Повторить блюдо",
         "Закрыть",
     ]
     callback.answer.assert_awaited_once_with("Запись удалена. Список уже обновлён.")
@@ -3125,6 +3215,7 @@ async def test_recent_action_confirm_delete_water_entry_refreshes_recent() -> No
     )
     assert flatten_inline_button_texts(callback.message.edit_text.await_args.kwargs["reply_markup"]) == [
         "Открыть запись",
+        "Повторить блюдо",
         "Закрыть",
     ]
     callback.answer.assert_awaited_once_with("Запись удалена. Список уже обновлён.")
@@ -3402,8 +3493,12 @@ async def test_recent_list_callback_opens_second_page() -> None:
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "← Назад"
-    assert reply_markup.inline_keyboard[1][0].text == "Открыть запись"
-    assert reply_markup.inline_keyboard[2][0].text == "Закрыть"
+    assert flatten_inline_button_texts(reply_markup) == [
+        "← Назад",
+        "Открыть запись",
+        "Повторить блюдо",
+        "Закрыть",
+    ]
 
 
 async def test_recent_delete_confirm_removes_entry_and_refreshes_recent_list() -> None:
@@ -3464,8 +3559,11 @@ async def test_recent_delete_confirm_removes_entry_and_refreshes_recent_list() -
         reply_markup=callback.message.edit_text.await_args.kwargs["reply_markup"],
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[0][0].text == "Открыть запись"
-    assert reply_markup.inline_keyboard[1][0].text == "Закрыть"
+    assert flatten_inline_button_texts(reply_markup) == [
+        "Открыть запись",
+        "Повторить блюдо",
+        "Закрыть",
+    ]
     callback.message.answer.assert_not_awaited()
     callback.answer.assert_awaited_once_with("Запись удалена. Список уже обновлён.")
 

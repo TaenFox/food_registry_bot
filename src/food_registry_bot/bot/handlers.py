@@ -1227,6 +1227,7 @@ def build_post_entry_confirmation_response(
     user,
     summary_preference,
     entry,
+    include_coach_comment: bool = True,
 ) -> str:
     saved_items = build_saved_items_from_entry(entry)
     day_report: str | None = None
@@ -1251,7 +1252,7 @@ def build_post_entry_confirmation_response(
         saved_items,
         extra_lines=build_extracted_workout_metric_lines_for_entry(entry),
         day_report=day_report,
-        coach_comment=entry.llm_comment,
+        coach_comment=entry.llm_comment if include_coach_comment else None,
     )
 
 
@@ -1586,6 +1587,38 @@ def build_recent_food_item_response(*, entry, item, timezone_name: str) -> str:
     if adjustable_metric_codes:
         lines.extend(["", 'Кнопки КБЖУ ниже меняют блок "На 100 г".'])
         lines.extend(["После нажатия бот пересчитывает сохранённые значения за текущую порцию."])
+    return "\n".join(lines)
+
+
+RECENT_UNIQUE_ITEMS_LIMIT = 10
+RECENT_UNIQUE_ITEMS_SCAN_LIMIT = 100
+
+
+def collect_recent_unique_food_items(*, entries: list, limit: int = RECENT_UNIQUE_ITEMS_LIMIT) -> list[tuple[object, object]]:
+    unique_items: list[tuple[object, object]] = []
+    seen_names: set[str] = set()
+    for entry in entries:
+        if entry.entry_type is not EntryType.FOOD:
+            continue
+        for item in sorted(entry.items, key=lambda current: current.position):
+            normalized_name = item.name.strip().lower()
+            if normalized_name in seen_names:
+                continue
+            seen_names.add(normalized_name)
+            unique_items.append((entry, item))
+            if len(unique_items) >= limit:
+                return unique_items
+    return unique_items
+
+
+def build_recent_unique_item_selection_response(*, items: list[tuple[object, object]]) -> str:
+    if not items:
+        return "Пока нет недавних блюд, которые можно быстро повторить."
+
+    lines = ["Последние уникальные блюда:", ""]
+    for index, (_entry, item) in enumerate(items, start=1):
+        lines.append(f"{index}. {build_recent_entry_item_button_label(item)}")
+    lines.extend(["", "Выбери блюдо, чтобы добавить его отдельной записью."])
     return "\n".join(lines)
 
 
@@ -2782,6 +2815,54 @@ async def render_post_entry_root_message(
     )
 
 
+def resolve_recent_repeat_reply_message_id(*, callback: CallbackQuery, parent_message_id: int = 0) -> int | None:
+    if parent_message_id > 0:
+        return parent_message_id
+    callback_message = callback.message
+    if callback_message is None:
+        return None
+    message_id = getattr(callback_message, "message_id", None)
+    if isinstance(message_id, int) and message_id > 0:
+        return message_id
+    return None
+
+
+async def send_recent_repeat_confirmation(
+    *,
+    callback: CallbackQuery,
+    session: Session,
+    user,
+    summary_preference,
+    saved_entry,
+    parent_message_id: int = 0,
+) -> None:
+    details_callback_data = create_recent_action_callback_data(
+        state_repository=CallbackStateRepository(session),
+        action="open_entry",
+        values={
+            "entry_id": saved_entry.id,
+            "origin": "post_entry",
+            "root_entry_id": saved_entry.id,
+        },
+    )
+    reply_message_id = resolve_recent_repeat_reply_message_id(
+        callback=callback,
+        parent_message_id=parent_message_id,
+    )
+    reply_kwargs = {} if reply_message_id is None else {"reply_to_message_id": reply_message_id}
+    await callback.message.answer(
+        build_post_entry_confirmation_response(
+            session=session,
+            user=user,
+            summary_preference=summary_preference,
+            entry=saved_entry,
+            include_coach_comment=False,
+        ),
+        reply_markup=build_post_entry_details_keyboard(details_callback_data=details_callback_data),
+        **reply_kwargs,
+    )
+
+
 def build_recent_action_selection_reply_markup(
     *,
     session: Session,
@@ -2864,6 +2945,46 @@ def build_recent_action_selection_reply_markup(
                 "origin": origin,
                 "root_entry_id": root_entry_id,
             },
+        ),
+    )
+
+
+def build_recent_unique_item_selection_reply_markup(
+    *,
+    session: Session,
+    items: list[tuple[object, object]],
+    page: int,
+    count: int,
+):
+    state_repository = CallbackStateRepository(session)
+    item_buttons = [
+        (
+            build_recent_entry_item_button_label(item),
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="repeat_item",
+                values={
+                    "entry_id": entry.id,
+                    "item_position": item.position,
+                    "page": page,
+                    "count": count,
+                },
+            ),
+        )
+        for entry, item in items
+    ]
+    return build_recent_entry_action_selection_keyboard(
+        entry_buttons=item_buttons,
+        navigation_row=None,
+        back_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="back_to_list",
+            values={"page": page, "count": count},
+        ),
+        close_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="close",
+            values={"page": page, "count": count},
         ),
     )
 
@@ -3231,7 +3352,7 @@ def repeat_recent_entry_item(
     session: Session,
     user_id: int,
     item,
-) -> None:
+) -> object:
     saved_entry = EntryRepository(session).create(
         user_id=user_id,
         entry_type=EntryType.FOOD,
@@ -3247,7 +3368,7 @@ def repeat_recent_entry_item(
         ],
     )
     if not item.metrics:
-        return
+        return saved_entry
     persisted_item = sorted(saved_entry.items, key=lambda current: current.position)[0]
     EntryItemMetricRepository(session).upsert_metrics(
         entry_item_id=persisted_item.id,
@@ -3261,6 +3382,7 @@ def repeat_recent_entry_item(
             if metric.metric is not None
         ],
     )
+    return saved_entry
 
 
 def repeat_recent_entry(
@@ -3268,7 +3390,7 @@ def repeat_recent_entry(
     session: Session,
     user_id: int,
     entry,
-) -> None:
+) -> object:
     saved_entry = EntryRepository(session).create(
         user_id=user_id,
         entry_type=EntryType.FOOD,
@@ -3302,6 +3424,7 @@ def repeat_recent_entry(
                 if metric.metric is not None
             ],
         )
+    return saved_entry
 
 
 def load_recent_entries_page(
@@ -4595,6 +4718,26 @@ async def handle_recent_action_callback(
             await callback.answer()
             return
 
+        if callback_data.action == "open_unique_items":
+            unique_items = collect_recent_unique_food_items(
+                entries=entry_repository.list_recent_for_user(
+                    user_id=user.id,
+                    limit=RECENT_UNIQUE_ITEMS_SCAN_LIMIT,
+                ),
+            )
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_unique_item_selection_response(items=unique_items),
+                reply_markup=build_recent_unique_item_selection_reply_markup(
+                    session=session,
+                    items=unique_items,
+                    page=page,
+                    count=callback_data.count,
+                ),
+            )
+            await callback.answer()
+            return
+
         selected_entry = resolve_recent_entry_for_callback(
             entry_repository=entry_repository,
             user_id=user.id,
@@ -4645,46 +4788,19 @@ async def handle_recent_action_callback(
             if selected_entry.entry_type is not EntryType.FOOD:
                 await callback.answer("Для этой записи повтор пока недоступен.", show_alert=True)
                 return
-            repeat_recent_entry(
+            saved_entry = repeat_recent_entry(
                 session=session,
                 user_id=user.id,
                 entry=selected_entry,
             )
-            if callback_data.origin == "post_entry":
-                await render_post_entry_root_message(
-                    callback=callback,
-                    session=session,
-                    user=user,
-                    summary_preference=summary_preference,
-                    entry_repository=entry_repository,
-                    root_entry_id=callback_data.root_entry_id,
-                )
-                await callback.answer("Запись сохранена как новый приём пищи.")
-                return
-            page, updated_recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
-                entry_repository=entry_repository,
-                user_id=user.id,
-                page=0,
-                page_size=callback_data.count,
+            await send_recent_repeat_confirmation(
+                callback=callback,
+                session=session,
+                user=user,
+                summary_preference=summary_preference,
+                saved_entry=saved_entry,
             )
-            await safe_edit_message_text(
-                callback.message,
-                text=build_recent_entries_response(
-                    updated_recent_entries,
-                    timezone_name=user.timezone,
-                    page=page,
-                    count=callback_data.count,
-                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-                ),
-                reply_markup=build_recent_entries_delete_keyboard(
-                    page=page,
-                    count=callback_data.count,
-                    has_previous_page=has_previous_page,
-                    has_next_page=has_next_page,
-                    has_entries=bool(updated_recent_entries),
-                ),
-            )
-            await callback.answer("Запись сохранена как новый приём пищи.")
+            await callback.answer()
             return
 
         if callback_data.action == "delete_entry":
@@ -4834,21 +4950,20 @@ async def handle_recent_action_callback(
             return
 
         if callback_data.action == "repeat_item":
-            repeat_recent_entry_item(
+            saved_entry = repeat_recent_entry_item(
                 session=session,
                 user_id=user.id,
                 item=selected_item,
             )
-            if callback_data.origin == "post_entry" and callback_data.parent_message_id == 0:
-                await render_post_entry_root_message(
-                    callback=callback,
-                    session=session,
-                    user=user,
-                    summary_preference=summary_preference,
-                    entry_repository=entry_repository,
-                    root_entry_id=callback_data.root_entry_id,
-                )
-            await callback.answer("Блюдо сохранено как новая запись.")
+            await send_recent_repeat_confirmation(
+                callback=callback,
+                session=session,
+                user=user,
+                summary_preference=summary_preference,
+                saved_entry=saved_entry,
+                parent_message_id=callback_data.parent_message_id,
+            )
+            await callback.answer()
             return
 
         if callback_data.action in {"decrease_portion", "increase_portion"}:
