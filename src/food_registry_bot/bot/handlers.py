@@ -20,6 +20,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.keyboards import (
+    RECENT_BUTTON_TEXT,
+    REPORT_BUTTON_TEXT,
+    SETTINGS_BUTTON_TEXT,
+    TODAY_BUTTON_TEXT,
     WATER_250_ML_BUTTON_TEXT,
     build_admin_delete_entries_confirmation_keyboard,
     build_admin_llm_issues_keyboard,
@@ -27,13 +31,20 @@ from food_registry_bot.bot.keyboards import (
     build_admin_user_actions_keyboard,
     build_admin_user_list_keyboard,
     build_data_exchange_files_keyboard,
-    build_goal_keyboard,
     build_main_keyboard,
+    build_settings_diets_keyboard,
+    build_settings_display_keyboard,
+    build_settings_goals_keyboard,
+    build_settings_metrics_keyboard,
+    build_settings_reports_keyboard,
+    build_settings_root_keyboard,
+    build_post_entry_details_keyboard,
     build_period_report_dynamics_keyboard,
     build_period_report_keyboard,
     build_period_report_noticeable_keyboard,
     build_provider_connection_actions_keyboard,
     build_provider_connections_keyboard,
+    build_recent_entry_action_navigation_row,
     build_recent_entries_delete_keyboard,
     build_recent_food_entry_keyboard,
     build_recent_food_entry_delete_confirmation_keyboard,
@@ -43,7 +54,6 @@ from food_registry_bot.bot.keyboards import (
     build_recent_non_food_entry_keyboard,
     build_recent_entry_confirmation_keyboard,
     build_recent_entry_selection_keyboard,
-    build_summary_settings_keyboard,
 )
 from food_registry_bot.bot.message_routing import (
     AMBIGUOUS,
@@ -54,11 +64,11 @@ from food_registry_bot.bot.message_routing import (
 from food_registry_bot.bot.payloads import (
     AdminPanelCallback,
     DataExchangeFileCallback,
-    GoalMessageCallback,
     PeriodReportCallback,
     ProviderMenuCallback,
     RecentEntryActionCallback,
     RecentEntryDeleteCallback,
+    RecentEntryStateCallback,
     SummarySettingsCallback,
 )
 from food_registry_bot.conversation import (
@@ -67,6 +77,22 @@ from food_registry_bot.conversation import (
     NutritionCoachContextBuilder,
 )
 from food_registry_bot.config import Settings, get_data_exchange_dir
+from food_registry_bot.diet import (
+    DietDefinitionInput,
+    DietEvaluationItemInput,
+    DietEvaluationItemResult,
+    DietEvaluationPayload,
+    DietEvaluationRequest,
+    DietScoreSummary,
+    DietEvaluationService,
+    DisabledDietEvaluationService,
+    DietScoreResult,
+    create_diet_service_for_provider_access,
+    get_supported_diet_definition,
+    get_supported_diet_metric_codes,
+    resolve_weighted_average_diet_score,
+    summarize_diet_scores,
+)
 from food_registry_bot.db.models import (
     AccountCategory,
     ConversationMessageRole,
@@ -81,6 +107,7 @@ from food_registry_bot.db.session import session_scope
 from food_registry_bot.db.repositories import (
     ConversationMessageRepository,
     ConversationSessionRepository,
+    CallbackStateRepository,
     DataExchangeFileRepository,
     EntryItemCreate,
     EntryItemMetricRepository,
@@ -89,11 +116,14 @@ from food_registry_bot.db.repositories import (
     KnownUserAccessView,
     LLMIssueLogCreate,
     LLMIssueLogRepository,
+    SupportedDietRepository,
     UserGoalPreferenceRepository,
     UserAccessRepository,
+    UserDietPreferenceRepository,
     UserLLMConnectionRepository,
     UserLLMProfileRepository,
     UserRepository,
+    SupportedDietView,
     UserSummaryPreferenceRepository,
 )
 from food_registry_bot.exchange import DataExchangeService, DuplicateDataRowError, DuplicateFileError, UnsupportedExchangeFileError
@@ -149,11 +179,24 @@ logger = logging.getLogger(__name__)
 default_extraction_service = StructuredPayloadExtractionService()
 default_nutrition_service = StaticNutritionEstimationService(raw_payload="")
 default_conversation_service = DisabledConversationService()
+default_diet_service = DisabledDietEvaluationService()
 default_message_routing_service = RuleBasedMessageRoutingService()
-NUTRITION_COACH_DISPLAY_NAME = "Нутрициолог"
 RECENT_ENTRIES_DEFAULT_COUNT = 5
 RECENT_ENTRIES_MAX_COUNT = 60
 RECENT_ENTRY_LIST_TITLE_MAX_LENGTH = 48
+RECENT_ITEM_PORTION_ADJUSTABLE_METRIC_CODES = frozenset({"calories", "protein", "fat", "carbs", "fiber"})
+RECENT_ITEM_100G_ADJUSTMENT_STEPS = {
+    "calories": 25,
+    "protein": 5,
+    "fat": 5,
+    "carbs": 5,
+}
+RECENT_ITEM_METRIC_PRESENTATION = {
+    "calories": ("калории", "ккал"),
+    "protein": ("белки", "г"),
+    "fat": ("жиры", "г"),
+    "carbs": ("углеводы", "г"),
+}
 SUMMARY_METRIC_LINES = (
     ("calories", "К", "ккал"),
     ("protein", "Б", "г"),
@@ -175,9 +218,15 @@ SUMMARY_DISPLAY_MODE_LABELS = {
     "bars": "бары",
 }
 BAR_MODE_LABELS = {
+    "День": "День",
     "К": "Ккал",
 }
 BAR_MODE_LABEL_WIDTH = 6
+DIET_BAR_MODE_LABELS = {
+    "low_purine": "Н.пур",
+    "insulin_resistance": "ИР",
+    "gastritis": "Гастр",
+}
 GOAL_STATUS_BELOW_EMOJI = "📉"
 GOAL_STATUS_WITHIN_EMOJI = "🎯"
 GOAL_STATUS_ABOVE_EMOJI = "📈"
@@ -199,6 +248,14 @@ LLM_MODEL_PLACEHOLDER = "<MODEL>"
 API_KEY_PLACEHOLDER = "<API_KEY>"
 PROVIDER_PLACEHOLDER = "<PROVIDER>"
 SUPPORTED_PERSONAL_PROVIDERS = (LLMProvider.OPENAI, LLMProvider.MISTRAL)
+SUPPORTED_DIET_METRIC_CODES = get_supported_diet_metric_codes()
+USER_LLM_CONTEXT_COMMENT_MAX_LENGTH = 1000
+SETTINGS_SECTION_ROOT = "root"
+SETTINGS_SECTION_GOALS = "goals"
+SETTINGS_SECTION_METRICS = "metrics"
+SETTINGS_SECTION_DISPLAY = "display"
+SETTINGS_SECTION_REPORTS = "reports"
+SETTINGS_SECTION_DIETS = "diets"
 
 
 class FoodWriteFlowError(RuntimeError):
@@ -346,8 +403,39 @@ async def safe_edit_message_text(message: Message, *, text: str, reply_markup) -
 
 
 async def safe_delete_message(message: Message) -> None:
+    delete = getattr(message, "delete", None)
+    if delete is None:
+        return
     with suppress(TelegramBadRequest):
-        await message.delete()
+        await delete()
+
+
+async def refresh_main_keyboard(message: Message) -> None:
+    keyboard_message = await message.answer("\u2060", reply_markup=build_main_keyboard())
+    await safe_delete_message(keyboard_message)
+
+
+async def safe_edit_message_by_id(
+    bot,
+    *,
+    chat_id: int | None,
+    message_id: int,
+    text: str,
+    reply_markup,
+) -> None:
+    if bot is None or chat_id is None or message_id <= 0:
+        return
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc) or "message to edit not found" in str(exc):
+            return
+        raise
 
 
 def build_ambiguous_message_response() -> str:
@@ -483,6 +571,30 @@ def parse_provider_save_command_args(command: CommandObject | None) -> tuple[str
     if not provider.strip() or not model.strip() or not api_key.strip():
         return None
     return provider.strip(), model.strip(), api_key.strip()
+
+
+def parse_llm_context_command_arg(command: CommandObject | None) -> str | None:
+    if command is None or command.args is None:
+        return None
+    value = command.args.strip()
+    if not value:
+        return None
+    return value
+
+
+def build_llm_context_response(*, user_context_comment: str | None) -> str:
+    if user_context_comment is None:
+        return (
+            "Пользовательский контекст для LLM пока не задан.\n"
+            "Чтобы сохранить его, отправь команду:\n"
+            f"<code>/context твой текст для ЛЛМ</code>"
+        )
+
+    return (
+        "Пользовательский контекст для LLM:\n"
+        f"{html.escape(user_context_comment)}\n\n"
+        "Чтобы заменить его, отправь /context с новым текстом."
+    )
 
 
 def resolve_effective_account_category(
@@ -1057,8 +1169,204 @@ def build_write_confirmation_response(
     if day_report is not None:
         parts.append(day_report)
     if coach_comment:
-        parts.append(f"{NUTRITION_COACH_DISPLAY_NAME}: {coach_comment}")
+        parts.append(coach_comment)
     return "\n\n".join(parts)
+
+
+def build_saved_items_from_entry(entry) -> list[EntryItemCreate]:
+    return [
+        EntryItemCreate(
+            name=item.name,
+            quantity=item.quantity,
+            unit=item.unit,
+            confidence=item.confidence,
+            source_type=item.source_type,
+        )
+        for item in sorted(entry.items, key=lambda current: current.position)
+    ]
+
+
+def build_extracted_workout_metric_lines_for_entry(entry) -> list[str]:
+    if entry.entry_type is not EntryType.WORKOUT:
+        return []
+    lines: list[str] = []
+    workout_calories = resolve_workout_metric_value(entry, "workout_calories")
+    if workout_calories > 0:
+        lines.append(f"- калории тренировки: {round(workout_calories, 1)} ккал")
+        lines.append(
+            f"- к компенсации питания: {round(calculate_default_workout_calorie_credit(workout_calories), 1)} ккал"
+        )
+    return lines
+
+
+def resolve_metric_deltas_for_entry(entry) -> dict[str, float]:
+    metric_deltas: dict[str, float] = {}
+    if entry.entry_type is EntryType.FOOD:
+        for item in entry.items:
+            for metric in item.metrics:
+                if metric.metric.code in SUPPORTED_NUTRITION_METRIC_CODES:
+                    metric_deltas[metric.metric.code] = metric_deltas.get(metric.metric.code, 0.0) + metric.value
+    if entry.entry_type is EntryType.WATER:
+        water_delta = sum(
+            item.quantity
+            for item in entry.items
+            if item.name == "water" and item.unit == "ml" and item.quantity is not None and item.quantity > 0
+        )
+        if water_delta > 0:
+            metric_deltas["water"] = float(water_delta)
+    return metric_deltas
+
+
+def entry_is_credit_eligible_workout(entry) -> bool:
+    return entry.entry_type is EntryType.WORKOUT and resolve_workout_metric_value(entry, "workout_calories") > 0
+
+
+def build_post_entry_confirmation_response(
+    *,
+    session: Session,
+    user,
+    summary_preference,
+    entry,
+    include_coach_comment: bool = True,
+) -> str:
+    saved_items = build_saved_items_from_entry(entry)
+    day_report: str | None = None
+    if entry.entry_type in {EntryType.FOOD, EntryType.WATER} or entry_is_credit_eligible_workout(entry):
+        summary_date = resolve_local_summary_date(
+            reference_at=entry.occurred_at,
+            timezone_name=user.timezone,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        )
+        day_report = build_daily_report_for_summary_date(
+            session=session,
+            user_id=user.id,
+            timezone_name=user.timezone,
+            summary_date=summary_date,
+            workout_logging_enabled=user.workout_logging_enabled,
+            summary_preference=summary_preference,
+            metric_deltas=resolve_metric_deltas_for_entry(entry),
+            diet_delta_entry_ids={entry.id} if entry.entry_type in {EntryType.FOOD, EntryType.WATER} else None,
+            confirmation_mode=True,
+        )
+    return build_write_confirmation_response(
+        saved_items,
+        extra_lines=build_extracted_workout_metric_lines_for_entry(entry),
+        day_report=day_report,
+        coach_comment=entry.llm_comment if include_coach_comment else None,
+    )
+
+
+def resolve_entry_average_diet_score(entry) -> float | None:
+    return resolve_weighted_average_diet_score(entry)
+
+
+def format_entry_average_diet_score(entry) -> str | None:
+    average_score = resolve_entry_average_diet_score(entry)
+    if average_score is None:
+        return None
+    return f"{average_score}/10"
+
+
+def format_signed_score_delta(delta_value: float) -> str:
+    rounded_delta = round(delta_value, 1)
+    sign = "+" if rounded_delta >= 0 else ""
+    return f"{sign}{rounded_delta}"
+
+
+def build_diet_score_bar_line(
+    summary: DietScoreSummary,
+    *,
+    delta_score: float | None = None,
+    show_delta_suffix: bool = True,
+    show_percentage: bool = True,
+) -> str:
+    score = summary.average_score
+    progress_ratio = score / 10
+    filled_cells = min(int(progress_ratio * 10), 10)
+    if delta_score is not None and delta_score != 0:
+        previous_score = min(max(score - delta_score, 0.0), 10.0)
+        previous_ratio = previous_score / 10
+        previous_filled_cells = min(int(previous_ratio * 10), 10)
+        if delta_score > 0:
+            stable_cells = min(previous_filled_cells, filled_cells)
+            delta_cells = max(filled_cells - stable_cells, 0)
+            empty_cells = 10 - filled_cells
+            base_bar = "[" + ("█" * stable_cells) + ("▓" * delta_cells) + ("░" * empty_cells) + "]"
+        else:
+            removed_cells = max(previous_filled_cells - filled_cells, 0)
+            empty_cells = 10 - previous_filled_cells
+            base_bar = "[" + ("█" * filled_cells) + ("▒" * removed_cells) + ("░" * empty_cells) + "]"
+    else:
+        empty_cells = 10 - filled_cells
+        base_bar = "[" + ("█" * filled_cells) + ("░" * empty_cells) + "]"
+    short_label = DIET_BAR_MODE_LABELS.get(summary.code, summary.name[:BAR_MODE_LABEL_WIDTH])
+    rendered_label = short_label.ljust(BAR_MODE_LABEL_WIDTH)
+    rendered_value = f"{round(progress_ratio * 100, 1)}%" if show_percentage else f"{round(score, 1)}/10"
+    line = f"{rendered_label} {base_bar} {rendered_value}"
+    if delta_score is not None and delta_score != 0 and show_delta_suffix:
+        line += f" ({format_signed_score_delta(delta_score)})"
+    return line
+
+
+def build_daily_diet_scores_block(
+    diet_score_summaries: list[DietScoreSummary],
+    *,
+    summary_display_mode: str,
+    diet_score_deltas: dict[str, float] | None = None,
+    show_post_entry_delta_suffix: bool = True,
+    title: str = "Диеты за день:",
+    show_bar_percentage: bool = True,
+) -> str | None:
+    if not diet_score_summaries:
+        return None
+
+    lines = [title]
+    if summary_display_mode == "bars":
+        lines.append(
+            "<pre>"
+            + html.escape(
+                "\n".join(
+                    build_diet_score_bar_line(
+                        summary,
+                        delta_score=None if diet_score_deltas is None else diet_score_deltas.get(summary.code),
+                        show_delta_suffix=show_post_entry_delta_suffix,
+                        show_percentage=show_bar_percentage,
+                    )
+                    for summary in diet_score_summaries
+                )
+            )
+            + "</pre>"
+        )
+        return "\n".join(lines)
+
+    for summary in diet_score_summaries:
+        line = f"- {summary.name.lower()}: {summary.average_score}/10"
+        delta_score = None if diet_score_deltas is None else diet_score_deltas.get(summary.code)
+        if delta_score is not None and delta_score != 0 and show_post_entry_delta_suffix:
+            line += f" ({format_signed_score_delta(delta_score)})"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def build_period_diet_scores_block(diet_score_summaries: list[DietScoreSummary]) -> str | None:
+    if not diet_score_summaries:
+        return None
+
+    lines = ["Диеты:"]
+    for summary in diet_score_summaries:
+        lines.append(
+            f"- {summary.name.lower()}: {summary.average_score}/10, "
+            f"оценённых позиций: {summary.item_count}, дней с оценкой: {summary.day_count}"
+        )
+    if any(summary.has_missing_scores for summary in diet_score_summaries):
+        lines.extend(
+            [
+                "",
+                "Диетический балл считается только по позициям с оценкой. "
+                "Часть записей периода без диетической оценки исключена.",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def format_entry_timestamp(entry, timezone_name: str) -> str:
@@ -1108,7 +1416,9 @@ def build_recent_entry_button_label(entry, timezone_name: str) -> str:
 
 def build_recent_entry_display_line(*, index: int, entry, timezone_name: str) -> str:
     title = truncate_button_label(build_recent_entry_title(entry), max_length=RECENT_ENTRY_LIST_TITLE_MAX_LENGTH)
-    return f"{index}. {format_entry_timestamp(entry, timezone_name)} — {title}"
+    average_diet_score = format_entry_average_diet_score(entry)
+    suffix = f" · диеты {average_diet_score}" if average_diet_score is not None else ""
+    return f"{index}. {format_entry_timestamp(entry, timezone_name)} — {title}{suffix}"
 
 
 def build_recent_entries_day_heading(*, entry, timezone_name: str, nutrition_day_start_hour: int) -> str:
@@ -1161,18 +1471,63 @@ def build_recent_entry_delete_confirmation(*, entry, timezone_name: str) -> str:
     )
 
 
+def build_deleted_entry_restore_message(entry) -> str:
+    return f"Была удалена запись: ({build_recent_entry_title(entry)})"
+
+
 def build_recent_entry_item_button_label(item) -> str:
     return truncate_button_label(format_saved_item_line(item.name, item.quantity, item.unit).removeprefix("- "))
 
 
-def build_recent_food_entry_response(*, entry, timezone_name: str) -> str:
+def resolve_entry_metric_totals(entry) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for item in sorted(entry.items, key=lambda current: current.position):
+        for metric in item.metrics:
+            metric_code = metric.metric.code if metric.metric is not None else None
+            if metric_code not in GOAL_METRIC_LABELS:
+                continue
+            totals[metric_code] = totals.get(metric_code, 0.0) + float(metric.value)
+    return totals
+
+
+def build_recent_entry_metric_total_lines(
+    *,
+    entry,
+    enabled_metric_codes: tuple[str, ...],
+) -> list[str]:
+    totals = resolve_entry_metric_totals(entry)
+    lines: list[str] = []
+    for metric_code, _short_label, unit in SUMMARY_METRIC_LINES:
+        if metric_code not in enabled_metric_codes:
+            continue
+        metric_value = totals.get(metric_code)
+        if metric_value is None:
+            continue
+        lines.append(f"- {GOAL_METRIC_LABELS[metric_code]}: {round(metric_value, 1)} {unit}")
+    return lines
+
+
+def build_recent_food_entry_response(
+    *,
+    entry,
+    timezone_name: str,
+    enabled_metric_codes: tuple[str, ...],
+) -> str:
     lines = [
         "Запись еды:",
         "",
         f"{format_entry_timestamp(entry, timezone_name)} — {build_recent_entry_title(entry)}",
-        "",
-        "Блюда:",
     ]
+    average_diet_score = format_entry_average_diet_score(entry)
+    if average_diet_score is not None:
+        lines.extend(["", f"Средний балл по диетам: {average_diet_score}"])
+    total_metric_lines = build_recent_entry_metric_total_lines(
+        entry=entry,
+        enabled_metric_codes=enabled_metric_codes,
+    )
+    if total_metric_lines:
+        lines.extend(["", "По всей записи:", *total_metric_lines])
+    lines.extend(["", "Блюда:"])
     for index, item in enumerate(sorted(entry.items, key=lambda current: current.position), start=1):
         lines.append(f"{index}. {format_saved_item_line(item.name, item.quantity, item.unit).removeprefix('- ')}")
     lines.extend(["", "Выбери блюдо."])
@@ -1204,13 +1559,66 @@ def build_recent_entry_selection_response(entries: list, *, timezone_name: str, 
 
 
 def build_recent_food_item_response(*, entry, item, timezone_name: str) -> str:
+    metrics_by_code = get_recent_item_metrics_by_code(item)
     lines = [
         "Блюдо:",
         "",
         f"{format_entry_timestamp(entry, timezone_name)} — {format_saved_item_line(item.name, item.quantity, item.unit).removeprefix('- ')}",
     ]
+    if metrics_by_code:
+        lines.extend(["", "За сохранённую порцию:"])
+        for metric_code in ("calories", "protein", "fat", "carbs"):
+            metric = metrics_by_code.get(metric_code)
+            if metric is None:
+                continue
+            metric_label, unit = RECENT_ITEM_METRIC_PRESENTATION[metric_code]
+            lines.append(f"- {metric_label}: {format_recent_metric_value(metric.value)} {unit}")
+    adjustable_metric_codes = get_recent_item_100g_adjustable_metric_codes(item)
+    if adjustable_metric_codes:
+        lines.extend(["", "На 100 г:"])
+        for metric_code in adjustable_metric_codes:
+            metric_label, unit = RECENT_ITEM_METRIC_PRESENTATION[metric_code]
+            value_per_100g = calculate_recent_item_metric_per_100g(item=item, metric_code=metric_code)
+            if value_per_100g is None:
+                continue
+            lines.append(f"- {metric_label}: {format_recent_metric_value(value_per_100g)} {unit}")
     if supports_recent_item_portion_adjustment(item):
-        lines.extend(["", "Можно изменить порцию кнопками ниже."])
+        lines.extend(["", "Кнопки порции выше меняют вес блюда и пересчитывают сохранённые значения."])
+    if adjustable_metric_codes:
+        lines.extend(["", 'Кнопки КБЖУ ниже меняют блок "На 100 г".'])
+        lines.extend(["После нажатия бот пересчитывает сохранённые значения за текущую порцию."])
+    return "\n".join(lines)
+
+
+RECENT_UNIQUE_ITEMS_LIMIT = 10
+RECENT_UNIQUE_ITEMS_SCAN_LIMIT = 100
+
+
+def collect_recent_unique_food_items(*, entries: list, limit: int = RECENT_UNIQUE_ITEMS_LIMIT) -> list[tuple[object, object]]:
+    unique_items: list[tuple[object, object]] = []
+    seen_names: set[str] = set()
+    for entry in entries:
+        if entry.entry_type is not EntryType.FOOD:
+            continue
+        for item in sorted(entry.items, key=lambda current: current.position):
+            normalized_name = item.name.strip().lower()
+            if normalized_name in seen_names:
+                continue
+            seen_names.add(normalized_name)
+            unique_items.append((entry, item))
+            if len(unique_items) >= limit:
+                return unique_items
+    return unique_items
+
+
+def build_recent_unique_item_selection_response(*, items: list[tuple[object, object]]) -> str:
+    if not items:
+        return "Пока нет недавних блюд, которые можно быстро повторить."
+
+    lines = ["Последние уникальные блюда:", ""]
+    for index, (_entry, item) in enumerate(items, start=1):
+        lines.append(f"{index}. {build_recent_entry_item_button_label(item)}")
+    lines.extend(["", "Выбери блюдо, чтобы добавить его отдельной записью."])
     return "\n".join(lines)
 
 
@@ -1248,9 +1656,11 @@ def build_recent_non_food_entry_response(*, entry, timezone_name: str) -> str:
         title,
         "",
         f"{format_entry_timestamp(entry, timezone_name)} — {build_recent_entry_title(entry)}",
-        "",
-        "Для этой записи сейчас доступно удаление целиком.",
     ]
+    average_diet_score = format_entry_average_diet_score(entry)
+    if average_diet_score is not None:
+        lines.extend(["", f"Средний балл по диетам: {average_diet_score}"])
+    lines.extend(["", "Для этой записи сейчас доступно удаление целиком."])
     return "\n".join(lines)
 
 
@@ -1292,25 +1702,44 @@ def build_today_summary_response_with_preferences(
     summary: DailyNutritionSummary,
     *,
     enabled_metric_codes: tuple[str, ...],
+    diet_score_summaries: list[DietScoreSummary] | None = None,
     summary_display_mode: str = "text",
     goal_progress: DailyNutritionGoalProgress | None = None,
     water_summary: DailyWaterSummary | None = None,
+    day_progress_bar_line: str | None = None,
     metric_deltas: dict[str, float] | None = None,
+    diet_score_deltas: dict[str, float] | None = None,
     show_post_entry_delta_suffix: bool = True,
     force_render_summary: bool = False,
+    confirmation_mode: bool = False,
 ) -> str:
+    diet_block = build_daily_diet_scores_block(
+        diet_score_summaries or [],
+        summary_display_mode=summary_display_mode,
+        diet_score_deltas=diet_score_deltas,
+        show_post_entry_delta_suffix=show_post_entry_delta_suffix,
+        title=(
+            "Средний балл пользы по диетам (0 - не полезно, 10 - полезно):"
+            if confirmation_mode
+            else "Диеты за день:"
+        ),
+        show_bar_percentage=not confirmation_mode,
+    )
     if (
         summary.included_entry_count == 0
         and summary.excluded_entry_count == 0
         and (water_summary is None or (
             water_summary.included_entry_count == 0 and water_summary.excluded_entry_count == 0
         ))
+        and diet_block is None
         and not force_render_summary
     ):
         return "За текущий день пока нет записей. Отправь еду, фото блюда или воду."
-    if not enabled_metric_codes:
+    if not enabled_metric_codes and diet_block is None:
         return "В summary сейчас всё скрыто. Включи хотя бы один показатель в /settings."
     lines: list[str] = []
+    if summary_display_mode == "bars" and day_progress_bar_line is not None:
+        lines.append(day_progress_bar_line)
     for metric_code, short_label, unit in SUMMARY_METRIC_LINES:
         if metric_code not in enabled_metric_codes:
             continue
@@ -1349,7 +1778,11 @@ def build_today_summary_response_with_preferences(
             line += f" (+{round(metric_delta, 1)} {unit})"
         lines.append(line)
 
-    rendered_summary = "<pre>" + html.escape("\n".join(lines)) + "</pre>"
+    parts: list[str] = []
+    if lines:
+        parts.append("<pre>" + html.escape("\n".join(lines)) + "</pre>")
+    if diet_block is not None:
+        parts.append(diet_block)
 
     incompleteness_notes: list[str] = []
     if not summary.is_complete:
@@ -1361,9 +1794,9 @@ def build_today_summary_response_with_preferences(
             f"Есть записей воды с неподдерживаемым форматом: {water_summary.excluded_entry_count}. Итог воды пока неполный."
         )
     if incompleteness_notes:
-        return "\n\n".join([rendered_summary, *incompleteness_notes])
+        return "\n\n".join([*parts, *incompleteness_notes])
 
-    return rendered_summary
+    return "\n\n".join(parts)
 
 
 def get_enabled_summary_metric_codes(preference) -> tuple[str, ...]:
@@ -1374,7 +1807,41 @@ def get_enabled_summary_metric_codes(preference) -> tuple[str, ...]:
     return tuple(enabled_metric_codes)
 
 
-def build_summary_settings_response(
+def build_settings_root_response() -> str:
+    return (
+        "Настройки:\n"
+        "- Цели: дневные цели по калориям, БЖУ, клетчатке и воде.\n"
+        "- Метрики: какие показатели учитывать в итогах дня и отчётах.\n"
+        "- Отображение: формат summary, прогресс дня и дельта после записи.\n"
+        "- Отчёты: начало пищевого дня, допуск к цели и порог заметных записей.\n"
+        "- Диеты: какие диетические оценки учитывать.\n\n"
+        "Другие команды:\n"
+        "- /provider — управление LLM-подключениями.\n"
+        "- /context — пользовательский контекст для LLM.\n"
+        "- /files — импорт и экспорт данных.\n"
+        "- /ping — техническая проверка доступности.\n\n"
+        "Выбери раздел кнопкой ниже."
+    )
+
+
+def build_settings_goals_response(*, goal_preference) -> str:
+    return "\n".join(
+        [
+            "Раздел «Цели»:",
+            "Настрой дневные цели кнопками ниже.",
+            "Шаг изменения: 100 ккал, 10 г для БЖУ и клетчатки, 100 мл для воды.",
+            "",
+            f"- калории: {goal_preference.calorie_goal} ккал",
+            f"- белки: {goal_preference.protein_goal} г",
+            f"- жиры: {goal_preference.fat_goal} г",
+            f"- углеводы: {goal_preference.carbs_goal} г",
+            f"- клетчатка: {goal_preference.fiber_goal} г",
+            f"- вода: {goal_preference.water_goal} мл",
+        ]
+    )
+
+
+def build_settings_metrics_response(
     *,
     workout_logging_enabled: bool,
     show_calories: bool,
@@ -1383,33 +1850,73 @@ def build_summary_settings_response(
     show_carbs: bool,
     show_fiber: bool,
     show_water: bool,
-    show_post_entry_delta_suffix: bool,
-    summary_display_mode: str,
-    nutrition_day_start_hour: int,
-    report_goal_tolerance_percent: int,
-    report_noticeable_entry_percentile: int,
 ) -> str:
-    statuses = {
-        True: "включено",
-        False: "выключено",
-    }
+    statuses = {True: "включено", False: "выключено"}
     return "\n".join(
         [
-            "Настройки summary:",
-            f"- тренировки: {statuses[workout_logging_enabled]}",
+            "Раздел «Метрики»:",
+            "Здесь выбирается, какие показатели бот показывает и учитывает в summary и отчётах.",
+            "",
             f"- калории: {statuses[show_calories]}",
             f"- белки: {statuses[show_protein]}",
             f"- жиры: {statuses[show_fat]}",
             f"- углеводы: {statuses[show_carbs]}",
             f"- клетчатка: {statuses[show_fiber]}",
             f"- вода: {statuses[show_water]}",
+            f"- тренировки: {statuses[workout_logging_enabled]}",
+        ]
+    )
+
+
+def build_settings_display_response(
+    *,
+    show_day_progress_bar: bool,
+    summary_display_mode: str,
+    show_post_entry_delta_suffix: bool,
+) -> str:
+    statuses = {True: "включено", False: "выключено"}
+    return "\n".join(
+        [
+            "Раздел «Отображение»:",
+            "Эти настройки меняют вид ответа бота, но не сами данные.",
+            "",
+            f"- прогресс дня: {statuses[show_day_progress_bar]}",
+            f"- текст/бары: {SUMMARY_DISPLAY_MODE_LABELS[summary_display_mode]}",
             f"- дельта записи: {statuses[show_post_entry_delta_suffix]}",
-            f"- отображение: {SUMMARY_DISPLAY_MODE_LABELS[summary_display_mode]}",
+        ]
+    )
+
+
+def build_settings_reports_response(
+    *,
+    nutrition_day_start_hour: int,
+    report_goal_tolerance_percent: int,
+    report_noticeable_entry_percentile: int,
+) -> str:
+    return "\n".join(
+        [
+            "Раздел «Отчёты»:",
+            "Эти параметры влияют на границы дня и на чувствительность периодических отчётов.",
+            "",
             f"- начало дня: {nutrition_day_start_hour:02d}:00",
             f"- допуск к цели: {report_goal_tolerance_percent}%",
             f"- порог заметных записей: {report_noticeable_entry_percentile}%",
         ]
     )
+
+
+def build_settings_diets_response(*, diets: list[SupportedDietView]) -> str:
+    statuses = {True: "включено", False: "выключено"}
+    lines = [
+        "Раздел «Диеты»:",
+        "Включённые диеты используются в оценке записей и дневных итогов.",
+        "",
+    ]
+    if not diets:
+        lines.append("Поддержанные диеты пока недоступны.")
+        return "\n".join(lines)
+    lines.extend(f"- {diet.name.lower()}: {statuses[diet.is_selected]}" for diet in diets)
+    return "\n".join(lines)
 
 
 def build_metric_progress_bar_line(
@@ -1428,6 +1935,32 @@ def build_metric_progress_bar_line(
     percentage = round(progress_ratio * 100, 1)
     rendered_label = BAR_MODE_LABELS.get(short_label, short_label).ljust(BAR_MODE_LABEL_WIDTH)
     return f"{rendered_label} {base_bar}{overflow_bar} {percentage}% {round(consumed, 1)}/{goal} {unit}"
+
+
+def build_day_progress_bar_line(
+    *,
+    reference_at: datetime,
+    timezone_name: str,
+    summary_date: date,
+    nutrition_day_start_hour: int,
+) -> str:
+    day_start_at, day_end_at = resolve_day_bounds_utc(
+        summary_date=summary_date,
+        timezone_name=timezone_name,
+        nutrition_day_start_hour=nutrition_day_start_hour,
+    )
+    normalized_reference_at = (
+        reference_at if reference_at.tzinfo is not None else reference_at.replace(tzinfo=timezone.utc)
+    )
+    elapsed_seconds = max((normalized_reference_at - day_start_at).total_seconds(), 0.0)
+    total_seconds = max((day_end_at - day_start_at).total_seconds(), 1.0)
+    progress_ratio = min(elapsed_seconds / total_seconds, 1.0)
+    filled_cells = min(int(progress_ratio * 10), 10)
+    empty_cells = 10 - filled_cells
+    base_bar = "[" + ("█" * filled_cells) + ("░" * empty_cells) + "]"
+    percentage = round(progress_ratio * 100, 1)
+    rendered_label = BAR_MODE_LABELS["День"].ljust(BAR_MODE_LABEL_WIDTH)
+    return f"{rendered_label} {base_bar} {percentage}%"
 
 
 def build_metric_progress_delta_bar_line(
@@ -1494,6 +2027,273 @@ def payload_contains_food_or_water_entries(payload) -> bool:
     return any(entry.type in {EntryType.FOOD, EntryType.WATER} for entry in payload.entries)
 
 
+def build_diet_buttons(diets: list[SupportedDietView]) -> list[tuple[str, str, bool]]:
+    return [(diet.code, diet.name, diet.is_selected) for diet in diets]
+
+
+def resolve_settings_section(action: str) -> str:
+    if action in {
+        "open_goals",
+        "goal_dec_calories",
+        "goal_half_dec_calories",
+        "goal_half_inc_calories",
+        "goal_inc_calories",
+        "goal_dec_protein",
+        "goal_half_dec_protein",
+        "goal_half_inc_protein",
+        "goal_inc_protein",
+        "goal_dec_fat",
+        "goal_half_dec_fat",
+        "goal_half_inc_fat",
+        "goal_inc_fat",
+        "goal_dec_carbs",
+        "goal_half_dec_carbs",
+        "goal_half_inc_carbs",
+        "goal_inc_carbs",
+        "goal_dec_fiber",
+        "goal_half_dec_fiber",
+        "goal_half_inc_fiber",
+        "goal_inc_fiber",
+        "goal_dec_water",
+        "goal_half_dec_water",
+        "goal_half_inc_water",
+        "goal_inc_water",
+    }:
+        return SETTINGS_SECTION_GOALS
+    if action in {
+        "open_metrics",
+        "toggle_calories",
+        "toggle_protein",
+        "toggle_fat",
+        "toggle_carbs",
+        "toggle_fiber",
+        "toggle_water",
+        "toggle_workout_logging",
+    }:
+        return SETTINGS_SECTION_METRICS
+    if action in {"open_display", "toggle_day_progress_bar", "toggle_post_entry_delta_suffix", "cycle_summary_display_mode"}:
+        return SETTINGS_SECTION_DISPLAY
+    if action in {
+        "open_reports",
+        "cycle_nutrition_day_start_hour",
+        "cycle_report_goal_tolerance_percent",
+        "cycle_report_noticeable_entry_percentile",
+    }:
+        return SETTINGS_SECTION_REPORTS
+    if action == "open_diets" or action.startswith("toggle_diet_"):
+        return SETTINGS_SECTION_DIETS
+    return SETTINGS_SECTION_ROOT
+
+
+def adjust_goal_value(*, current_value: int, delta: int, minimum_value: int) -> int:
+    return max(current_value + delta, minimum_value)
+
+
+def build_settings_response(
+    *,
+    section: str,
+    goal_preference,
+    preference,
+    diets: list[SupportedDietView],
+    workout_logging_enabled: bool,
+) -> str:
+    if section == SETTINGS_SECTION_GOALS:
+        return build_settings_goals_response(goal_preference=goal_preference)
+    if section == SETTINGS_SECTION_METRICS:
+        return build_settings_metrics_response(
+            workout_logging_enabled=workout_logging_enabled,
+            show_calories=preference.show_calories,
+            show_protein=preference.show_protein,
+            show_fat=preference.show_fat,
+            show_carbs=preference.show_carbs,
+            show_fiber=preference.show_fiber,
+            show_water=preference.show_water,
+        )
+    if section == SETTINGS_SECTION_DISPLAY:
+        return build_settings_display_response(
+            show_day_progress_bar=preference.show_day_progress_bar,
+            summary_display_mode=preference.summary_display_mode,
+            show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
+        )
+    if section == SETTINGS_SECTION_REPORTS:
+        return build_settings_reports_response(
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
+            report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
+            report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
+        )
+    if section == SETTINGS_SECTION_DIETS:
+        return build_settings_diets_response(diets=diets)
+    return build_settings_root_response()
+
+
+def build_settings_reply_markup(
+    *,
+    section: str,
+    goal_preference,
+    preference,
+    diets: list[SupportedDietView],
+    workout_logging_enabled: bool,
+):
+    if section == SETTINGS_SECTION_GOALS:
+        return build_settings_goals_keyboard(
+            calorie_goal=goal_preference.calorie_goal,
+            protein_goal=goal_preference.protein_goal,
+            fat_goal=goal_preference.fat_goal,
+            carbs_goal=goal_preference.carbs_goal,
+            fiber_goal=goal_preference.fiber_goal,
+            water_goal=goal_preference.water_goal,
+        )
+    if section == SETTINGS_SECTION_METRICS:
+        return build_settings_metrics_keyboard(
+            show_calories=preference.show_calories,
+            show_protein=preference.show_protein,
+            show_fat=preference.show_fat,
+            show_carbs=preference.show_carbs,
+            show_fiber=preference.show_fiber,
+            show_water=preference.show_water,
+            workout_logging_enabled=workout_logging_enabled,
+        )
+    if section == SETTINGS_SECTION_DISPLAY:
+        return build_settings_display_keyboard(
+            show_day_progress_bar=preference.show_day_progress_bar,
+            summary_display_mode=preference.summary_display_mode,
+            show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
+        )
+    if section == SETTINGS_SECTION_REPORTS:
+        return build_settings_reports_keyboard(
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
+            report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
+            report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
+        )
+    if section == SETTINGS_SECTION_DIETS:
+        return build_settings_diets_keyboard(diet_buttons=build_diet_buttons(diets))
+    return build_settings_root_keyboard()
+
+
+def load_settings_state(*, session: Session, user_id: int, user):
+    preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+    goal_preference, _created = UserGoalPreferenceRepository(session).get_or_create(user_id=user_id)
+    diets = UserDietPreferenceRepository(session).list_diets_for_user(user_id=user_id)
+    return user, preference, goal_preference, diets
+
+
+def resolve_diet_service(
+    *,
+    settings: Settings | None,
+    runtime_bundle,
+    fallback_diet_service: DietEvaluationService,
+) -> DietEvaluationService:
+    if settings is None:
+        return fallback_diet_service
+    if runtime_bundle is None or runtime_bundle.conversation_access is None:
+        return fallback_diet_service
+    access = runtime_bundle.conversation_access
+    if not access.is_available or access.api_key is None or access.model is None:
+        return fallback_diet_service
+    return create_diet_service_for_provider_access(
+        provider=access.provider,
+        api_key=access.api_key,
+        model=access.model,
+        settings=settings,
+    )
+
+
+def build_diet_evaluation_request_for_supported_diets(entries: list, diets: list) -> DietEvaluationRequest | None:
+    if not entries or not diets:
+        return None
+
+    diet_inputs: list[DietDefinitionInput] = []
+    for diet in diets:
+        definition = get_supported_diet_definition(diet.code)
+        diet_inputs.append(
+            DietDefinitionInput(
+                code=definition.code,
+                name=definition.name,
+                metric_code=definition.metric_code,
+                description=definition.description,
+                scoring_guidance=definition.scoring_guidance,
+            )
+        )
+
+    items: list[DietEvaluationItemInput] = []
+    for entry in entries:
+        for item in sorted(entry.items, key=lambda current: current.position):
+            if item.name == "water":
+                continue
+            items.append(
+                DietEvaluationItemInput(
+                    client_item_id=f"entry-{entry.id}:item-{item.position}",
+                    name=item.name,
+                    quantity=item.quantity,
+                    unit=item.unit,
+                )
+            )
+
+    if not items:
+        return None
+
+    return DietEvaluationRequest(diets=diet_inputs, items=items)
+
+
+def build_fixed_diet_payload_for_water_entries(entries: list, diets: list) -> DietEvaluationPayload | None:
+    if not entries or not diets:
+        return None
+
+    item_results: list[DietEvaluationItemResult] = []
+    for entry in entries:
+        for item in sorted(entry.items, key=lambda current: current.position):
+            if item.name != "water":
+                continue
+            scores = []
+            for diet in diets:
+                definition = get_supported_diet_definition(diet.code)
+                if definition.water_score is None:
+                    continue
+                scores.append(
+                    DietScoreResult(
+                        code=definition.metric_code,
+                        value=definition.water_score,
+                        confidence="high",
+                    )
+                )
+            if not scores:
+                continue
+            item_results.append(
+                DietEvaluationItemResult(
+                    client_item_id=f"entry-{entry.id}:item-{item.position}",
+                    scores=scores,
+                )
+            )
+
+    if not item_results:
+        return None
+    return DietEvaluationPayload(items=item_results)
+
+
+def persist_diet_scores(*, session: Session, entries: list, evaluation_payload) -> None:
+    item_id_by_client_item_id = {
+        f"entry-{entry.id}:item-{item.position}": item.id
+        for entry in entries
+        for item in entry.items
+    }
+    repository = EntryItemMetricRepository(session)
+    for item_result in evaluation_payload.items:
+        entry_item_id = item_id_by_client_item_id.get(item_result.client_item_id)
+        if entry_item_id is None:
+            continue
+        repository.upsert_metrics(
+            entry_item_id=entry_item_id,
+            metric_values=[
+                EntryItemMetricValue(
+                    code=score.code,
+                    value=score.value,
+                    confidence=score.confidence,
+                )
+                for score in item_result.scores
+            ],
+        )
+
+
 def resolve_metric_deltas(
     *,
     saved_items: list[EntryItemCreate],
@@ -1531,6 +2331,42 @@ def resolve_summary_dates_for_occurred_at_values(
     }
 
 
+def resolve_diet_score_deltas(
+    *,
+    entries: list,
+    new_entry_ids: set[int],
+    timezone_name: str,
+    nutrition_day_start_hour: int,
+) -> dict[str, float]:
+    if not entries or not new_entry_ids:
+        return {}
+
+    current_by_code = {
+        summary.code: summary
+        for summary in summarize_diet_scores(
+            entries=entries,
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
+        )
+    }
+    previous_entries = [entry for entry in entries if entry.id not in new_entry_ids]
+    previous_by_code = {
+        summary.code: summary
+        for summary in summarize_diet_scores(
+            entries=previous_entries,
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=nutrition_day_start_hour,
+        )
+    }
+
+    deltas: dict[str, float] = {}
+    for code, summary in current_by_code.items():
+        previous_summary = previous_by_code.get(code)
+        previous_average = 0.0 if previous_summary is None else previous_summary.average_score
+        deltas[code] = round(summary.average_score - previous_average, 1)
+    return deltas
+
+
 def build_daily_report_for_summary_date(
     *,
     session: Session,
@@ -1539,16 +2375,19 @@ def build_daily_report_for_summary_date(
     summary_date: date,
     workout_logging_enabled: bool,
     summary_preference,
+    reference_at: datetime | None = None,
     metric_deltas: dict[str, float] | None = None,
+    diet_delta_entry_ids: set[int] | None = None,
+    confirmation_mode: bool = False,
 ) -> str:
+    occurred_at_from, occurred_at_to = resolve_day_bounds_utc(
+        summary_date=summary_date,
+        timezone_name=timezone_name,
+        nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+    )
     workout_entries = []
     workout_calorie_credit_total = 0
     if workout_logging_enabled:
-        occurred_at_from, occurred_at_to = resolve_day_bounds_utc(
-            summary_date=summary_date,
-            timezone_name=timezone_name,
-            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-        )
         workout_entries = EntryRepository(session).list_workout_for_user_between(
             user_id=user_id,
             occurred_at_from=occurred_at_from,
@@ -1588,15 +2427,59 @@ def build_daily_report_for_summary_date(
         snapshot=goal_snapshot,
         calorie_goal_adjustment=workout_calorie_credit_total,
     )
+    normalized_reference_at = reference_at or datetime.now(timezone.utc)
+    diet_entries = [
+        *EntryRepository(session).list_food_for_user_between(
+            user_id=user_id,
+            occurred_at_from=occurred_at_from,
+            occurred_at_to=occurred_at_to,
+        ),
+        *EntryRepository(session).list_water_for_user_between(
+            user_id=user_id,
+            occurred_at_from=occurred_at_from,
+            occurred_at_to=occurred_at_to,
+        ),
+    ]
+    diet_score_summaries = summarize_diet_scores(
+        entries=diet_entries,
+        timezone_name=timezone_name,
+        nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+    )
+    diet_score_deltas = resolve_diet_score_deltas(
+        entries=diet_entries,
+        new_entry_ids=diet_delta_entry_ids or set(),
+        timezone_name=timezone_name,
+        nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+    )
+    day_progress_bar_line = None
+    if (
+        summary_preference.show_day_progress_bar
+        and summary_preference.summary_display_mode == "bars"
+        and summary_date == resolve_local_summary_date(
+            reference_at=normalized_reference_at,
+            timezone_name=timezone_name,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        )
+    ):
+        day_progress_bar_line = build_day_progress_bar_line(
+            reference_at=normalized_reference_at,
+            timezone_name=timezone_name,
+            summary_date=summary_date,
+            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
+        )
     summary_report = build_today_summary_response_with_preferences(
         summary,
         enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
+        diet_score_summaries=diet_score_summaries,
         summary_display_mode=summary_preference.summary_display_mode,
         goal_progress=goal_progress,
         water_summary=water_summary,
+        day_progress_bar_line=day_progress_bar_line,
         metric_deltas=metric_deltas,
+        diet_score_deltas=diet_score_deltas,
         show_post_entry_delta_suffix=summary_preference.show_post_entry_delta_suffix,
         force_render_summary=workout_calorie_credit_total > 0,
+        confirmation_mode=confirmation_mode,
     )
     if not workout_logging_enabled:
         return summary_report
@@ -1627,13 +2510,15 @@ def build_period_report_response(
     show_water = "water" in enabled_metric_codes
     has_any_metric_to_render = show_nutrition_metrics or show_water
     has_any_workout_data = workout_logging_enabled and report.workout_entry_count > 0
-    if not has_any_metric_to_render and not has_any_workout_data:
+    diet_block = build_period_diet_scores_block(report.diet_score_summaries)
+    if not has_any_metric_to_render and not has_any_workout_data and diet_block is None:
         return "В summary сейчас всё скрыто. Включи хотя бы один показатель в /settings."
 
     has_visible_data = (
         (show_nutrition_metrics and report.food_data_day_count > 0)
         or (show_water and report.water_data_day_count > 0)
         or has_any_workout_data
+        or diet_block is not None
     )
     if not has_visible_data:
         return "За этот период пока нет данных по включённым показателям."
@@ -1672,6 +2557,9 @@ def build_period_report_response(
 
     if average_lines:
         lines.extend(["", "Среднее по дням с данными", *average_lines])
+
+    if diet_block is not None:
+        lines.extend(["", diet_block])
 
     goal_lines: list[str] = []
     for metric_code in enabled_metric_codes:
@@ -1845,6 +2733,40 @@ def payload_contains_credit_eligible_workout_entries(payload) -> bool:
     return False
 
 
+RECENT_ACTION_STATE_SCOPE = "recent_action"
+
+
+def create_recent_action_callback_data(
+    *,
+    state_repository: CallbackStateRepository,
+    action: str,
+    values: dict[str, object],
+) -> str:
+    state = state_repository.create(scope=RECENT_ACTION_STATE_SCOPE, values=values)
+    return RecentEntryStateCallback(action=action, state_key=state.state_key).pack()
+
+
+def resolve_recent_action_callback_data(
+    *,
+    payload: dict[str, object] | None,
+    action: str,
+) -> RecentEntryActionCallback:
+    state_values = {} if payload is None else payload
+    return RecentEntryActionCallback(
+        action=action,
+        entry_id=int(state_values.get("entry_id", 0)),
+        item_position=int(state_values.get("item_position", 0)),
+        page=int(state_values.get("page", 0)),
+        count=int(state_values.get("count", 5)),
+        metric_code=str(state_values.get("metric_code", "")),
+        delta=int(state_values.get("delta", 0)),
+        open_in_new_message=int(state_values.get("open_in_new_message", 0)),
+        parent_message_id=int(state_values.get("parent_message_id", 0)),
+        origin=str(state_values.get("origin", "")),
+        root_entry_id=int(state_values.get("root_entry_id", 0)),
+    )
+
+
 def resolve_recent_entry_for_callback(
     *,
     entry_repository: EntryRepository,
@@ -1852,6 +2774,489 @@ def resolve_recent_entry_for_callback(
     entry_id: int,
 ):
     return entry_repository.get_by_id_for_user(entry_id=entry_id, user_id=user_id)
+
+
+async def render_post_entry_root_message(
+    *,
+    callback: CallbackQuery,
+    session: Session,
+    user,
+    summary_preference,
+    entry_repository: EntryRepository,
+    root_entry_id: int,
+) -> None:
+    root_entry = resolve_recent_entry_for_callback(
+        entry_repository=entry_repository,
+        user_id=user.id,
+        entry_id=root_entry_id,
+    )
+    if root_entry is None:
+        await safe_edit_message_text(callback.message, text="Эта запись уже недоступна.", reply_markup=None)
+        return
+    await safe_edit_message_text(
+        callback.message,
+        text=build_post_entry_confirmation_response(
+            session=session,
+            user=user,
+            summary_preference=summary_preference,
+            entry=root_entry,
+        ),
+        reply_markup=build_post_entry_details_keyboard(
+            details_callback_data=create_recent_action_callback_data(
+                state_repository=CallbackStateRepository(session),
+                action="open_entry",
+                values={
+                    "entry_id": root_entry.id,
+                    "origin": "post_entry",
+                    "root_entry_id": root_entry.id,
+                },
+            )
+        ),
+    )
+
+
+def resolve_recent_repeat_reply_message_id(*, callback: CallbackQuery, parent_message_id: int = 0) -> int | None:
+    if parent_message_id > 0:
+        return parent_message_id
+    callback_message = callback.message
+    if callback_message is None:
+        return None
+    message_id = getattr(callback_message, "message_id", None)
+    if isinstance(message_id, int) and message_id > 0:
+        return message_id
+    return None
+
+
+async def send_recent_repeat_confirmation(
+    *,
+    callback: CallbackQuery,
+    session: Session,
+    user,
+    summary_preference,
+    saved_entry,
+    parent_message_id: int = 0,
+) -> None:
+    details_callback_data = create_recent_action_callback_data(
+        state_repository=CallbackStateRepository(session),
+        action="open_entry",
+        values={
+            "entry_id": saved_entry.id,
+            "origin": "post_entry",
+            "root_entry_id": saved_entry.id,
+        },
+    )
+    reply_message_id = resolve_recent_repeat_reply_message_id(
+        callback=callback,
+        parent_message_id=parent_message_id,
+    )
+    reply_kwargs = {} if reply_message_id is None else {"reply_to_message_id": reply_message_id}
+    await callback.message.answer(
+        build_post_entry_confirmation_response(
+            session=session,
+            user=user,
+            summary_preference=summary_preference,
+            entry=saved_entry,
+            include_coach_comment=False,
+        ),
+        reply_markup=build_post_entry_details_keyboard(details_callback_data=details_callback_data),
+        **reply_kwargs,
+    )
+
+
+def build_recent_action_selection_reply_markup(
+    *,
+    session: Session,
+    entries: list,
+    timezone_name: str,
+    page: int,
+    count: int,
+    has_previous_page: bool,
+    has_next_page: bool,
+    origin: str = "",
+    root_entry_id: int = 0,
+):
+    state_repository = CallbackStateRepository(session)
+    entry_buttons = [
+        (
+            build_recent_entry_button_label(entry, timezone_name),
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="open_entry",
+                values={
+                    "entry_id": entry.id,
+                    "page": page,
+                    "count": count,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            ),
+        )
+        for entry in entries
+    ]
+    navigation_row = build_recent_entry_action_navigation_row(
+        previous_callback_data=(
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="open_entries",
+                values={
+                    "page": page - 1,
+                    "count": count,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            )
+            if has_previous_page
+            else None
+        ),
+        next_callback_data=(
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="open_entries",
+                values={
+                    "page": page + 1,
+                    "count": count,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            )
+            if has_next_page
+            else None
+        ),
+    )
+    return build_recent_entry_action_selection_keyboard(
+        entry_buttons=entry_buttons,
+        navigation_row=navigation_row or None,
+        back_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="back_to_list",
+            values={
+                "page": page,
+                "count": count,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+        close_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="close",
+            values={
+                "page": page,
+                "count": count,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+    )
+
+
+def build_recent_unique_item_selection_reply_markup(
+    *,
+    session: Session,
+    items: list[tuple[object, object]],
+    page: int,
+    count: int,
+):
+    state_repository = CallbackStateRepository(session)
+    item_buttons = [
+        (
+            build_recent_entry_item_button_label(item),
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="repeat_item",
+                values={
+                    "entry_id": entry.id,
+                    "item_position": item.position,
+                    "page": page,
+                    "count": count,
+                },
+            ),
+        )
+        for entry, item in items
+    ]
+    return build_recent_entry_action_selection_keyboard(
+        entry_buttons=item_buttons,
+        navigation_row=None,
+        back_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="back_to_list",
+            values={"page": page, "count": count},
+        ),
+        close_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="close",
+            values={"page": page, "count": count},
+        ),
+    )
+
+
+def build_recent_food_entry_reply_markup(
+    *,
+    session: Session,
+    entry,
+    page: int,
+    count: int,
+    parent_message_id: int = 0,
+    origin: str = "",
+    root_entry_id: int = 0,
+    include_back_button: bool = True,
+):
+    state_repository = CallbackStateRepository(session)
+    item_buttons = [
+        (
+            build_recent_entry_item_button_label(item),
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="open_item",
+                values={
+                    "entry_id": entry.id,
+                    "item_position": item.position,
+                    "page": page,
+                    "count": count,
+                    "open_in_new_message": 1,
+                    "parent_message_id": parent_message_id,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            ),
+        )
+        for item in sorted(entry.items, key=lambda current: current.position)
+    ]
+    return build_recent_food_entry_keyboard(
+        item_buttons=item_buttons,
+        repeat_entry_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="repeat_entry",
+            values={
+                "entry_id": entry.id,
+                "page": page,
+                "count": count,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+        delete_entry_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="delete_entry",
+            values={
+                "entry_id": entry.id,
+                "page": page,
+                "count": count,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+        back_callback_data=(
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="open_entries",
+                values={
+                    "page": page,
+                    "count": count,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            )
+            if include_back_button
+            else None
+        ),
+        close_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="close",
+            values={
+                "page": page,
+                "count": count,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+        include_back_button=include_back_button,
+    )
+
+
+def build_recent_non_food_entry_reply_markup(
+    *,
+    session: Session,
+    entry,
+    page: int,
+    count: int,
+    origin: str = "",
+    root_entry_id: int = 0,
+    include_back_button: bool = True,
+):
+    state_repository = CallbackStateRepository(session)
+    return build_recent_non_food_entry_keyboard(
+        delete_entry_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="delete_entry",
+            values={
+                "entry_id": entry.id,
+                "page": page,
+                "count": count,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+        back_callback_data=(
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="open_entries",
+                values={
+                    "page": page,
+                    "count": count,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            )
+            if include_back_button
+            else None
+        ),
+        close_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="close",
+            values={
+                "page": page,
+                "count": count,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+        include_back_button=include_back_button,
+    )
+
+
+def build_recent_food_item_reply_markup(
+    *,
+    session: Session,
+    entry,
+    item,
+    page: int,
+    count: int,
+    parent_message_id: int = 0,
+    origin: str = "",
+    root_entry_id: int = 0,
+):
+    state_repository = CallbackStateRepository(session)
+    metric_button_specs = {
+        "calories": ("-25 ккал/100г", "+25 ккал/100г", 25),
+        "protein": ("-5г Б/100г", "+5г Б/100г", 5),
+        "fat": ("-5г Ж/100г", "+5г Ж/100г", 5),
+        "carbs": ("-5г У/100г", "+5г У/100г", 5),
+    }
+    adjustable_metric_codes = get_recent_item_100g_adjustable_metric_codes(item)
+    metric_adjustment_buttons = [
+        (
+            metric_button_specs[metric_code][0],
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="adjust_100g",
+                values={
+                    "entry_id": entry.id,
+                    "item_position": item.position,
+                    "page": page,
+                    "count": count,
+                    "metric_code": metric_code,
+                    "delta": -metric_button_specs[metric_code][2],
+                    "parent_message_id": parent_message_id,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            ),
+            metric_button_specs[metric_code][1],
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="adjust_100g",
+                values={
+                    "entry_id": entry.id,
+                    "item_position": item.position,
+                    "page": page,
+                    "count": count,
+                    "metric_code": metric_code,
+                    "delta": metric_button_specs[metric_code][2],
+                    "parent_message_id": parent_message_id,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            ),
+        )
+        for metric_code in adjustable_metric_codes
+    ]
+    return build_recent_food_item_keyboard(
+        unit=item.unit,
+        can_adjust_portion=supports_recent_item_portion_adjustment(item),
+        adjustable_metric_codes=adjustable_metric_codes,
+        delete_item_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="delete_item",
+            values={
+                "entry_id": entry.id,
+                "item_position": item.position,
+                "page": page,
+                "count": count,
+                "parent_message_id": parent_message_id,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+        repeat_item_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="repeat_item",
+            values={
+                "entry_id": entry.id,
+                "item_position": item.position,
+                "page": page,
+                "count": count,
+                "parent_message_id": parent_message_id,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+        decrease_portion_callback_data=(
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="decrease_portion",
+                values={
+                    "entry_id": entry.id,
+                    "item_position": item.position,
+                    "page": page,
+                    "count": count,
+                    "parent_message_id": parent_message_id,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            )
+            if supports_recent_item_portion_adjustment(item)
+            else None
+        ),
+        increase_portion_callback_data=(
+            create_recent_action_callback_data(
+                state_repository=state_repository,
+                action="increase_portion",
+                values={
+                    "entry_id": entry.id,
+                    "item_position": item.position,
+                    "page": page,
+                    "count": count,
+                    "parent_message_id": parent_message_id,
+                    "origin": origin,
+                    "root_entry_id": root_entry_id,
+                },
+            )
+            if supports_recent_item_portion_adjustment(item)
+            else None
+        ),
+        metric_adjustment_buttons=metric_adjustment_buttons,
+        close_callback_data=create_recent_action_callback_data(
+            state_repository=state_repository,
+            action="close",
+            values={
+                "page": page,
+                "count": count,
+                "parent_message_id": parent_message_id,
+                "origin": origin,
+                "root_entry_id": root_entry_id,
+            },
+        ),
+    )
 
 
 def resolve_recent_entry_item(*, entry, item_position: int):
@@ -1873,7 +3278,39 @@ def delete_recent_entry_item(*, session: Session, entry_repository: EntryReposit
 
 def supports_recent_item_portion_adjustment(item) -> bool:
     normalized_unit = item.unit.strip().lower() if item.unit is not None else None
-    return item.quantity is not None and normalized_unit in {"g", "ml"} and bool(item.metrics)
+    return (
+        item.quantity is not None
+        and normalized_unit in {"g", "ml"}
+        and any(metric.metric.code in RECENT_ITEM_PORTION_ADJUSTABLE_METRIC_CODES for metric in item.metrics)
+    )
+
+
+def get_recent_item_metrics_by_code(item) -> dict[str, object]:
+    return {metric.metric.code: metric for metric in item.metrics if metric.metric.code in RECENT_ITEM_METRIC_PRESENTATION}
+
+
+def get_recent_item_100g_adjustable_metric_codes(item) -> tuple[str, ...]:
+    normalized_unit = item.unit.strip().lower() if item.unit is not None else None
+    if item.quantity is None or item.quantity <= 0 or normalized_unit != "g":
+        return ()
+    metrics_by_code = get_recent_item_metrics_by_code(item)
+    return tuple(metric_code for metric_code in ("calories", "protein", "fat", "carbs") if metric_code in metrics_by_code)
+
+
+def calculate_recent_item_metric_per_100g(*, item, metric_code: str) -> float | None:
+    if item.quantity is None or item.quantity <= 0:
+        return None
+    metric = get_recent_item_metrics_by_code(item).get(metric_code)
+    if metric is None:
+        return None
+    return round((metric.value * 100) / item.quantity, 1)
+
+
+def format_recent_metric_value(value: float) -> str:
+    rounded_value = round(value, 1)
+    if rounded_value.is_integer():
+        return str(int(rounded_value))
+    return f"{rounded_value:.1f}"
 
 
 def adjust_recent_entry_item_portion(*, selected_item, delta_quantity: int) -> bool:
@@ -1888,7 +3325,25 @@ def adjust_recent_entry_item_portion(*, selected_item, delta_quantity: int) -> b
     scale_ratio = new_quantity / current_quantity
     selected_item.quantity = new_quantity
     for metric in selected_item.metrics:
+        if metric.metric.code not in RECENT_ITEM_PORTION_ADJUSTABLE_METRIC_CODES:
+            continue
         metric.value = round(metric.value * scale_ratio, 4)
+    return True
+
+
+def adjust_recent_entry_item_metric_per_100g(*, selected_item, metric_code: str, delta: int) -> bool:
+    if metric_code not in RECENT_ITEM_100G_ADJUSTMENT_STEPS:
+        return False
+    current_per_100g = calculate_recent_item_metric_per_100g(item=selected_item, metric_code=metric_code)
+    if current_per_100g is None or selected_item.quantity is None or selected_item.quantity <= 0:
+        return False
+    new_per_100g = current_per_100g + delta
+    if new_per_100g < 0:
+        return False
+    target_metric = get_recent_item_metrics_by_code(selected_item).get(metric_code)
+    if target_metric is None:
+        return False
+    target_metric.value = round((new_per_100g * selected_item.quantity) / 100, 4)
     return True
 
 
@@ -1897,7 +3352,7 @@ def repeat_recent_entry_item(
     session: Session,
     user_id: int,
     item,
-) -> None:
+) -> object:
     saved_entry = EntryRepository(session).create(
         user_id=user_id,
         entry_type=EntryType.FOOD,
@@ -1913,7 +3368,7 @@ def repeat_recent_entry_item(
         ],
     )
     if not item.metrics:
-        return
+        return saved_entry
     persisted_item = sorted(saved_entry.items, key=lambda current: current.position)[0]
     EntryItemMetricRepository(session).upsert_metrics(
         entry_item_id=persisted_item.id,
@@ -1927,6 +3382,7 @@ def repeat_recent_entry_item(
             if metric.metric is not None
         ],
     )
+    return saved_entry
 
 
 def repeat_recent_entry(
@@ -1934,7 +3390,7 @@ def repeat_recent_entry(
     session: Session,
     user_id: int,
     entry,
-) -> None:
+) -> object:
     saved_entry = EntryRepository(session).create(
         user_id=user_id,
         entry_type=EntryType.FOOD,
@@ -1968,6 +3424,7 @@ def repeat_recent_entry(
                 if metric.metric is not None
             ],
         )
+    return saved_entry
 
 
 def load_recent_entries_page(
@@ -2517,44 +3974,32 @@ async def handle_start(
         return
 
     with session_scope(session_factory) as session:
-        created, _ = ensure_user_registered(message, session)
-
-    if created:
-        await message.answer(
-            "Профиль создан.\n"
-            "Что можно сделать:\n"
-            "- отправить запись еды текстом или фото блюда;\n"
-            "- нажать кнопку воды;\n"
-            "- при желании включить запись тренировок в /settings;\n"
-            "- задать вопрос о питании;\n"
-            "- посмотреть итог дня: /today;\n"
-            "- посмотреть отчёт за период: /report;\n"
-            "- посмотреть и удалить последние записи: /recent;\n"
-            "- посмотреть или изменить цели: /goal;\n"
-            "- настроить summary: /settings;\n"
-            "- управлять файлами импорта и экспорта: /files.",
-            reply_markup=build_main_keyboard(),
-        )
-        return
+        created, user_id = ensure_user_registered(message, session)
+        user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
+        if user is None:
+            raise RuntimeError("User profile was not found after registration")
+        user, preference, goal_preference, diets = load_settings_state(session=session, user_id=user_id, user=user)
 
     await message.answer(
-        "Бот готов.\n"
-        "Что можно сделать:\n"
-        "- отправить запись еды текстом или фото блюда;\n"
-        "- нажать кнопку воды;\n"
-        "- при желании включить запись тренировок в /settings;\n"
-        "- задать вопрос о питании;\n"
-        "- посмотреть итог дня: /today;\n"
-        "- посмотреть отчёт за период: /report;\n"
-        "- посмотреть и удалить последние записи: /recent;\n"
-        "- посмотреть или изменить цели: /goal;\n"
-        "- настроить summary: /settings;\n"
-        "- управлять файлами импорта и экспорта: /files.",
-        reply_markup=build_main_keyboard(),
+        build_settings_response(
+            section=SETTINGS_SECTION_ROOT,
+            goal_preference=goal_preference,
+            preference=preference,
+            diets=diets,
+            workout_logging_enabled=user.workout_logging_enabled,
+        ),
+        reply_markup=build_settings_reply_markup(
+            section=SETTINGS_SECTION_ROOT,
+            goal_preference=goal_preference,
+            preference=preference,
+            diets=diets,
+            workout_logging_enabled=user.workout_logging_enabled,
+        ),
     )
+    await refresh_main_keyboard(message)
 
 
-@router.message(Command("health"))
+@router.message(Command("ping"))
 async def handle_health(
     message: Message,
     session_factory: sessionmaker[Session],
@@ -2624,6 +4069,57 @@ async def handle_provider(
             selection_mode=profile.selection_mode.value,
             connections=connections,
         ),
+    )
+
+
+@router.message(Command("context"))
+async def handle_llm_context(
+    message: Message,
+    command: CommandObject,
+    session_factory: sessionmaker[Session],
+    settings: Settings | None = None,
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    resolved_settings = settings or get_settings()
+    encryption_secret = resolved_settings.personal_api_keys_secret
+    if encryption_secret is None or not encryption_secret.strip():
+        await message.answer("Пользовательский контекст сейчас недоступен: не настроен секрет шифрования.")
+        return
+
+    parsed_comment = parse_llm_context_command_arg(command)
+    with session_scope(session_factory) as session:
+        _, user_id = ensure_user_registered(message, session)
+        repository = UserLLMProfileRepository(session)
+        if parsed_comment is None:
+            await message.answer(
+                build_llm_context_response(
+                    user_context_comment=repository.get_user_context_comment(
+                        user_id=user_id,
+                        encryption_secret=encryption_secret,
+                    )
+                )
+            )
+            return
+
+        if len(parsed_comment) > USER_LLM_CONTEXT_COMMENT_MAX_LENGTH:
+            await message.answer(
+                "Комментарий слишком длинный.\n"
+                f"Максимум: {USER_LLM_CONTEXT_COMMENT_MAX_LENGTH} символов."
+            )
+            return
+
+        repository.set_user_context_comment(
+            user_id=user_id,
+            user_context_comment=parsed_comment,
+            encryption_secret=encryption_secret,
+        )
+
+    await message.answer(
+        "Сохранил пользовательский контекст для LLM.\n\n"
+        + build_llm_context_response(user_context_comment=parsed_comment)
     )
 
 
@@ -2993,8 +4489,9 @@ async def handle_recent_delete_callback(
         )
 
         if callback_data.action == "list":
-            await callback.message.edit_text(
-                build_recent_entries_response(
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_entries_response(
                     recent_entries,
                     timezone_name=user.timezone,
                     page=page,
@@ -3017,8 +4514,9 @@ async def handle_recent_delete_callback(
             return
 
         if callback_data.action == "open":
-            await callback.message.edit_text(
-                build_recent_entries_response(
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_entries_response(
                     recent_entries,
                     timezone_name=user.timezone,
                     page=page,
@@ -3054,8 +4552,9 @@ async def handle_recent_delete_callback(
             return
 
         if callback_data.action == "select":
-            await callback.message.edit_text(
-                build_recent_entry_delete_confirmation(entry=selected_entry, timezone_name=user.timezone),
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_entry_delete_confirmation(entry=selected_entry, timezone_name=user.timezone),
                 reply_markup=build_recent_entry_confirmation_keyboard(
                     entry_id=selected_entry.id,
                     page=page,
@@ -3077,8 +4576,9 @@ async def handle_recent_delete_callback(
             page_size=callback_data.count,
         )
 
-    await callback.message.edit_text(
-        build_recent_entries_response(
+    await safe_edit_message_text(
+        callback.message,
+        text=build_recent_entries_response(
             updated_recent_entries,
             timezone_name=user.timezone,
             page=page,
@@ -3114,7 +4614,9 @@ async def handle_recent_action_callback(
     if callback.message is None:
         await callback.answer("Сообщение недоступно.", show_alert=True)
         return
-    if callback_data.action == "close":
+    if callback_data.action == "close" and not (
+        callback_data.origin == "post_entry" and callback_data.parent_message_id == 0
+    ):
         await safe_delete_message(callback.message)
         await callback.answer()
         return
@@ -3142,9 +4644,34 @@ async def handle_recent_action_callback(
             page_size=callback_data.count,
         )
 
+        if callback_data.action == "close" and callback_data.origin == "post_entry":
+            await render_post_entry_root_message(
+                callback=callback,
+                session=session,
+                user=user,
+                summary_preference=summary_preference,
+                entry_repository=entry_repository,
+                root_entry_id=callback_data.root_entry_id,
+            )
+            await callback.answer()
+            return
+
+        if callback_data.origin == "post_entry" and callback_data.action in {"open_entries", "back_to_list"}:
+            await render_post_entry_root_message(
+                callback=callback,
+                session=session,
+                user=user,
+                summary_preference=summary_preference,
+                entry_repository=entry_repository,
+                root_entry_id=callback_data.root_entry_id,
+            )
+            await callback.answer()
+            return
+
         if callback_data.action == "back_to_list":
-            await callback.message.edit_text(
-                build_recent_entries_response(
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_entries_response(
                     recent_entries,
                     timezone_name=user.timezone,
                     page=page,
@@ -3167,23 +4694,45 @@ async def handle_recent_action_callback(
             return
 
         if callback_data.action == "open_entries":
-            await callback.message.edit_text(
-                build_recent_entry_selection_response(
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_entry_selection_response(
                     recent_entries,
                     timezone_name=user.timezone,
                     page=page,
                     count=callback_data.count,
                     nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                 ),
-                reply_markup=build_recent_entry_action_selection_keyboard(
-                    entry_buttons=[
-                        (build_recent_entry_button_label(entry, user.timezone), entry.id)
-                        for entry in recent_entries
-                    ],
+                reply_markup=build_recent_action_selection_reply_markup(
+                    session=session,
+                    entries=recent_entries,
+                    timezone_name=user.timezone,
                     page=page,
                     count=callback_data.count,
                     has_previous_page=has_previous_page,
                     has_next_page=has_next_page,
+                    origin=callback_data.origin,
+                    root_entry_id=callback_data.root_entry_id,
+                ),
+            )
+            await callback.answer()
+            return
+
+        if callback_data.action == "open_unique_items":
+            unique_items = collect_recent_unique_food_items(
+                entries=entry_repository.list_recent_for_user(
+                    user_id=user.id,
+                    limit=RECENT_UNIQUE_ITEMS_SCAN_LIMIT,
+                ),
+            )
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_unique_item_selection_response(items=unique_items),
+                reply_markup=build_recent_unique_item_selection_reply_markup(
+                    session=session,
+                    items=unique_items,
+                    page=page,
+                    count=callback_data.count,
                 ),
             )
             await callback.answer()
@@ -3200,25 +4749,36 @@ async def handle_recent_action_callback(
 
         if callback_data.action == "open_entry":
             if selected_entry.entry_type is EntryType.FOOD:
-                await callback.message.edit_text(
-                    build_recent_food_entry_response(entry=selected_entry, timezone_name=user.timezone),
-                    reply_markup=build_recent_food_entry_keyboard(
-                        item_buttons=[
-                            (build_recent_entry_item_button_label(item), item.position)
-                            for item in sorted(selected_entry.items, key=lambda current: current.position)
-                        ],
-                        entry_id=selected_entry.id,
+                await safe_edit_message_text(
+                    callback.message,
+                    text=build_recent_food_entry_response(
+                        entry=selected_entry,
+                        timezone_name=user.timezone,
+                        enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
+                    ),
+                    reply_markup=build_recent_food_entry_reply_markup(
+                        session=session,
+                        entry=selected_entry,
                         page=page,
                         count=callback_data.count,
+                        parent_message_id=getattr(callback.message, "message_id", 0) or 0,
+                        origin=callback_data.origin,
+                        root_entry_id=callback_data.root_entry_id,
+                        include_back_button=callback_data.origin != "post_entry",
                     ),
                 )
             else:
-                await callback.message.edit_text(
-                    build_recent_non_food_entry_response(entry=selected_entry, timezone_name=user.timezone),
-                    reply_markup=build_recent_non_food_entry_keyboard(
-                        entry_id=selected_entry.id,
+                await safe_edit_message_text(
+                    callback.message,
+                    text=build_recent_non_food_entry_response(entry=selected_entry, timezone_name=user.timezone),
+                    reply_markup=build_recent_non_food_entry_reply_markup(
+                        session=session,
+                        entry=selected_entry,
                         page=page,
                         count=callback_data.count,
+                        origin=callback_data.origin,
+                        root_entry_id=callback_data.root_entry_id,
+                        include_back_button=callback_data.origin != "post_entry",
                     ),
                 )
             await callback.answer()
@@ -3228,34 +4788,19 @@ async def handle_recent_action_callback(
             if selected_entry.entry_type is not EntryType.FOOD:
                 await callback.answer("Для этой записи повтор пока недоступен.", show_alert=True)
                 return
-            repeat_recent_entry(
+            saved_entry = repeat_recent_entry(
                 session=session,
                 user_id=user.id,
                 entry=selected_entry,
             )
-            page, updated_recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
-                entry_repository=entry_repository,
-                user_id=user.id,
-                page=0,
-                page_size=callback_data.count,
+            await send_recent_repeat_confirmation(
+                callback=callback,
+                session=session,
+                user=user,
+                summary_preference=summary_preference,
+                saved_entry=saved_entry,
             )
-            await callback.message.edit_text(
-                build_recent_entries_response(
-                    updated_recent_entries,
-                    timezone_name=user.timezone,
-                    page=page,
-                    count=callback_data.count,
-                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-                ),
-                reply_markup=build_recent_entries_delete_keyboard(
-                    page=page,
-                    count=callback_data.count,
-                    has_previous_page=has_previous_page,
-                    has_next_page=has_next_page,
-                    has_entries=bool(updated_recent_entries),
-                ),
-            )
-            await callback.answer("Запись сохранена как новый приём пищи.")
+            await callback.answer()
             return
 
         if callback_data.action == "delete_entry":
@@ -3270,27 +4815,63 @@ async def handle_recent_action_callback(
                     timezone_name=user.timezone,
                 )
             )
-            await callback.message.edit_text(
-                confirmation_text,
+            await safe_edit_message_text(
+                callback.message,
+                text=confirmation_text,
                 reply_markup=build_recent_food_entry_delete_confirmation_keyboard(
-                    entry_id=selected_entry.id,
-                    page=page,
-                    count=callback_data.count,
+                    confirm_callback_data=create_recent_action_callback_data(
+                        state_repository=CallbackStateRepository(session),
+                        action="confirm_delete_entry",
+                        values={
+                            "entry_id": selected_entry.id,
+                            "page": page,
+                            "count": callback_data.count,
+                            "origin": callback_data.origin,
+                            "root_entry_id": callback_data.root_entry_id,
+                        },
+                    ),
+                    cancel_callback_data=create_recent_action_callback_data(
+                        state_repository=CallbackStateRepository(session),
+                        action="open_entry",
+                        values={
+                            "entry_id": selected_entry.id,
+                            "page": page,
+                            "count": callback_data.count,
+                            "origin": callback_data.origin,
+                            "root_entry_id": callback_data.root_entry_id,
+                        },
+                    ),
+                    close_callback_data=create_recent_action_callback_data(
+                        state_repository=CallbackStateRepository(session),
+                        action="close",
+                        values={
+                            "page": page,
+                            "count": callback_data.count,
+                            "origin": callback_data.origin,
+                            "root_entry_id": callback_data.root_entry_id,
+                        },
+                    ),
                 ),
             )
             await callback.answer()
             return
 
         if callback_data.action == "confirm_delete_entry":
+            deleted_entry_message = build_deleted_entry_restore_message(selected_entry)
             entry_repository.delete(selected_entry)
+            if callback_data.origin == "post_entry":
+                await safe_edit_message_text(callback.message, text=deleted_entry_message, reply_markup=None)
+                await callback.answer("Запись удалена. Список уже обновлён.")
+                return
             page, updated_recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
                 entry_repository=entry_repository,
                 user_id=user.id,
                 page=page,
                 page_size=callback_data.count,
             )
-            await callback.message.edit_text(
-                build_recent_entries_response(
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_entries_response(
                     updated_recent_entries,
                     timezone_name=user.timezone,
                     page=page,
@@ -3322,47 +4903,67 @@ async def handle_recent_action_callback(
             return
 
         if callback_data.action == "delete_item":
-            await callback.message.edit_text(
-                build_recent_food_item_delete_confirmation(item=selected_item),
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_food_item_delete_confirmation(item=selected_item),
                 reply_markup=build_recent_food_item_delete_confirmation_keyboard(
-                    entry_id=selected_entry.id,
-                    item_position=selected_item.position,
-                    page=page,
-                    count=callback_data.count,
+                    confirm_callback_data=create_recent_action_callback_data(
+                        state_repository=CallbackStateRepository(session),
+                        action="confirm_delete_item",
+                        values={
+                            "entry_id": selected_entry.id,
+                            "item_position": selected_item.position,
+                            "page": page,
+                            "count": callback_data.count,
+                            "parent_message_id": callback_data.parent_message_id,
+                            "origin": callback_data.origin,
+                            "root_entry_id": callback_data.root_entry_id,
+                        },
+                    ),
+                    cancel_callback_data=create_recent_action_callback_data(
+                        state_repository=CallbackStateRepository(session),
+                        action="open_item",
+                        values={
+                            "entry_id": selected_entry.id,
+                            "item_position": selected_item.position,
+                            "page": page,
+                            "count": callback_data.count,
+                            "parent_message_id": callback_data.parent_message_id,
+                            "origin": callback_data.origin,
+                            "root_entry_id": callback_data.root_entry_id,
+                        },
+                    ),
+                    close_callback_data=create_recent_action_callback_data(
+                        state_repository=CallbackStateRepository(session),
+                        action="close",
+                        values={
+                            "page": page,
+                            "count": callback_data.count,
+                            "parent_message_id": callback_data.parent_message_id,
+                            "origin": callback_data.origin,
+                            "root_entry_id": callback_data.root_entry_id,
+                        },
+                    ),
                 ),
             )
             await callback.answer()
             return
 
         if callback_data.action == "repeat_item":
-            repeat_recent_entry_item(
+            saved_entry = repeat_recent_entry_item(
                 session=session,
                 user_id=user.id,
                 item=selected_item,
             )
-            page, updated_recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
-                entry_repository=entry_repository,
-                user_id=user.id,
-                page=0,
-                page_size=callback_data.count,
+            await send_recent_repeat_confirmation(
+                callback=callback,
+                session=session,
+                user=user,
+                summary_preference=summary_preference,
+                saved_entry=saved_entry,
+                parent_message_id=callback_data.parent_message_id,
             )
-            await callback.message.edit_text(
-                build_recent_entries_response(
-                    updated_recent_entries,
-                    timezone_name=user.timezone,
-                    page=page,
-                    count=callback_data.count,
-                    nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-                ),
-                reply_markup=build_recent_entries_delete_keyboard(
-                    page=page,
-                    count=callback_data.count,
-                    has_previous_page=has_previous_page,
-                    has_next_page=has_next_page,
-                    has_entries=bool(updated_recent_entries),
-                ),
-            )
-            await callback.answer("Блюдо сохранено как новая запись.")
+            await callback.answer()
             return
 
         if callback_data.action in {"decrease_portion", "increase_portion"}:
@@ -3387,25 +4988,92 @@ async def handle_recent_action_callback(
             if updated_item is None:
                 await callback.answer("Это блюдо уже недоступно.", show_alert=True)
                 return
-            await callback.message.edit_text(
-                build_recent_food_item_response(
+            await safe_edit_message_by_id(
+                getattr(callback.message, "bot", None),
+                chat_id=getattr(getattr(callback.message, "chat", None), "id", None),
+                message_id=callback_data.parent_message_id,
+                text=build_recent_food_entry_response(
+                    entry=updated_entry,
+                    timezone_name=user.timezone,
+                    enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
+                ),
+                reply_markup=build_recent_food_entry_reply_markup(
+                    session=session,
+                    entry=updated_entry,
+                    page=page,
+                    count=callback_data.count,
+                    parent_message_id=callback_data.parent_message_id,
+                    origin=callback_data.origin,
+                    root_entry_id=callback_data.root_entry_id,
+                    include_back_button=callback_data.origin != "post_entry",
+                ),
+            )
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_food_item_response(
                     entry=updated_entry,
                     item=updated_item,
                     timezone_name=user.timezone,
                 ),
-                reply_markup=build_recent_food_item_keyboard(
-                    entry_id=updated_entry.id,
-                    item_position=updated_item.position,
-                    unit=updated_item.unit,
-                    can_adjust_portion=supports_recent_item_portion_adjustment(updated_item),
+                reply_markup=build_recent_food_item_reply_markup(
+                    session=session,
+                    entry=updated_entry,
+                    item=updated_item,
                     page=page,
                     count=callback_data.count,
+                    parent_message_id=callback_data.parent_message_id,
+                    origin=callback_data.origin,
+                    root_entry_id=callback_data.root_entry_id,
                 ),
             )
             await callback.answer("Порция обновлена.")
             return
 
+        if callback_data.action == "adjust_100g":
+            if not adjust_recent_entry_item_metric_per_100g(
+                selected_item=selected_item,
+                metric_code=callback_data.metric_code,
+                delta=callback_data.delta,
+            ):
+                await callback.answer("Значение нельзя уменьшить дальше.", show_alert=True)
+                return
+            session.flush()
+            session.expire(selected_entry, ["items"])
+            updated_entry = resolve_recent_entry_for_callback(
+                entry_repository=entry_repository,
+                user_id=user.id,
+                entry_id=selected_entry.id,
+            )
+            if updated_entry is None:
+                await callback.answer("Запись уже недоступна.", show_alert=True)
+                return
+            updated_item = resolve_recent_entry_item(entry=updated_entry, item_position=selected_item.position)
+            if updated_item is None:
+                await callback.answer("Это блюдо уже недоступно.", show_alert=True)
+                return
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_food_item_response(
+                    entry=updated_entry,
+                    item=updated_item,
+                    timezone_name=user.timezone,
+                ),
+                reply_markup=build_recent_food_item_reply_markup(
+                    session=session,
+                    entry=updated_entry,
+                    item=updated_item,
+                    page=page,
+                    count=callback_data.count,
+                    parent_message_id=callback_data.parent_message_id,
+                    origin=callback_data.origin,
+                    root_entry_id=callback_data.root_entry_id,
+                ),
+            )
+            await callback.answer("КБЖУ на 100 г обновлены.")
+            return
+
         if callback_data.action == "confirm_delete_item":
+            deleted_entry_message = build_deleted_entry_restore_message(selected_entry)
             entry_survived = delete_recent_entry_item(
                 session=session,
                 entry_repository=entry_repository,
@@ -3427,40 +5095,66 @@ async def handle_recent_action_callback(
                 if updated_entry is None:
                     await callback.answer("Запись уже недоступна.", show_alert=True)
                     return
-                await callback.message.edit_text(
-                    build_recent_food_entry_response(entry=updated_entry, timezone_name=user.timezone),
-                    reply_markup=build_recent_food_entry_keyboard(
-                        item_buttons=[
-                            (build_recent_entry_item_button_label(item), item.position)
-                            for item in sorted(updated_entry.items, key=lambda current: current.position)
-                        ],
-                        entry_id=updated_entry.id,
+                await safe_edit_message_by_id(
+                    getattr(callback.message, "bot", None),
+                    chat_id=getattr(getattr(callback.message, "chat", None), "id", None),
+                    message_id=callback_data.parent_message_id,
+                    text=build_recent_food_entry_response(
+                        entry=updated_entry,
+                        timezone_name=user.timezone,
+                        enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
+                    ),
+                    reply_markup=build_recent_food_entry_reply_markup(
+                        session=session,
+                        entry=updated_entry,
                         page=page,
                         count=callback_data.count,
+                        parent_message_id=callback_data.parent_message_id,
+                        origin=callback_data.origin,
+                        root_entry_id=callback_data.root_entry_id,
+                        include_back_button=callback_data.origin != "post_entry",
                     ),
                 )
+                await safe_delete_message(callback.message)
                 await callback.answer("Блюдо удалено. Запись обновлена.")
                 return
 
-            await callback.message.edit_text(
-                build_recent_entry_selection_response(
+            if callback_data.origin == "post_entry":
+                await safe_edit_message_by_id(
+                    getattr(callback.message, "bot", None),
+                    chat_id=getattr(getattr(callback.message, "chat", None), "id", None),
+                    message_id=callback_data.parent_message_id,
+                    text=deleted_entry_message,
+                    reply_markup=None,
+                )
+                await safe_delete_message(callback.message)
+                await callback.answer("Блюдо удалено. Если это была единственная позиция, запись тоже удалена.")
+                return
+
+            await safe_edit_message_by_id(
+                getattr(callback.message, "bot", None),
+                chat_id=getattr(getattr(callback.message, "chat", None), "id", None),
+                message_id=callback_data.parent_message_id,
+                text=build_recent_entry_selection_response(
                     updated_recent_entries,
                     timezone_name=user.timezone,
                     page=page,
                     count=callback_data.count,
                     nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
                 ),
-                reply_markup=build_recent_entry_action_selection_keyboard(
-                    entry_buttons=[
-                        (build_recent_entry_button_label(entry, user.timezone), entry.id)
-                        for entry in updated_recent_entries
-                    ],
+                reply_markup=build_recent_action_selection_reply_markup(
+                    session=session,
+                    entries=updated_recent_entries,
+                    timezone_name=user.timezone,
                     page=page,
                     count=callback_data.count,
                     has_previous_page=has_previous_page,
                     has_next_page=has_next_page,
+                    origin=callback_data.origin,
+                    root_entry_id=callback_data.root_entry_id,
                 ),
             )
+            await safe_delete_message(callback.message)
             await callback.answer("Блюдо удалено. Если это была единственная позиция, запись тоже удалена.")
             return
 
@@ -3468,23 +5162,53 @@ async def handle_recent_action_callback(
             await callback.answer("Неизвестное действие.", show_alert=True)
             return
 
-        await callback.message.edit_text(
-            build_recent_food_item_response(
-                entry=selected_entry,
-                item=selected_item,
-                timezone_name=user.timezone,
-            ),
-            reply_markup=build_recent_food_item_keyboard(
-                entry_id=selected_entry.id,
-                item_position=selected_item.position,
-                unit=selected_item.unit,
-                can_adjust_portion=supports_recent_item_portion_adjustment(selected_item),
-                page=page,
-                count=callback_data.count,
-            ),
+        item_response_text = build_recent_food_item_response(
+            entry=selected_entry,
+            item=selected_item,
+            timezone_name=user.timezone,
         )
+        item_reply_markup = build_recent_food_item_reply_markup(
+            session=session,
+            entry=selected_entry,
+            item=selected_item,
+            page=page,
+            count=callback_data.count,
+            parent_message_id=callback_data.parent_message_id,
+            origin=callback_data.origin,
+            root_entry_id=callback_data.root_entry_id,
+        )
+        if callback_data.open_in_new_message:
+            await callback.message.answer(item_response_text, reply_markup=item_reply_markup)
+        else:
+            await safe_edit_message_text(callback.message, text=item_response_text, reply_markup=item_reply_markup)
         await callback.answer()
         return
+
+
+@router.callback_query(RecentEntryStateCallback.filter())
+async def handle_recent_action_state_callback(
+    callback: CallbackQuery,
+    callback_data: RecentEntryStateCallback,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    with session_scope(session_factory) as session:
+        state_payload = CallbackStateRepository(session).get_payload(
+            scope=RECENT_ACTION_STATE_SCOPE,
+            state_key=callback_data.state_key,
+        )
+    if state_payload is None:
+        await callback.answer("Кнопка уже устарела. Открой экран заново.", show_alert=True)
+        return
+    await handle_recent_action_callback(
+        callback,
+        resolve_recent_action_callback_data(
+            payload=state_payload.values,
+            action=callback_data.action,
+        ),
+        session_factory,
+        admin_user_ids=admin_user_ids,
+    )
 
 
 
@@ -3502,36 +5226,22 @@ async def handle_settings(
         user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
         if user is None:
             raise RuntimeError("User profile was not found after registration")
-        preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+        user, preference, goal_preference, diets = load_settings_state(session=session, user_id=user_id, user=user)
 
     await message.answer(
-        build_summary_settings_response(
+        build_settings_response(
+            section=SETTINGS_SECTION_ROOT,
+            goal_preference=goal_preference,
+            preference=preference,
+            diets=diets,
             workout_logging_enabled=user.workout_logging_enabled,
-            show_calories=preference.show_calories,
-            show_protein=preference.show_protein,
-            show_fat=preference.show_fat,
-            show_carbs=preference.show_carbs,
-            show_fiber=preference.show_fiber,
-            show_water=preference.show_water,
-            show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
-            summary_display_mode=preference.summary_display_mode,
-            nutrition_day_start_hour=preference.nutrition_day_start_hour,
-            report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
-            report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
         ),
-        reply_markup=build_summary_settings_keyboard(
+        reply_markup=build_settings_reply_markup(
+            section=SETTINGS_SECTION_ROOT,
+            goal_preference=goal_preference,
+            preference=preference,
+            diets=diets,
             workout_logging_enabled=user.workout_logging_enabled,
-            show_calories=preference.show_calories,
-            show_protein=preference.show_protein,
-            show_fat=preference.show_fat,
-            show_carbs=preference.show_carbs,
-            show_fiber=preference.show_fiber,
-            show_water=preference.show_water,
-            show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
-            summary_display_mode=preference.summary_display_mode,
-            nutrition_day_start_hour=preference.nutrition_day_start_hour,
-            report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
-            report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
         ),
     )
 
@@ -3547,13 +5257,22 @@ async def handle_toggle_summary_metric(
     if telegram_user is None:
         await callback.answer("Пользователь не найден.", show_alert=True)
         return
+    if callback_data.action == "noop":
+        await callback.answer()
+        return
     if not (
         callback_data.action.startswith("toggle_")
-        or callback_data.action == "cycle_summary_display_mode"
-        or callback_data.action == "cycle_nutrition_day_start_hour"
-        or callback_data.action == "cycle_report_goal_tolerance_percent"
-        or callback_data.action == "cycle_report_noticeable_entry_percentile"
-        or callback_data.action == "close"
+        or callback_data.action.startswith("toggle_diet_")
+        or callback_data.action.startswith("goal_")
+        or callback_data.action.startswith("open_")
+        or callback_data.action in {
+            "back_root",
+            "cycle_summary_display_mode",
+            "cycle_nutrition_day_start_hour",
+            "cycle_report_goal_tolerance_percent",
+            "cycle_report_noticeable_entry_percentile",
+            "close",
+        }
     ):
         await callback.answer("Неизвестное действие.", show_alert=True)
         return
@@ -3580,58 +5299,107 @@ async def handle_toggle_summary_metric(
             )
 
         preference_repository = UserSummaryPreferenceRepository(session)
-        if callback_data.action == "cycle_nutrition_day_start_hour":
+        goal_preference_repository = UserGoalPreferenceRepository(session)
+        diet_preference_repository = UserDietPreferenceRepository(session)
+        section = resolve_settings_section(callback_data.action)
+        if callback_data.action.startswith("open_") or callback_data.action == "back_root":
+            user, preference, goal_preference, diets = load_settings_state(session=session, user_id=user.id, user=user)
+            if callback_data.action == "back_root":
+                section = SETTINGS_SECTION_ROOT
+        elif callback_data.action == "cycle_nutrition_day_start_hour":
             preference = preference_repository.cycle_nutrition_day_start_hour(user_id=user.id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
         elif callback_data.action == "cycle_summary_display_mode":
             preference = preference_repository.cycle_summary_display_mode(user_id=user.id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
         elif callback_data.action == "cycle_report_goal_tolerance_percent":
             preference = preference_repository.cycle_report_goal_tolerance_percent(user_id=user.id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
         elif callback_data.action == "cycle_report_noticeable_entry_percentile":
             preference = preference_repository.cycle_report_noticeable_entry_percentile(user_id=user.id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
         elif callback_data.action == "toggle_workout_logging":
             user = UserRepository(session).toggle_workout_logging_enabled(user_id=user.id)
             preference, _created = preference_repository.get_or_create(user_id=user.id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
+        elif callback_data.action == "toggle_day_progress_bar":
+            preference = preference_repository.toggle_day_progress_bar(user_id=user.id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
         elif callback_data.action == "toggle_post_entry_delta_suffix":
             preference = preference_repository.toggle_post_entry_delta_suffix(user_id=user.id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
+        elif callback_data.action.startswith("toggle_diet_"):
+            diet_code = callback_data.action.removeprefix("toggle_diet_")
+            supported_diet_model = SupportedDietRepository(session).get_by_code(code=diet_code)
+            if supported_diet_model is None:
+                await callback.answer("Диета недоступна.", show_alert=True)
+                return
+            diet_preference_repository.toggle(user_id=user.id, diet_id=supported_diet_model.id)
+            preference, _created = preference_repository.get_or_create(user_id=user.id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
+        elif callback_data.action.startswith("goal_"):
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
+            goal_adjustments = {
+                "goal_dec_calories": ("calories", -100, 100),
+                "goal_half_dec_calories": ("calories", -50, 100),
+                "goal_half_inc_calories": ("calories", 50, 100),
+                "goal_inc_calories": ("calories", 100, 100),
+                "goal_dec_protein": ("protein", -10, 10),
+                "goal_half_dec_protein": ("protein", -5, 10),
+                "goal_half_inc_protein": ("protein", 5, 10),
+                "goal_inc_protein": ("protein", 10, 10),
+                "goal_dec_fat": ("fat", -10, 10),
+                "goal_half_dec_fat": ("fat", -5, 10),
+                "goal_half_inc_fat": ("fat", 5, 10),
+                "goal_inc_fat": ("fat", 10, 10),
+                "goal_dec_carbs": ("carbs", -10, 10),
+                "goal_half_dec_carbs": ("carbs", -5, 10),
+                "goal_half_inc_carbs": ("carbs", 5, 10),
+                "goal_inc_carbs": ("carbs", 10, 10),
+                "goal_dec_fiber": ("fiber", -10, 10),
+                "goal_half_dec_fiber": ("fiber", -5, 10),
+                "goal_half_inc_fiber": ("fiber", 5, 10),
+                "goal_inc_fiber": ("fiber", 10, 10),
+                "goal_dec_water": ("water", -100, 100),
+                "goal_half_dec_water": ("water", -50, 100),
+                "goal_half_inc_water": ("water", 50, 100),
+                "goal_inc_water": ("water", 100, 100),
+            }
+            metric_code, delta, minimum_value = goal_adjustments[callback_data.action]
+            current_value = getattr(goal_preference, UserGoalPreferenceRepository._resolve_goal_attribute(metric_code))
+            goal_preference = goal_preference_repository.set_goal(
+                user_id=user.id,
+                metric_code=metric_code,
+                goal_value=adjust_goal_value(current_value=current_value, delta=delta, minimum_value=minimum_value),
+            )
+            preference, _created = preference_repository.get_or_create(user_id=user.id)
         else:
             metric_code = callback_data.action.removeprefix("toggle_")
             preference = preference_repository.toggle_metric_visibility(
                 user_id=user.id,
                 metric_code=metric_code,
             )
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
+        diets = diet_preference_repository.list_diets_for_user(user_id=user.id)
 
     if callback.message is not None:
         await callback.message.edit_text(
-            build_summary_settings_response(
+            build_settings_response(
+                section=section,
+                goal_preference=goal_preference,
+                preference=preference,
+                diets=diets,
                 workout_logging_enabled=user.workout_logging_enabled,
-                show_calories=preference.show_calories,
-                show_protein=preference.show_protein,
-                show_fat=preference.show_fat,
-                show_carbs=preference.show_carbs,
-                show_fiber=preference.show_fiber,
-                show_water=preference.show_water,
-                show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
-                summary_display_mode=preference.summary_display_mode,
-                nutrition_day_start_hour=preference.nutrition_day_start_hour,
-                report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
-                report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
             ),
-            reply_markup=build_summary_settings_keyboard(
+            reply_markup=build_settings_reply_markup(
+                section=section,
+                goal_preference=goal_preference,
+                preference=preference,
+                diets=diets,
                 workout_logging_enabled=user.workout_logging_enabled,
-                show_calories=preference.show_calories,
-                show_protein=preference.show_protein,
-                show_fat=preference.show_fat,
-                show_carbs=preference.show_carbs,
-                show_fiber=preference.show_fiber,
-                show_water=preference.show_water,
-                show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
-                summary_display_mode=preference.summary_display_mode,
-                nutrition_day_start_hour=preference.nutrition_day_start_hour,
-                report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
-                report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
             ),
         )
-    await callback.answer("Сохранил настройки.")
+    await callback.answer("" if callback_data.action.startswith("open_") or callback_data.action == "back_root" else "Сохранил настройки.")
 
 
 @router.message(Command("today"))
@@ -3666,6 +5434,7 @@ async def handle_today(
             summary_date=summary_date,
             workout_logging_enabled=user.workout_logging_enabled,
             summary_preference=preference,
+            reference_at=datetime.now(timezone.utc),
         )
 
     await message.answer(
@@ -3713,6 +5482,42 @@ async def handle_report(
         rendered_report,
         reply_markup=build_period_report_keyboard(period_days=DEFAULT_PERIOD_REPORT_DAYS),
     )
+
+
+@router.message(F.text == TODAY_BUTTON_TEXT)
+async def handle_today_button(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    await handle_today(message, session_factory, admin_user_ids=admin_user_ids)
+
+
+@router.message(F.text == RECENT_BUTTON_TEXT)
+async def handle_recent_button(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    await handle_recent(message, CommandObject(args=None), session_factory, admin_user_ids=admin_user_ids)
+
+
+@router.message(F.text == SETTINGS_BUTTON_TEXT)
+async def handle_settings_button(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    await handle_settings(message, session_factory, admin_user_ids=admin_user_ids)
+
+
+@router.message(F.text == REPORT_BUTTON_TEXT)
+async def handle_report_button(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    await handle_report(message, session_factory, admin_user_ids=admin_user_ids)
 
 
 @router.callback_query(PeriodReportCallback.filter())
@@ -3889,7 +5694,6 @@ async def handle_period_report_callback(
 @router.message(Command("goal"))
 async def handle_goal(
     message: Message,
-    command: CommandObject,
     session_factory: sessionmaker[Session],
     admin_user_ids: tuple[int, ...] = (),
 ) -> None:
@@ -3900,72 +5704,29 @@ async def handle_goal(
     if telegram_user is None:
         raise ValueError("Incoming message does not contain Telegram user")
 
-    parsed_goal = parse_goal_command_args(command)
-    if command.args is not None and command.args.strip() and parsed_goal is None:
-        await message.answer(
-            "Использование: <code>/goal 1800</code>, <code>/goal protein 90</code>, <code>/goal fiber 25</code> или <code>/goal water 2000</code>"
-        )
-        return
-
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
         user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
         if user is None:
             raise RuntimeError("User profile was not found after registration")
-
-        summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
-        goal_preference_repository = UserGoalPreferenceRepository(session)
-        if parsed_goal is not None:
-            metric_code, goal_value = parsed_goal
-            goal_preference = goal_preference_repository.set_goal(
-                user_id=user_id,
-                metric_code=metric_code,
-                goal_value=goal_value,
-            )
-        else:
-            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user_id)
-
-        summary_date = resolve_local_summary_date(
-            reference_at=datetime.now(timezone.utc),
-            timezone_name=user.timezone,
-            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-        )
-        snapshot = DailyNutritionGoalSnapshotUseCase(session).get_or_create(
-            user_id=user_id,
-            summary_date=summary_date,
-            timezone_name=user.timezone,
-            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-        )
-        timezone_name = user.timezone
-        nutrition_day_start_hour = summary_preference.nutrition_day_start_hour
+        user, preference, goal_preference, diets = load_settings_state(session=session, user_id=user_id, user=user)
 
     await message.answer(
-        build_goal_response(
+        build_settings_response(
+            section=SETTINGS_SECTION_GOALS,
             goal_preference=goal_preference,
-            enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
-            summary_date=summary_date,
-            goal_snapshot=snapshot,
-            timezone_name=timezone_name,
-            nutrition_day_start_hour=nutrition_day_start_hour,
+            preference=preference,
+            diets=diets,
+            workout_logging_enabled=user.workout_logging_enabled,
         ),
-        reply_markup=build_goal_keyboard(),
+        reply_markup=build_settings_reply_markup(
+            section=SETTINGS_SECTION_GOALS,
+            goal_preference=goal_preference,
+            preference=preference,
+            diets=diets,
+            workout_logging_enabled=user.workout_logging_enabled,
+        ),
     )
-
-
-@router.callback_query(GoalMessageCallback.filter())
-async def handle_goal_message_callback(
-    callback: CallbackQuery,
-    callback_data: GoalMessageCallback,
-) -> None:
-    if callback.message is None:
-        await callback.answer("Сообщение недоступно.", show_alert=True)
-        return
-    if callback_data.action != "close":
-        await callback.answer("Неизвестное действие.", show_alert=True)
-        return
-
-    await safe_delete_message(callback.message)
-    await callback.answer()
 
 
 @router.message(Command("files"))
@@ -4198,6 +5959,8 @@ async def handle_document_upload(
 async def handle_water_250_ml(
     message: Message,
     session_factory: sessionmaker[Session],
+    diet_service: DietEvaluationService = default_diet_service,
+    settings: Settings | None = None,
     admin_user_ids: tuple[int, ...] = (),
 ) -> None:
     if not await require_user_access(message, session_factory, admin_user_ids):
@@ -4205,6 +5968,7 @@ async def handle_water_250_ml(
 
     saved_items = [EntryItemCreate(name="water", quantity=250, unit="ml")]
     day_report: str | None = None
+    details_callback_data: str | None = None
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
         user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
@@ -4212,13 +5976,47 @@ async def handle_water_250_ml(
             raise RuntimeError("User profile was not found after registration")
         preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
         occurred_at = datetime.now(timezone.utc)
-        EntryRepository(session).create(
+        runtime_bundle = None
+        if settings is not None:
+            runtime_bundle = build_user_llm_runtime_bundle(
+                session=session,
+                settings=settings,
+                user_id=user_id,
+                telegram_user_id=message.from_user.id,
+                admin_user_ids=admin_user_ids,
+                fallback_extraction_service=default_extraction_service,
+                fallback_nutrition_service=default_nutrition_service,
+                fallback_conversation_service=default_conversation_service,
+            )
+        saved_entry = EntryRepository(session).create(
             user_id=user_id,
             entry_type=EntryType.WATER,
             occurred_at=occurred_at,
             source_text="250 мл",
             items=saved_items,
         )
+        enabled_diets = UserDietPreferenceRepository(session).list_enabled_for_user(user_id=user_id)
+        fixed_diet_payload = build_fixed_diet_payload_for_water_entries([saved_entry], enabled_diets)
+        if fixed_diet_payload is not None:
+            persist_diet_scores(
+                session=session,
+                entries=[saved_entry],
+                evaluation_payload=fixed_diet_payload,
+            )
+        diet_request = build_diet_evaluation_request_for_supported_diets([saved_entry], enabled_diets)
+        if diet_request is not None:
+            evaluated_diet_service = resolve_diet_service(
+                settings=settings,
+                runtime_bundle=runtime_bundle,
+                fallback_diet_service=diet_service,
+            )
+            diet_result = await asyncio.to_thread(evaluated_diet_service.evaluate, diet_request)
+            if hasattr(diet_result, "payload"):
+                persist_diet_scores(
+                    session=session,
+                    entries=[saved_entry],
+                    evaluation_payload=diet_result.payload,
+                )
         summary_date = resolve_local_summary_date(
             reference_at=occurred_at,
             timezone_name=user.timezone,
@@ -4232,11 +6030,24 @@ async def handle_water_250_ml(
             workout_logging_enabled=user.workout_logging_enabled,
             summary_preference=preference,
             metric_deltas={"water": 250.0},
+            diet_delta_entry_ids={saved_entry.id},
+            confirmation_mode=True,
+        )
+        details_callback_data = create_recent_action_callback_data(
+            state_repository=CallbackStateRepository(session),
+            action="open_entry",
+            values={
+                "entry_id": saved_entry.id,
+                "origin": "post_entry",
+                "root_entry_id": saved_entry.id,
+            },
         )
 
     await message.answer(
         build_write_confirmation_response(saved_items, day_report=day_report),
-        reply_markup=build_main_keyboard(),
+        reply_markup=build_post_entry_details_keyboard(
+            details_callback_data=details_callback_data
+        ),
     )
 
 
@@ -4247,6 +6058,7 @@ async def handle_message(
     extraction_service: JournalExtractionService = default_extraction_service,
     nutrition_service: NutritionEstimationService = default_nutrition_service,
     conversation_service: ConversationService = default_conversation_service,
+    diet_service: DietEvaluationService = default_diet_service,
     message_routing_service: MessageRoutingService = default_message_routing_service,
     settings: Settings | None = None,
     admin_user_ids: tuple[int, ...] = (),
@@ -4476,6 +6288,8 @@ async def handle_message(
 
         nutrition_result: SuccessfulNutritionEstimation | None = None
         confirmation_text: str | None = None
+        root_entry_id: int | None = None
+        details_callback_data: str | None = None
         try:
             with session_scope(session_factory) as session:
                 _, user_id = ensure_user_registered(message, session)
@@ -4528,6 +6342,8 @@ async def handle_message(
                     )
 
                 saved_food_entries: list = []
+                saved_diet_entries: list = []
+                saved_entries: list = []
                 saved_items = build_saved_items_from_payload(extraction_result.payload)
                 extracted_workout_metric_lines = build_extracted_workout_metric_lines(extraction_result.payload)
                 occurred_at_values: list[datetime] = []
@@ -4555,9 +6371,15 @@ async def handle_message(
                             for item in extracted_entry.items
                         ],
                     )
+                    saved_entries.append(saved_entry)
+                    if root_entry_id is None:
+                        root_entry_id = saved_entry.id
                     occurred_at_values.append(occurred_at)
                     if extracted_entry.type is EntryType.FOOD:
                         saved_food_entries.append(saved_entry)
+                        saved_diet_entries.append(saved_entry)
+                    if extracted_entry.type is EntryType.WATER:
+                        saved_diet_entries.append(saved_entry)
                     if extracted_entry.type is EntryType.WORKOUT:
                         persisted_items = sorted(saved_entry.items, key=lambda current: current.position)
                         for persisted_item, extracted_item in zip(persisted_items, extracted_entry.items):
@@ -4607,6 +6429,29 @@ async def handle_message(
                     if isinstance(nutrition_flow_result, SkippedNutritionEstimation):
                         raise FoodWriteFlowError(nutrition_flow_result.reason)
                     nutrition_result = nutrition_flow_result
+
+                enabled_diets = UserDietPreferenceRepository(session).list_enabled_for_user(user_id=user_id)
+                fixed_diet_payload = build_fixed_diet_payload_for_water_entries(saved_diet_entries, enabled_diets)
+                if fixed_diet_payload is not None:
+                    persist_diet_scores(
+                        session=session,
+                        entries=saved_diet_entries,
+                        evaluation_payload=fixed_diet_payload,
+                    )
+                diet_request = build_diet_evaluation_request_for_supported_diets(saved_diet_entries, enabled_diets)
+                if diet_request is not None:
+                    evaluated_diet_service = resolve_diet_service(
+                        settings=settings,
+                        runtime_bundle=runtime_bundle,
+                        fallback_diet_service=diet_service,
+                    )
+                    diet_result = await asyncio.to_thread(evaluated_diet_service.evaluate, diet_request)
+                    if hasattr(diet_result, "payload"):
+                        persist_diet_scores(
+                            session=session,
+                            entries=saved_diet_entries,
+                            evaluation_payload=diet_result.payload,
+                        )
 
                 summary_dates = resolve_summary_dates_for_occurred_at_values(
                     occurred_at_values=occurred_at_values,
@@ -4662,6 +6507,8 @@ async def handle_message(
                             workout_logging_enabled=user.workout_logging_enabled,
                             summary_preference=summary_preference,
                             metric_deltas=metric_deltas,
+                            diet_delta_entry_ids={entry.id for entry in saved_diet_entries},
+                            confirmation_mode=True,
                         ),
                         coach_comment=coach_comment,
                     )
@@ -4669,6 +6516,16 @@ async def handle_message(
                     confirmation_text = build_write_confirmation_response(
                         saved_items,
                         extra_lines=extracted_workout_metric_lines,
+                    )
+                if root_entry_id is not None:
+                    details_callback_data = create_recent_action_callback_data(
+                        state_repository=CallbackStateRepository(session),
+                        action="open_entry",
+                        values={
+                            "entry_id": root_entry_id,
+                            "origin": "post_entry",
+                            "root_entry_id": root_entry_id,
+                        },
                     )
         except FoodWriteFlowError as exc:
             issue = getattr(exc, "issue", None)
@@ -4691,7 +6548,11 @@ async def handle_message(
 
         await message.answer(
             confirmation_text,
-            reply_markup=build_main_keyboard(),
+            reply_markup=(
+                build_post_entry_details_keyboard(details_callback_data=details_callback_data)
+                if details_callback_data is not None
+                else build_main_keyboard()
+            ),
         )
     finally:
         if typing_task is not None:

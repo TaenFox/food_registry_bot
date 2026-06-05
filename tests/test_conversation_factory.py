@@ -267,6 +267,90 @@ def test_openai_conversation_client_serializes_workout_entries_from_factual_cont
     assert updated_summary == "обсудили питание после нагрузки"
 
 
+def test_openai_conversation_client_serializes_active_diets_from_factual_context() -> None:
+    captured_kwargs = {}
+
+    def create_stub(**kwargs):
+        captured_kwargs.update(kwargs)
+        return SimpleNamespace(
+            output_text='{"reply_text":"Учитываю низкопуриновую диету.","updated_session_summary":"обсудили диету"}'
+        )
+
+    sdk_client = SimpleNamespace(responses=SimpleNamespace(create=create_stub))
+    client = OpenAIResponsesConversationClient(
+        api_key="test-key",
+        model="gpt-5-mini",
+        client=sdk_client,
+    )
+
+    reply_text, updated_summary = client.generate_reply(
+        user_message="что лучше съесть на ужин?",
+        factual_context=NutritionCoachFactualContext(
+            summary_date="2026-05-20",
+            timezone="Europe/Moscow",
+            nutrition_day_start_hour=4,
+            day_totals={"calories": 1012.0, "protein": 52.0, "fat": 40.1, "carbs": 107.9, "fiber": 21.7, "water": 750.0},
+            goal_progress={},
+            active_diets=[{"code": "low_purine", "name": "Низкопуриновая"}],
+            recent_entries=[],
+            nutrition_summary_is_complete=True,
+            excluded_food_entry_count=0,
+            water_summary_is_complete=True,
+            excluded_water_entry_count=0,
+        ),
+        session_summary="говорили про ужин",
+        recent_turns=[],
+    )
+
+    serialized_payload = captured_kwargs["input"][0]["content"][2]["text"]
+    assert '"active_diets"' in serialized_payload
+    assert '"code": "low_purine"' in serialized_payload
+    assert reply_text == "Учитываю низкопуриновую диету."
+    assert updated_summary == "обсудили диету"
+
+
+def test_openai_conversation_client_serializes_user_context_comment_from_factual_context() -> None:
+    captured_kwargs = {}
+
+    def create_stub(**kwargs):
+        captured_kwargs.update(kwargs)
+        return SimpleNamespace(
+            output_text='{"reply_text":"Учитываю пользовательский контекст.","updated_session_summary":"обсудили ограничения"}'
+        )
+
+    sdk_client = SimpleNamespace(responses=SimpleNamespace(create=create_stub))
+    client = OpenAIResponsesConversationClient(
+        api_key="test-key",
+        model="gpt-5-mini",
+        client=sdk_client,
+    )
+
+    reply_text, updated_summary = client.generate_reply(
+        user_message="что приготовить на ужин?",
+        factual_context=NutritionCoachFactualContext(
+            summary_date="2026-05-20",
+            timezone="Europe/Moscow",
+            nutrition_day_start_hour=4,
+            user_context_comment="Инсулинорезистентность и гастрит, хочу щадящие рекомендации.",
+            day_totals={"calories": 1012.0, "protein": 52.0, "fat": 40.1, "carbs": 107.9, "fiber": 21.7, "water": 750.0},
+            goal_progress={},
+            recent_entries=[],
+            nutrition_summary_is_complete=True,
+            excluded_food_entry_count=0,
+            water_summary_is_complete=True,
+            excluded_water_entry_count=0,
+        ),
+        session_summary="говорили про ужин",
+        recent_turns=[],
+    )
+
+    serialized_payload = captured_kwargs["input"][0]["content"][2]["text"]
+    assert '"user_context_comment"' in serialized_payload
+    assert '"Инсулинорезистентность и гастрит, хочу щадящие рекомендации."' in serialized_payload
+    assert reply_text == "Учитываю пользовательский контекст."
+    assert updated_summary == "обсудили ограничения"
+
+
 def test_openai_conversation_client_serializes_input_images_for_multimodal_coaching() -> None:
     captured_kwargs = {}
 
@@ -436,6 +520,28 @@ def test_mistral_conversation_client_rejects_schema_echo_payload() -> None:
         assert "invalid coach response payload" in str(exc)
     else:
         raise AssertionError("Expected schema echo payload to raise LLMConversationClientError")
+
+
+def test_openai_conversation_prompt_requires_evidence_based_guidance() -> None:
+    prompt = OpenAIResponsesConversationClient._build_system_prompt()
+    post_entry_prompt = OpenAIResponsesConversationClient._build_post_entry_system_prompt()
+
+    assert "evidence-based nutrition and training guidance" in prompt
+    assert "weakly supported methods" in prompt
+    assert "factual_context.user_context_comment" in prompt
+    assert "evidence-based nutrition guidance" in post_entry_prompt
+    assert "factual_context.user_context_comment" in post_entry_prompt
+
+
+def test_mistral_conversation_prompt_requires_evidence_based_guidance() -> None:
+    prompt = MistralChatCompletionsConversationClient._build_system_prompt()
+    post_entry_prompt = MistralChatCompletionsConversationClient._build_post_entry_system_prompt()
+
+    assert "evidence-based nutrition and training guidance" in prompt
+    assert "weakly supported methods" in prompt
+    assert "factual_context.user_context_comment" in prompt
+    assert "evidence-based nutrition guidance" in post_entry_prompt
+    assert "factual_context.user_context_comment" in post_entry_prompt
 
 
 def test_llm_conversation_service_swallows_post_entry_comment_error() -> None:

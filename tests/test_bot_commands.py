@@ -39,3 +39,9 @@ async def test_setup_bot_commands_registers_default_and_admin_scopes() -> None:
         call(build_admin_bot_commands(), scope=BotCommandScopeChat(chat_id=101)),
         call(build_admin_bot_commands(), scope=BotCommandScopeChat(chat_id=202)),
     ]
+
+
+def test_build_user_bot_commands_excludes_button_replaced_commands() -> None:
+    commands = build_user_bot_commands()
+
+    assert [command.command for command in commands] == ["start", "provider", "context", "files", "ping"]

@@ -12,6 +12,7 @@ from food_registry_bot.db.models import (
     EntryItemMetric,
     EntryType,
     LLMIssueStage,
+    SupportedDiet,
     SupportedMetric,
     UserAccess,
     UserGoalPreference,
@@ -27,8 +28,11 @@ from food_registry_bot.db.repositories import (
     LLMIssueLogCreate,
     LLMIssueLogRepository,
     NutritionEstimatePersistenceService,
+    SupportedDietRepository,
     SupportedMetricRepository,
     UserAccessRepository,
+    UserDietPreferenceRepository,
+    UserLLMProfileRepository,
     UserGoalPreferenceRepository,
     UserSummaryPreferenceRepository,
     UserRepository,
@@ -50,6 +54,13 @@ def create_test_session() -> Session:
     session = sessionmaker(bind=engine, expire_on_commit=False, class_=Session)()
     session.add_all(
         [
+            SupportedDiet(code="low_purine", name="Низкопуриновая", is_enabled=True),
+            SupportedDiet(
+                code="insulin_resistance",
+                name="При инсулинорезистентности",
+                is_enabled=True,
+            ),
+            SupportedDiet(code="gastritis", name="При гастрите", is_enabled=True),
             SupportedMetric(code="calories", name="Calories", unit="kcal"),
             SupportedMetric(code="protein", name="Protein", unit="g"),
             SupportedMetric(code="fat", name="Fat", unit="g"),
@@ -57,6 +68,13 @@ def create_test_session() -> Session:
             SupportedMetric(code="fiber", name="Fiber", unit="g"),
             SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
             SupportedMetric(code="workout_calorie_credit", name="Workout Calorie Credit", unit="kcal"),
+            SupportedMetric(code="low_purine_score", name="Low Purine Score", unit="score"),
+            SupportedMetric(
+                code="insulin_resistance_score",
+                name="Insulin Resistance Score",
+                unit="score",
+            ),
+            SupportedMetric(code="gastritis_score", name="Gastritis Score", unit="score"),
         ]
     )
     session.commit()
@@ -218,9 +236,42 @@ def test_user_summary_preference_repository_creates_default_preferences_once() -
     assert preference.show_fat is True
     assert preference.show_carbs is True
     assert preference.show_water is True
+    assert preference.show_day_progress_bar is False
     assert preference.show_post_entry_delta_suffix is True
     assert preference.summary_display_mode == "text"
     assert preference.nutrition_day_start_hour == 4
+
+
+def test_user_llm_profile_repository_sets_user_context_comment() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=70041, username="llm_context_user")
+    repository = UserLLMProfileRepository(session)
+
+    profile = repository.set_user_context_comment(
+        user_id=user.id,
+        user_context_comment="Инсулинорезистентность и гастрит, без острых советов.",
+        encryption_secret="test-secret",
+    )
+
+    assert profile.selection_mode.value == "project"
+    assert profile.user_context_comment != "Инсулинорезистентность и гастрит, без острых советов."
+    assert profile.user_context_comment.startswith("enc:")
+    assert repository.get_user_context_comment(user_id=user.id, encryption_secret="test-secret") == (
+        "Инсулинорезистентность и гастрит, без острых советов."
+    )
+
+
+def test_user_llm_profile_repository_reads_legacy_plaintext_context_comment() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=70042, username="legacy_context_user")
+    profile, _created = UserLLMProfileRepository(session).get_or_create(user_id=user.id)
+    profile.user_context_comment = "старый plaintext context"
+    session.flush()
+
+    assert UserLLMProfileRepository(session).get_user_context_comment(
+        user_id=user.id,
+        encryption_secret="test-secret",
+    ) == "старый plaintext context"
 
 
 def test_user_summary_preference_repository_toggles_metric_visibility() -> None:
@@ -243,9 +294,20 @@ def test_user_summary_preference_repository_cycles_nutrition_day_start_hour() ->
 
     first_hour = repository.cycle_nutrition_day_start_hour(user_id=user.id).nutrition_day_start_hour
     second_hour = repository.cycle_nutrition_day_start_hour(user_id=user.id).nutrition_day_start_hour
-
     assert first_hour == 6
     assert second_hour == 0
+
+
+def test_user_summary_preference_repository_toggles_day_progress_bar() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7007, username="prefs_day_progress_user")
+    repository = UserSummaryPreferenceRepository(session)
+
+    toggled_preference = repository.toggle_day_progress_bar(user_id=user.id)
+
+    assert toggled_preference.show_day_progress_bar is True
+    saved_preference = session.query(UserSummaryPreference).filter_by(user_id=user.id).one()
+    assert saved_preference.show_day_progress_bar is True
 
 
 def test_user_summary_preference_repository_cycles_summary_display_mode() -> None:
@@ -608,6 +670,39 @@ def test_entry_repository_lists_incomplete_food_entry_ids() -> None:
     assert incomplete_ids == [incomplete_entry.id]
 
 
+def test_entry_repository_treats_additional_diet_metrics_as_complete() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=408, username="diet_complete")
+    repository = EntryRepository(session)
+
+    complete_entry = repository.create(
+        user_id=user.id,
+        entry_type=EntryType.FOOD,
+        occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        items=[EntryItemCreate(name="тунец")],
+    )
+
+    complete_item = session.query(EntryItem).filter_by(entry_id=complete_entry.id).one()
+    EntryItemMetricRepository(session).upsert_metrics(
+        entry_item_id=complete_item.id,
+        metric_values=[
+            EntryItemMetricValue(code="calories", value=116.0, confidence="medium"),
+            EntryItemMetricValue(code="protein", value=26.0, confidence="medium"),
+            EntryItemMetricValue(code="fat", value=1.0, confidence="medium"),
+            EntryItemMetricValue(code="carbs", value=0.0, confidence="medium"),
+            EntryItemMetricValue(code="fiber", value=0.0, confidence="medium"),
+            EntryItemMetricValue(code="low_purine_score", value=2.0, confidence="high"),
+        ],
+    )
+
+    incomplete_ids = repository.list_incomplete_food_entry_ids(
+        required_metric_codes=["calories", "protein", "fat", "carbs", "fiber"],
+        limit=10,
+    )
+
+    assert incomplete_ids == []
+
+
 def test_supported_metric_repository_lists_seeded_metrics() -> None:
     session = create_test_session()
 
@@ -621,6 +716,62 @@ def test_supported_metric_repository_lists_seeded_metrics() -> None:
         "fiber",
         "workout_calories",
         "workout_calorie_credit",
+        "low_purine_score",
+        "insulin_resistance_score",
+        "gastritis_score",
+    ]
+
+
+def test_supported_diet_repository_lists_seeded_diets() -> None:
+    session = create_test_session()
+
+    diets = SupportedDietRepository(session).list_all()
+
+    assert [(diet.code, diet.name, diet.is_enabled) for diet in diets] == [
+        ("low_purine", "Низкопуриновая", True),
+        ("insulin_resistance", "При инсулинорезистентности", True),
+        ("gastritis", "При гастрите", True),
+    ]
+
+
+def test_user_diet_preference_repository_toggles_supported_diet() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=506, username="diet_user")
+    diet = SupportedDietRepository(session).get_by_code(code="low_purine")
+    assert diet is not None
+    repository = UserDietPreferenceRepository(session)
+
+    first_state = repository.toggle(user_id=user.id, diet_id=diet.id).is_enabled
+    second_state = repository.toggle(user_id=user.id, diet_id=diet.id).is_enabled
+
+    assert first_state is True
+    assert second_state is False
+
+
+def test_user_diet_preference_repository_lists_enabled_diets_for_user() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=507, username="diet_view_user")
+    diet = SupportedDietRepository(session).get_by_code(code="low_purine")
+    assert diet is not None
+    repository = UserDietPreferenceRepository(session)
+
+    initial_view = repository.list_diets_for_user(user_id=user.id)
+    repository.set_enabled(user_id=user.id, diet_id=diet.id, is_enabled=True)
+    enabled_diets = repository.list_enabled_for_user(user_id=user.id)
+    updated_view = repository.list_diets_for_user(user_id=user.id)
+
+    assert [(view.code, view.is_selected) for view in initial_view] == [
+        ("low_purine", False),
+        ("insulin_resistance", False),
+        ("gastritis", False),
+    ]
+    assert [(supported_diet.code, supported_diet.name) for supported_diet in enabled_diets] == [
+        ("low_purine", "Низкопуриновая"),
+    ]
+    assert [(view.code, view.is_selected) for view in updated_view] == [
+        ("low_purine", True),
+        ("insulin_resistance", False),
+        ("gastritis", False),
     ]
 
 

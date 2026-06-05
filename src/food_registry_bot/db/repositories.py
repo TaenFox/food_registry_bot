@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import secrets
 from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
@@ -9,6 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from food_registry_bot.db.models import (
     AccountCategory,
+    CallbackState,
     Entry,
     EntryItem,
     EntryItemMetric,
@@ -21,6 +24,7 @@ from food_registry_bot.db.models import (
     DataExchangeDirection,
     DataExchangeFile,
     DataExchangeStatus,
+    SupportedDiet,
     SupportedMetric,
     DailyGoalSnapshot,
     ConversationMessage,
@@ -32,8 +36,10 @@ from food_registry_bot.db.models import (
     UserLLMProfile,
     UserLLMSelectionMode,
     UserGoalPreference,
+    UserDietPreference,
     UserSummaryPreference,
 )
+from food_registry_bot.llm_access.crypto import SecretCipher, SecretCipherError
 if TYPE_CHECKING:
     from food_registry_bot.nutrition.journal_adapter import PreparedNutritionRequest, ResolvedNutritionEstimate
 
@@ -50,6 +56,7 @@ DEFAULT_DAILY_GOALS = {
     "fiber": 25,
     "water": 2000,
 }
+USER_CONTEXT_COMMENT_ENCRYPTED_PREFIX = "enc:"
 
 
 @dataclass(frozen=True)
@@ -66,6 +73,12 @@ class EntryItemMetricValue:
     code: str
     value: float
     confidence: str
+
+
+@dataclass(frozen=True)
+class CallbackStatePayload:
+    scope: str
+    values: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -106,6 +119,14 @@ class UserLLMConnectionView:
     validation_status: str
     validation_error: str | None
     has_encrypted_api_key: bool
+
+
+@dataclass(frozen=True)
+class SupportedDietView:
+    code: str
+    name: str
+    is_enabled: bool
+    is_selected: bool
 
 
 class UserRepository:
@@ -300,6 +321,61 @@ class UserLLMProfileRepository:
         profile.selection_mode = selection_mode
         self._session.flush()
         return profile
+
+    def set_user_context_comment(
+        self,
+        *,
+        user_id: int,
+        user_context_comment: str | None,
+        encryption_secret: str,
+    ) -> UserLLMProfile:
+        profile, _created = self.get_or_create(user_id=user_id)
+        profile.user_context_comment = self._serialize_user_context_comment(
+            user_context_comment=user_context_comment,
+            encryption_secret=encryption_secret,
+        )
+        self._session.flush()
+        return profile
+
+    def get_user_context_comment(
+        self,
+        *,
+        user_id: int,
+        encryption_secret: str | None,
+    ) -> str | None:
+        profile, _created = self.get_or_create(user_id=user_id)
+        return self._deserialize_user_context_comment(
+            stored_value=profile.user_context_comment,
+            encryption_secret=encryption_secret,
+        )
+
+    @staticmethod
+    def _serialize_user_context_comment(
+        *,
+        user_context_comment: str | None,
+        encryption_secret: str,
+    ) -> str | None:
+        if user_context_comment is None:
+            return None
+        return USER_CONTEXT_COMMENT_ENCRYPTED_PREFIX + SecretCipher(encryption_secret).encrypt(user_context_comment)
+
+    @staticmethod
+    def _deserialize_user_context_comment(
+        *,
+        stored_value: str | None,
+        encryption_secret: str | None,
+    ) -> str | None:
+        if stored_value is None:
+            return None
+        if not stored_value.startswith(USER_CONTEXT_COMMENT_ENCRYPTED_PREFIX):
+            return stored_value
+        if encryption_secret is None or not encryption_secret.strip():
+            raise ValueError("A non-empty secret is required for user context decryption")
+        encrypted_payload = stored_value.removeprefix(USER_CONTEXT_COMMENT_ENCRYPTED_PREFIX)
+        try:
+            return SecretCipher(encryption_secret).decrypt(encrypted_payload)
+        except SecretCipherError as exc:
+            raise ValueError("User context decryption failed") from exc
 
 
 class UserLLMConnectionRepository:
@@ -498,6 +574,7 @@ class UserSummaryPreferenceRepository:
             show_carbs=True,
             show_fiber=True,
             show_water=True,
+            show_day_progress_bar=False,
             show_post_entry_delta_suffix=True,
             summary_display_mode="text",
             nutrition_day_start_hour=4,
@@ -551,6 +628,12 @@ class UserSummaryPreferenceRepository:
     def toggle_post_entry_delta_suffix(self, *, user_id: int) -> UserSummaryPreference:
         preference, _created = self.get_or_create(user_id=user_id)
         preference.show_post_entry_delta_suffix = not preference.show_post_entry_delta_suffix
+        self._session.flush()
+        return preference
+
+    def toggle_day_progress_bar(self, *, user_id: int) -> UserSummaryPreference:
+        preference, _created = self.get_or_create(user_id=user_id)
+        preference.show_day_progress_bar = not preference.show_day_progress_bar
         self._session.flush()
         return preference
 
@@ -742,7 +825,11 @@ class EntryRepository:
         statement = (
             select(Entry)
             .where(Entry.user_id == user_id)
-            .options(selectinload(Entry.items))
+            .options(
+                selectinload(Entry.items)
+                .selectinload(EntryItem.metrics)
+                .selectinload(EntryItemMetric.metric)
+            )
             .order_by(Entry.occurred_at.desc(), Entry.id.desc())
             .offset(offset)
             .limit(limit)
@@ -760,6 +847,7 @@ class EntryRepository:
             .order_by(Entry.id.asc())
         )
         return list(self._session.scalars(statement))
+
 
     def get_by_id_for_user(self, *, entry_id: int, user_id: int) -> Optional[Entry]:
         statement = (
@@ -831,7 +919,11 @@ class EntryRepository:
                 Entry.occurred_at >= occurred_at_from,
                 Entry.occurred_at < occurred_at_to,
             )
-            .options(selectinload(Entry.items))
+            .options(
+                selectinload(Entry.items)
+                .selectinload(EntryItem.metrics)
+                .selectinload(EntryItemMetric.metric)
+            )
             .order_by(Entry.occurred_at.asc(), Entry.id.asc())
         )
         return list(self._session.scalars(statement))
@@ -890,7 +982,7 @@ class EntryRepository:
                     for metric in item.metrics
                     if metric.metric is not None
                 }
-                if item_metric_codes != required_metric_code_set:
+                if not required_metric_code_set.issubset(item_metric_codes):
                     is_incomplete = True
                     break
 
@@ -925,11 +1017,49 @@ class EntryRepository:
                     for metric in item.metrics
                     if metric.metric is not None
                 }
-                if item_metric_codes != required_metric_code_set:
+                if not required_metric_code_set.issubset(item_metric_codes):
                     count += 1
                     break
 
         return count
+
+
+class CallbackStateRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(
+        self,
+        *,
+        scope: str,
+        values: dict[str, object],
+    ) -> CallbackState:
+        state = CallbackState(
+            state_key=secrets.token_hex(5),
+            scope=scope,
+            payload_json=json.dumps(values, ensure_ascii=True, separators=(",", ":")),
+        )
+        self._session.add(state)
+        self._session.flush()
+        return state
+
+    def get_payload(
+        self,
+        *,
+        scope: str,
+        state_key: str,
+    ) -> CallbackStatePayload | None:
+        statement = select(CallbackState).where(
+            CallbackState.scope == scope,
+            CallbackState.state_key == state_key,
+        )
+        state = self._session.scalar(statement)
+        if state is None:
+            return None
+        return CallbackStatePayload(
+            scope=state.scope,
+            values=json.loads(state.payload_json),
+        )
 
 
 class ConversationSessionRepository:
@@ -1088,6 +1218,109 @@ class SupportedMetricRepository:
         statement = select(SupportedMetric).where(SupportedMetric.code.in_(codes))
         metrics = list(self._session.scalars(statement))
         return {metric.code: metric for metric in metrics}
+
+
+class SupportedDietRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def list_all(self) -> list[SupportedDiet]:
+        statement = select(SupportedDiet).order_by(SupportedDiet.id.asc())
+        return list(self._session.scalars(statement))
+
+    def list_enabled(self) -> list[SupportedDiet]:
+        statement = (
+            select(SupportedDiet)
+            .where(SupportedDiet.is_enabled.is_(True))
+            .order_by(SupportedDiet.id.asc())
+        )
+        return list(self._session.scalars(statement))
+
+    def get_by_code(self, *, code: str) -> SupportedDiet | None:
+        statement = select(SupportedDiet).where(SupportedDiet.code == code)
+        return self._session.scalar(statement)
+
+
+class UserDietPreferenceRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_by_user_and_diet(self, *, user_id: int, diet_id: int) -> UserDietPreference | None:
+        statement = select(UserDietPreference).where(
+            UserDietPreference.user_id == user_id,
+            UserDietPreference.diet_id == diet_id,
+        )
+        return self._session.scalar(statement)
+
+    def get_or_create(self, *, user_id: int, diet_id: int) -> tuple[UserDietPreference, bool]:
+        preference = self.get_by_user_and_diet(user_id=user_id, diet_id=diet_id)
+        if preference is not None:
+            return preference, False
+
+        preference = UserDietPreference(
+            user_id=user_id,
+            diet_id=diet_id,
+            is_enabled=False,
+        )
+        self._session.add(preference)
+        self._session.flush()
+        return preference, True
+
+    def set_enabled(
+        self,
+        *,
+        user_id: int,
+        diet_id: int,
+        is_enabled: bool,
+    ) -> UserDietPreference:
+        preference, _created = self.get_or_create(user_id=user_id, diet_id=diet_id)
+        preference.is_enabled = is_enabled
+        self._session.flush()
+        return preference
+
+    def toggle(
+        self,
+        *,
+        user_id: int,
+        diet_id: int,
+    ) -> UserDietPreference:
+        preference, _created = self.get_or_create(user_id=user_id, diet_id=diet_id)
+        preference.is_enabled = not preference.is_enabled
+        self._session.flush()
+        return preference
+
+    def list_diets_for_user(self, *, user_id: int) -> list[SupportedDietView]:
+        supported_diets = SupportedDietRepository(self._session).list_enabled()
+        preferences = list(
+            self._session.scalars(
+                select(UserDietPreference).where(UserDietPreference.user_id == user_id)
+            )
+        )
+        preferences_by_diet_id = {preference.diet_id: preference for preference in preferences}
+        return [
+            SupportedDietView(
+                code=diet.code,
+                name=diet.name,
+                is_enabled=diet.is_enabled,
+                is_selected=bool(
+                    preferences_by_diet_id.get(diet.id) and preferences_by_diet_id[diet.id].is_enabled
+                ),
+            )
+            for diet in supported_diets
+        ]
+
+    def list_enabled_for_user(self, *, user_id: int) -> list[SupportedDiet]:
+        statement = (
+            select(SupportedDiet)
+            .join(UserDietPreference, UserDietPreference.diet_id == SupportedDiet.id)
+            .where(
+                SupportedDiet.is_enabled.is_(True),
+                UserDietPreference.user_id == user_id,
+                UserDietPreference.is_enabled.is_(True),
+            )
+            .order_by(SupportedDiet.id.asc())
+        )
+        return list(self._session.scalars(statement))
 
 
 class EntryItemMetricRepository:

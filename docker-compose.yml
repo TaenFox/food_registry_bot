@@ -1,7 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: food_registry_postgres
+    container_name: "${COMPOSE_PROJECT_NAME:-food_registry}_postgres"
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-food_registry}
@@ -20,7 +20,7 @@ services:
   bot:
     build:
       context: .
-    container_name: food_registry_bot
+    container_name: "${COMPOSE_PROJECT_NAME:-food_registry}_bot"
     restart: unless-stopped
     mem_limit: 200m
     depends_on:

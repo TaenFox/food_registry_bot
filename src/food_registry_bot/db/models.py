@@ -121,6 +121,10 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    diet_preferences: Mapped[list["UserDietPreference"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 
 class UserAccess(Base):
@@ -154,6 +158,7 @@ class UserLLMProfile(Base):
         Enum(UserLLMSelectionMode, name="user_llm_selection_mode", values_callable=enum_values),
         default=UserLLMSelectionMode.PROJECT,
     )
+    user_context_comment: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -216,6 +221,7 @@ class UserSummaryPreference(Base):
     show_carbs: Mapped[bool] = mapped_column(default=True)
     show_fiber: Mapped[bool] = mapped_column(default=True)
     show_water: Mapped[bool] = mapped_column(default=True)
+    show_day_progress_bar: Mapped[bool] = mapped_column(default=False)
     show_post_entry_delta_suffix: Mapped[bool] = mapped_column(default=True)
     summary_display_mode: Mapped[str] = mapped_column(String(16), default="text")
     nutrition_day_start_hour: Mapped[int] = mapped_column(default=4)
@@ -348,6 +354,45 @@ class EntryItem(Base):
     )
 
 
+class SupportedDiet(Base):
+    __tablename__ = "supported_diets"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    is_enabled: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    user_preferences: Mapped[list["UserDietPreference"]] = relationship(back_populates="diet")
+
+
+class UserDietPreference(Base):
+    __tablename__ = "user_diet_preferences"
+    __table_args__ = (
+        UniqueConstraint("user_id", "diet_id", name="uq_user_diet_preferences_user_id_diet_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    diet_id: Mapped[int] = mapped_column(ForeignKey("supported_diets.id"), index=True)
+    is_enabled: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    user: Mapped["User"] = relationship(back_populates="diet_preferences")
+    diet: Mapped["SupportedDiet"] = relationship(back_populates="user_preferences")
+
+
 class SupportedMetric(Base):
     __tablename__ = "supported_metrics"
 
@@ -390,6 +435,24 @@ class EntryItemMetric(Base):
 
     entry_item: Mapped["EntryItem"] = relationship(back_populates="metrics")
     metric: Mapped["SupportedMetric"] = relationship(back_populates="entry_item_metrics")
+
+
+class CallbackState(Base):
+    __tablename__ = "callback_states"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    state_key: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    scope: Mapped[str] = mapped_column(String(64), index=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
 
 
 class DataExchangeFile(Base):

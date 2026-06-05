@@ -11,10 +11,14 @@ from food_registry_bot.db.models import (
     EntryItem,
     EntryItemMetric,
     EntryType,
+    SupportedDiet,
     SupportedMetric,
     User,
+    UserDietPreference,
     UserGoalPreference,
+    UserLLMProfile,
 )
+from food_registry_bot.db.repositories import SupportedDietRepository
 
 
 def create_session_factory() -> sessionmaker[Session]:
@@ -29,6 +33,13 @@ def create_session_factory() -> sessionmaker[Session]:
     with factory() as session:
         session.add_all(
             [
+                SupportedDiet(code="low_purine", name="Низкопуриновая", is_enabled=True),
+                SupportedDiet(
+                    code="insulin_resistance",
+                    name="При инсулинорезистентности",
+                    is_enabled=True,
+                ),
+                SupportedDiet(code="gastritis", name="При гастрите", is_enabled=True),
                 SupportedMetric(code="calories", name="Calories", unit="kcal"),
                 SupportedMetric(code="protein", name="Protein", unit="g"),
                 SupportedMetric(code="fat", name="Fat", unit="g"),
@@ -36,6 +47,13 @@ def create_session_factory() -> sessionmaker[Session]:
                 SupportedMetric(code="fiber", name="Fiber", unit="g"),
                 SupportedMetric(code="workout_calories", name="Workout Calories", unit="kcal"),
                 SupportedMetric(code="workout_calorie_credit", name="Workout Calorie Credit", unit="kcal"),
+                SupportedMetric(code="low_purine_score", name="Low Purine Score", unit="score"),
+                SupportedMetric(
+                    code="insulin_resistance_score",
+                    name="Insulin Resistance Score",
+                    unit="score",
+                ),
+                SupportedMetric(code="gastritis_score", name="Gastritis Score", unit="score"),
             ]
         )
         session.commit()
@@ -59,6 +77,15 @@ def test_nutrition_coach_context_builder_uses_day_facts_and_recent_entries() -> 
                 water_goal=2500,
             )
         )
+        session.add(
+            UserLLMProfile(
+                user_id=user.id,
+                user_context_comment="Инсулинорезистентность и гастрит, нужен щадящий формат советов.",
+            )
+        )
+        low_purine_diet = SupportedDietRepository(session).get_by_code(code="low_purine")
+        assert low_purine_diet is not None
+        session.add(UserDietPreference(user_id=user.id, diet_id=low_purine_diet.id, is_enabled=True))
 
         food_entry = Entry(
             user_id=user.id,
@@ -110,6 +137,8 @@ def test_nutrition_coach_context_builder_uses_day_facts_and_recent_entries() -> 
     }
     assert context.goal_progress["protein"].goal_value == 120
     assert context.goal_progress["water"].remaining_value == 2000.0
+    assert context.user_context_comment == "Инсулинорезистентность и гастрит, нужен щадящий формат советов."
+    assert [(diet.code, diet.name) for diet in context.active_diets] == [("low_purine", "Низкопуриновая")]
     assert len(context.recent_entries) == 2
     assert context.recent_entries[0].entry_type == "water"
     assert context.recent_entries[0].rendered_items == ["вода: 500 мл"]

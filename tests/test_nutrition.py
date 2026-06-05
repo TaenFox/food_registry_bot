@@ -27,6 +27,8 @@ from food_registry_bot.nutrition import (
     prepare_nutrition_request_from_extracted_payload,
     resolve_nutrition_estimates,
 )
+from food_registry_bot.diet.mistral_client import MistralChatCompletionsDietClient
+from food_registry_bot.diet.openai_client import OpenAIResponsesDietClient
 
 
 def build_request() -> NutritionEstimationRequest:
@@ -315,6 +317,16 @@ def test_openai_nutrition_client_builds_request_with_json_contract() -> None:
     assert content[0]["type"] == "input_text"
     assert content[1]["type"] == "input_text"
     assert '"client_item_id": "entry-1:item-0"' in content[1]["text"]
+
+
+def test_diet_prompts_require_evidence_based_guidance() -> None:
+    openai_prompt = OpenAIResponsesDietClient._build_system_prompt()
+    mistral_prompt = MistralChatCompletionsDietClient._build_system_prompt()
+
+    assert "evidence-based diet guidance" in openai_prompt
+    assert "not fads" in openai_prompt
+    assert "evidence-based diet guidance" in mistral_prompt
+    assert "not fads" in mistral_prompt
 
 
 def test_prepare_nutrition_request_from_extracted_payload_includes_food_items_without_quantity() -> None:

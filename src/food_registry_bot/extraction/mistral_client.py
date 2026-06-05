@@ -115,6 +115,7 @@ class MistralChatCompletionsExtractionClient:
             "If quantity is estimated, prefer grams for food and milliliters for water or drinks; for liquid food items like dipping sauces, milliliters are also allowed. "
             "Do not return a bare number without a unit. "
             "For solid food use grams, for water or drinks use milliliters, for liquid sauces use milliliters, and for workout duration use minutes. "
+            "If the user uses household units like glass, cup, mug, piece, or штука, convert them into estimated milliliters or grams instead of returning those units directly whenever a reasonable estimate is possible. "
             "Avoid vague units like portion, piece, slice, spoon, or serving when grams or milliliters can be reasonably estimated. "
             "For foods made of several visible pieces of the same dish, estimate the weight of one piece first and then sum them into one total gram value. "
             "If a dipping sauce is served separately and clearly visible, save it as a separate item and estimate it in milliliters. "

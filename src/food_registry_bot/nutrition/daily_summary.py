@@ -165,7 +165,7 @@ class DailyNutritionSummaryUseCase:
                 for metric in item.metrics
                 if metric.metric is not None
             }
-            if set(metric_values) != self._required_metric_codes:
+            if not self._required_metric_codes.issubset(metric_values):
                 return None
 
             item_totals = DailyNutritionTotals(
