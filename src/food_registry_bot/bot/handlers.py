@@ -76,7 +76,7 @@ from food_registry_bot.conversation import (
     DisabledConversationService,
     NutritionCoachContextBuilder,
 )
-from food_registry_bot.config import Settings, get_data_exchange_dir
+from food_registry_bot.config import Settings, get_data_exchange_dir, get_settings
 from food_registry_bot.diet import (
     DietDefinitionInput,
     DietEvaluationItemInput,
@@ -410,9 +410,11 @@ async def safe_delete_message(message: Message) -> None:
         await delete()
 
 
-async def refresh_main_keyboard(message: Message) -> None:
-    keyboard_message = await message.answer("\u2060", reply_markup=build_main_keyboard())
-    await safe_delete_message(keyboard_message)
+async def send_main_keyboard_message(message: Message) -> None:
+    await message.answer(
+        "Основные действия доступны на клавиатуре ниже.",
+        reply_markup=build_main_keyboard(),
+    )
 
 
 async def safe_edit_message_by_id(
@@ -587,7 +589,7 @@ def build_llm_context_response(*, user_context_comment: str | None) -> str:
         return (
             "Пользовательский контекст для LLM пока не задан.\n"
             "Чтобы сохранить его, отправь команду:\n"
-            f"<code>/context твой текст для ЛЛМ</code>"
+            "<code>/context твой текст для ЛЛМ</code>"
         )
 
     return (
@@ -674,7 +676,12 @@ def resolve_account_category_for_provider(
 ) -> AccountCategory:
     if is_admin_user(telegram_user_id, admin_user_ids):
         return AccountCategory.INTERNAL
-    return UserAccessRepository(session).get_account_category(telegram_user_id)
+    return UserAccessRepository(session).get_effective_account_category(telegram_user_id)
+
+
+def format_admin_datetime(value: datetime) -> str:
+    normalized_value = UserAccessRepository.normalize_datetime(value)
+    return normalized_value.strftime("%Y-%m-%d %H:%M UTC")
 
 
 def build_personal_provider_required_message() -> str:
@@ -783,6 +790,8 @@ def build_admin_user_directory(known_users: list, admin_user_ids: tuple[int, ...
             has_profile=False,
             is_allowed=False,
             account_category=AccountCategory.INTERNAL.value,
+            effective_account_category=AccountCategory.INTERNAL.value,
+            temporary_internal_until=None,
         )
     admin_entries = [users_by_id[telegram_user_id] for telegram_user_id in sorted(admin_user_ids) if telegram_user_id in users_by_id]
     regular_entries = [
@@ -803,7 +812,7 @@ def build_admin_user_button_label(known_user, *, is_admin: bool) -> str:
     if is_admin:
         category_part = AccountCategory.INTERNAL.value
     else:
-        category_part = known_user.account_category
+        category_part = known_user.effective_account_category
     return truncate_button_label(
         f"{known_user.telegram_user_id} · {username_part} · {status_part} · {category_part}",
         max_length=40,
@@ -820,7 +829,7 @@ def build_admin_users_page_response(known_users: list, *, page: int, page_size: 
         is_admin = known_user.telegram_user_id in admin_user_ids
         status = "admin" if is_admin else ("доступ разрешён" if known_user.is_allowed else "доступ запрещён")
         profile_status = "профиль есть" if known_user.has_profile else "профиля нет"
-        category = AccountCategory.INTERNAL.value if is_admin else known_user.account_category
+        category = AccountCategory.INTERNAL.value if is_admin else known_user.effective_account_category
         lines.append(
             f"- {known_user.telegram_user_id}{username_suffix} [{status}; {category}; {profile_status}]"
         )
@@ -832,18 +841,29 @@ def build_admin_user_actions_response(*, known_user, entry_count: int, is_admin:
     username_suffix = f"@{known_user.username}" if known_user.username else "—"
     access_status = "admin" if is_admin else ("разрешён" if known_user.is_allowed else "запрещён")
     profile_status = "есть" if known_user.has_profile else "нет"
-    account_category = AccountCategory.INTERNAL.value if is_admin else known_user.account_category
-    return "\n".join(
+    lines = [
+        "Пользователь:",
+        f"- Telegram ID: {known_user.telegram_user_id}",
+        f"- username: {username_suffix}",
+        f"- доступ: {access_status}",
+    ]
+    if is_admin:
+        lines.append(f"- категория аккаунта: {AccountCategory.INTERNAL.value}")
+    else:
+        lines.append(f"- категория аккаунта: {known_user.account_category}")
+        if known_user.effective_account_category != known_user.account_category:
+            lines.append(f"- активная категория аккаунта: {known_user.effective_account_category}")
+        if known_user.temporary_internal_until is not None:
+            lines.append(
+                f"- временный internal до: {format_admin_datetime(known_user.temporary_internal_until)}"
+            )
+    lines.extend(
         [
-            "Пользователь:",
-            f"- Telegram ID: {known_user.telegram_user_id}",
-            f"- username: {username_suffix}",
-            f"- доступ: {access_status}",
-            f"- категория аккаунта: {account_category}",
             f"- профиль: {profile_status}",
             f"- записей в журнале: {entry_count}",
         ]
     )
+    return "\n".join(lines)
 
 
 def build_admin_delete_entries_prompt(*, telegram_user_id: int, entry_count: int) -> str:
@@ -3769,6 +3789,10 @@ async def handle_admin_panel_callback(
                     is_allowed=True,
                     is_admin=False,
                     account_category=known_user.account_category,
+                    temporary_internal_active=(
+                        known_user.effective_account_category == AccountCategory.INTERNAL.value
+                        and known_user.account_category != AccountCategory.INTERNAL.value
+                    ),
                 ),
             )
             await callback.answer("Доступ разрешён.")
@@ -3804,6 +3828,10 @@ async def handle_admin_panel_callback(
                     is_allowed=False,
                     is_admin=False,
                     account_category=known_user.account_category,
+                    temporary_internal_active=(
+                        known_user.effective_account_category == AccountCategory.INTERNAL.value
+                        and known_user.account_category != AccountCategory.INTERNAL.value
+                    ),
                 ),
             )
             await callback.answer("Доступ запрещён.")
@@ -3844,6 +3872,7 @@ async def handle_admin_panel_callback(
                     is_allowed=updated_access.is_allowed,
                     is_admin=False,
                     account_category=known_user.account_category,
+                    temporary_internal_active=False,
                 ),
             )
             await callback.answer(
@@ -3851,6 +3880,41 @@ async def handle_admin_panel_callback(
                 if target_category is AccountCategory.INTERNAL
                 else "Категория переключена на external."
             )
+            return
+
+        if callback_data.action == "grant_temporary_internal":
+            if is_admin_target:
+                await callback.answer("Для администратора это действие недоступно.", show_alert=True)
+                return
+            updated_access = UserAccessRepository(session).grant_temporary_internal(
+                telegram_user_id=known_user.telegram_user_id,
+                username=known_user.username,
+            )
+            known_user = find_known_user(
+                build_admin_user_directory(UserAccessRepository(session).list_known_users(), admin_user_ids),
+                telegram_user_id=callback_data.telegram_user_id,
+            )
+            entry_owner = UserRepository(session).get_by_telegram_user_id(callback_data.telegram_user_id)
+            entry_count = 0
+            if entry_owner is not None:
+                entry_count = len(EntryRepository(session).list_recent_for_user(user_id=entry_owner.id, limit=100000))
+            await safe_edit_message_text(
+                callback.message,
+                text=build_admin_user_actions_response(
+                    known_user=known_user,
+                    entry_count=entry_count,
+                    is_admin=False,
+                ),
+                reply_markup=build_admin_user_actions_keyboard(
+                    telegram_user_id=updated_access.telegram_user_id,
+                    page=callback_data.page,
+                    is_allowed=updated_access.is_allowed,
+                    is_admin=False,
+                    account_category=known_user.account_category,
+                    temporary_internal_active=True,
+                ),
+            )
+            await callback.answer("Временный internal включён на 24 часа.")
             return
 
         entry_owner = UserRepository(session).get_by_telegram_user_id(callback_data.telegram_user_id)
@@ -3872,6 +3936,10 @@ async def handle_admin_panel_callback(
                     is_allowed=known_user.is_allowed,
                     is_admin=is_admin_target,
                     account_category=known_user.account_category,
+                    temporary_internal_active=(
+                        known_user.effective_account_category == AccountCategory.INTERNAL.value
+                        and known_user.account_category != AccountCategory.INTERNAL.value
+                    ),
                 ),
             )
             await callback.answer()
@@ -3996,7 +4064,7 @@ async def handle_start(
             workout_logging_enabled=user.workout_logging_enabled,
         ),
     )
-    await refresh_main_keyboard(message)
+    await send_main_keyboard_message(message)
 
 
 @router.message(Command("ping"))
@@ -4032,7 +4100,6 @@ async def handle_provider(
 
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
-        access = UserAccessRepository(session).get_by_telegram_user_id(telegram_user.id)
         profile, _created = UserLLMProfileRepository(session).get_or_create(user_id=user_id)
         connections = UserLLMConnectionRepository(session).list_views_for_user(user_id=user_id)
         account_category = resolve_account_category_for_provider(
@@ -4053,9 +4120,7 @@ async def handle_provider(
     await message.answer(
         build_provider_settings_response(
             telegram_user_id=telegram_user.id,
-            account_category=(
-                access.account_category.value if access is not None else AccountCategory.UNASSIGNED.value
-            ),
+            account_category=account_category.value,
             selection_mode=profile.selection_mode.value,
             project_openai_enabled=project_openai_enabled,
             personal_connections_enabled=personal_connections_enabled,
@@ -4362,9 +4427,7 @@ async def handle_provider_menu_callback(
         callback.message,
         text=build_provider_settings_response(
             telegram_user_id=telegram_user.id,
-            account_category=(
-                access.account_category.value if access is not None else AccountCategory.UNASSIGNED.value
-            ),
+            account_category=account_category.value,
             selection_mode=profile.selection_mode.value,
             project_openai_enabled=bool(settings.enable_openai_provider and settings.openai_api_key),
             personal_connections_enabled=bool(

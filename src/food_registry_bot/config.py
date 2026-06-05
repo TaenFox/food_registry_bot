@@ -32,6 +32,18 @@ def resolve_default_data_exchange_dir() -> Path:
     return Path.cwd() / "var" / "data_exchange"
 
 
+def resolve_default_heartbeat_file() -> Path:
+    return Path.cwd() / "var" / "run" / "bot-heartbeat"
+
+
+def resolve_default_runtime_state_file() -> Path:
+    return Path.cwd() / "var" / "run" / "bot-runtime-state.json"
+
+
+def resolve_default_restart_marker_file() -> Path:
+    return Path.cwd() / "var" / "run" / "bot-restart-marker.json"
+
+
 def get_data_exchange_dir() -> Path:
     return get_settings().data_exchange_dir
 
@@ -110,6 +122,27 @@ class Settings(BaseSettings):
     data_exchange_dir: Path = Field(
         default_factory=resolve_default_data_exchange_dir,
         alias="DATA_EXCHANGE_DIR",
+    )
+    watchdog_enabled: bool = Field(default=True, alias="WATCHDOG_ENABLED")
+    watchdog_heartbeat_interval_seconds: float = Field(
+        default=15.0,
+        alias="WATCHDOG_HEARTBEAT_INTERVAL_SECONDS",
+    )
+    watchdog_timeout_seconds: float = Field(
+        default=90.0,
+        alias="WATCHDOG_TIMEOUT_SECONDS",
+    )
+    heartbeat_file: Path = Field(
+        default_factory=resolve_default_heartbeat_file,
+        alias="HEARTBEAT_FILE",
+    )
+    runtime_state_file: Path = Field(
+        default_factory=resolve_default_runtime_state_file,
+        alias="RUNTIME_STATE_FILE",
+    )
+    restart_marker_file: Path = Field(
+        default_factory=resolve_default_restart_marker_file,
+        alias="RESTART_MARKER_FILE",
     )
 
     postgres_host: str = Field(default="localhost", alias="POSTGRES_HOST")

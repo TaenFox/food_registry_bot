@@ -142,7 +142,7 @@ def resolve_llm_provider_access(
     account_category = (
         AccountCategory.INTERNAL
         if is_admin
-        else UserAccessRepository(session).get_account_category(telegram_user_id)
+        else UserAccessRepository(session).get_effective_account_category(telegram_user_id)
     )
     profile, _created = UserLLMProfileRepository(session).get_or_create(user_id=user_id)
 

@@ -3,12 +3,29 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 from food_registry_bot.main import build_startup_notification, notify_admins_about_startup
+from food_registry_bot.runtime_state import RestartMarker
 
 
 def test_build_startup_notification_includes_version() -> None:
     assert build_startup_notification(app_version="feature/import-export") == (
         "Бот запущен.\n"
         "Версия: feature/import-export"
+    )
+
+
+def test_build_startup_notification_includes_restart_marker() -> None:
+    assert build_startup_notification(
+        app_version="feature/import-export",
+        restart_marker=RestartMarker(
+            reason="watchdog: stale heartbeat detected",
+            recorded_at="2026-06-05T01:23:45+00:00",
+        ),
+    ) == (
+        "Бот запущен.\n"
+        "Версия: feature/import-export\n"
+        "Предыдущий запуск завершился нештатно.\n"
+        "Причина: watchdog: stale heartbeat detected\n"
+        "Когда зафиксировано: 2026-06-05T01:23:45+00:00"
     )
 
 

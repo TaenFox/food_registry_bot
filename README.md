@@ -375,6 +375,19 @@ CONVERSATION_MODEL=gpt-5-mini
 - выполняет `alembic upgrade head`;
 - запускает polling-процесс бота.
 
+Для бота также включён watchdog liveness-контроль:
+
+- event loop периодически обновляет heartbeat-файл `var/run/bot-heartbeat`;
+- container `healthcheck` проверяет свежесть этого heartbeat;
+- если event loop зависнет и heartbeat перестанет обновляться, внутренний watchdog завершит процесс с кодом `1`, после чего `restart: unless-stopped` перезапустит контейнер.
+- при следующем старте бот добавит в startup-уведомление админам признак нештатного рестарта и его причину, если она была зафиксирована.
+
+Под это поведение доступны env-переменные:
+
+- `WATCHDOG_ENABLED=true|false`
+- `WATCHDOG_HEARTBEAT_INTERVAL_SECONDS=15`
+- `WATCHDOG_TIMEOUT_SECONDS=90`
+
 Для просмотра логов:
 
 ```bash
@@ -410,17 +423,17 @@ git pull
 
 ## Автодеплой по GitHub тегу
 
-Для первого релиза принят самый простой формат тегов:
+Для релизов принят формат тегов `vMAJOR.MINOR`:
 
-- `v1`
-- `v2`
-- `v3`
+- `v1.0`
+- `v1.1`
+- `v9.1`
 
 При push нового тега такого вида GitHub Actions запускает workflow:
 
 `/.github/workflows/release-on-tag.yml`
 
-Workflow также можно запустить вручную через `Run workflow` и передать `git_ref`, например `main`.
+Workflow также можно запустить вручную через `Run workflow` и передать `git_ref`, например `main` или `v9.1`.
 
 Что делает workflow:
 
@@ -449,8 +462,8 @@ Workflow также можно запустить вручную через `Run
 6. После успешной ручной проверки запушить тег, например:
 
 ```bash
-git tag v1
-git push origin v1
+git tag v9.1
+git push origin v9.1
 ```
 
 ## Локальная конфигурация

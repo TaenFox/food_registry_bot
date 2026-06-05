@@ -123,6 +123,39 @@ def test_resolve_openai_provider_access_uses_personal_key_for_external_user() ->
     assert access.api_key == "personal-openai-key"
 
 
+def test_resolve_openai_provider_access_uses_project_key_for_temporary_internal_user() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=1004, username="temporary_internal_user")
+    access_repository = UserAccessRepository(session)
+    access_repository.set_access(
+        telegram_user_id=1004,
+        username="temporary_internal_user",
+        is_allowed=True,
+        account_category=AccountCategory.EXTERNAL,
+    )
+    access_repository.grant_temporary_internal(
+        telegram_user_id=1004,
+        username="temporary_internal_user",
+    )
+    settings = make_settings(
+        openai_api_key="project-openai-key",
+        enable_openai_provider=True,
+    )
+
+    access = resolve_openai_provider_access(
+        session=session,
+        settings=settings,
+        user_id=user.id,
+        telegram_user_id=1004,
+        admin_user_ids=(),
+        model=settings.conversation_model,
+    )
+
+    assert access.is_available is True
+    assert access.source == "project"
+    assert access.api_key == "project-openai-key"
+
+
 def test_resolve_llm_provider_access_uses_selected_mistral_key_for_external_user() -> None:
     session = create_test_session()
     user = UserRepository(session).create(telegram_user_id=1003, username="external_mistral_user")
