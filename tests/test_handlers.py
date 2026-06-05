@@ -23,7 +23,6 @@ from food_registry_bot.bot.handlers import (
     handle_admin_backfill_nutrition,
     handle_data_exchange_file_callback,
     handle_goal,
-    handle_goal_message_callback,
     handle_health,
     handle_llm_context,
     handle_message,
@@ -32,6 +31,7 @@ from food_registry_bot.bot.handlers import (
     handle_provider_save,
     handle_period_report_callback,
     handle_recent,
+    handle_recent_button,
     handle_recent_action_callback,
     handle_recent_action_state_callback,
     handle_recent_delete_callback,
@@ -46,7 +46,6 @@ from food_registry_bot.bot.message_routing import MessageRoutingDecision
 from food_registry_bot.bot.payloads import (
     AdminPanelCallback,
     DataExchangeFileCallback,
-    GoalMessageCallback,
     PeriodReportCallback,
     ProviderMenuCallback,
     RecentEntryActionCallback,
@@ -54,7 +53,7 @@ from food_registry_bot.bot.payloads import (
     RecentEntryStateCallback,
     SummarySettingsCallback,
 )
-from food_registry_bot.bot.keyboards import WATER_250_ML_BUTTON_TEXT
+from food_registry_bot.bot.keyboards import RECENT_BUTTON_TEXT, REPORT_BUTTON_TEXT, SETTINGS_BUTTON_TEXT, TODAY_BUTTON_TEXT, WATER_250_ML_BUTTON_TEXT
 from food_registry_bot.bot.keyboards import build_data_exchange_files_keyboard
 from food_registry_bot.db.base import Base
 from food_registry_bot.db.models import (
@@ -274,22 +273,23 @@ async def test_start_creates_user_for_allowed_user() -> None:
         saved_user = session.query(User).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
 
     assert saved_user.username == "allowed_user"
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == (
-        "Профиль создан.\n"
-        "Что можно сделать:\n"
-        "- отправить запись еды текстом или фото блюда;\n"
-        "- нажать кнопку воды;\n"
-        "- при желании включить запись тренировок в /settings;\n"
-        "- задать вопрос о питании;\n"
-        "- посмотреть итог дня: /today;\n"
-        "- посмотреть отчёт за период: /report;\n"
-        "- посмотреть и удалить последние записи: /recent;\n"
-        "- посмотреть или изменить цели: /goal;\n"
-        "- настроить summary: /settings;\n"
-        "- задать пользовательский контекст для ЛЛМ: /context;\n"
-        "- управлять файлами импорта и экспорта: /files.",
+    assert message.answer.await_count == 2
+    assert message.answer.await_args_list[0].args == (
+        "Настройки:\n"
+        "- Цели: дневные цели по калориям, БЖУ, клетчатке и воде.\n"
+        "- Метрики: какие показатели учитывать в итогах дня и отчётах.\n"
+        "- Отображение: формат summary, прогресс дня и дельта после записи.\n"
+        "- Отчёты: начало пищевого дня, допуск к цели и порог заметных записей.\n"
+        "- Диеты: какие диетические оценки учитывать.\n\n"
+        "Другие команды:\n"
+        "- /provider — управление LLM-подключениями.\n"
+        "- /context — пользовательский контекст для LLM.\n"
+        "- /files — импорт и экспорт данных.\n"
+        "- /ping — техническая проверка доступности.\n\n"
+        "Выбери раздел кнопкой ниже.",
     )
+    assert message.answer.await_args_list[1].args == ("\u2060",)
+    assert message.answer.await_args_list[1].kwargs["reply_markup"].is_persistent is True
 
 
 async def test_health_denies_unallowed_user() -> None:
@@ -1956,6 +1956,39 @@ async def test_recent_returns_latest_entries_for_allowed_user() -> None:
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
     assert reply_markup.inline_keyboard[0][0].text == "Открыть запись"
     assert reply_markup.inline_keyboard[1][0].text == "Закрыть"
+
+
+async def test_recent_button_returns_latest_entries_for_allowed_user() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_button_user")
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="recent_button_user", timezone="Europe/Moscow")
+        session.add(user)
+        session.flush()
+
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.WATER,
+            source_text="250 мл",
+            occurred_at=datetime(2026, 5, 18, 11, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        session.add(EntryItem(entry_id=entry.id, position=0, name="water", quantity=250, unit="ml"))
+        session.commit()
+
+    message = SimpleNamespace(
+        text=RECENT_BUTTON_TEXT,
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_button_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_button(message, session_factory, admin_user_ids=(ADMIN_ID,))
+
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args == (
+        "Последние записи (страница 1, по 5):\n\n18.05.2026\n1. 14:00 — вода (250 мл)",
+    )
 
 
 async def test_recent_shows_pagination_controls_for_next_page() -> None:
@@ -5029,46 +5062,24 @@ async def test_settings_returns_current_summary_preferences() -> None:
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Настройки summary:\n"
-        "- тренировки: выключено\n"
-        "Диеты:\n"
-        "- низкопуриновая: выключено\n"
-        "- при инсулинорезистентности: выключено\n"
-        "- при гастрите: выключено\n"
-        "- калории: включено\n"
-        "- белки: включено\n"
-        "- жиры: включено\n"
-        "- углеводы: включено\n"
-        "- клетчатка: включено\n"
-        "- вода: включено\n"
-        "- прогресс дня: выключено\n"
-        "- дельта записи: включено\n"
-        "- отображение: текст\n"
-        "- начало дня: 04:00\n"
-        "- допуск к цели: 10%\n"
-        "- порог заметных записей: 80%",
+        "Настройки:\n"
+        "- Цели: дневные цели по калориям, БЖУ, клетчатке и воде.\n"
+        "- Метрики: какие показатели учитывать в итогах дня и отчётах.\n"
+        "- Отображение: формат summary, прогресс дня и дельта после записи.\n"
+        "- Отчёты: начало пищевого дня, допуск к цели и порог заметных записей.\n"
+        "- Диеты: какие диетические оценки учитывать.\n\n"
+        "Другие команды:\n"
+        "- /provider — управление LLM-подключениями.\n"
+        "- /context — пользовательский контекст для LLM.\n"
+        "- /files — импорт и экспорт данных.\n"
+        "- /ping — техническая проверка доступности.\n\n"
+        "Выбери раздел кнопкой ниже.",
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
-    assert len(reply_markup.inline_keyboard) == 17
+    assert len(reply_markup.inline_keyboard) == 6
     assert all(len(row) == 1 for row in reply_markup.inline_keyboard)
-    assert len(reply_markup.inline_keyboard[-1]) == 1
     button_texts = flatten_inline_button_texts(reply_markup)
-    assert "Тренировки: off" in button_texts
-    assert "Диета: Низкопуриновая off" in button_texts
-    assert "Диета: При инсулинорезистентности off" in button_texts
-    assert "Диета: При гастрите off" in button_texts
-    assert "Калории: on" in button_texts
-    assert "Белки: on" in button_texts
-    assert "Жиры: on" in button_texts
-    assert "Углеводы: on" in button_texts
-    assert "Клетчатка: on" in button_texts
-    assert "Вода: on" in button_texts
-    assert "Прогресс дня: off" in button_texts
-    assert "Дельта записи: on" in button_texts
-    assert "Отображение: текст" in button_texts
-    assert "Начало дня: 04:00" in button_texts
-    assert "Допуск к цели: 10%" in button_texts
-    assert "Порог заметных записей: 80%" in button_texts
+    assert button_texts == ["Цели", "Метрики", "Отображение", "Отчёты", "Диеты", "Закрыть"]
     assert "Закрыть" in button_texts
 
 
@@ -5133,24 +5144,15 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
     assert saved_preference.show_protein is False
     callback.message.edit_text.assert_awaited_once()
     assert callback.message.edit_text.await_args.args == (
-        "Настройки summary:\n"
-        "- тренировки: выключено\n"
-        "Диеты:\n"
-        "- низкопуриновая: выключено\n"
-        "- при инсулинорезистентности: выключено\n"
-        "- при гастрите: выключено\n"
+        "Раздел «Метрики»:\n"
+        "Здесь выбирается, какие показатели бот показывает и учитывает в summary и отчётах.\n\n"
         "- калории: включено\n"
         "- белки: выключено\n"
         "- жиры: включено\n"
         "- углеводы: включено\n"
         "- клетчатка: включено\n"
         "- вода: включено\n"
-        "- прогресс дня: выключено\n"
-        "- дельта записи: включено\n"
-        "- отображение: текст\n"
-        "- начало дня: 04:00\n"
-        "- допуск к цели: 10%\n"
-        "- порог заметных записей: 80%",
+        "- тренировки: выключено",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     button_texts = flatten_inline_button_texts(reply_markup)
@@ -5187,29 +5189,16 @@ async def test_toggle_diet_updates_preference_and_message() -> None:
     assert saved_diet_preference.user_id == saved_user.id
     assert saved_diet_preference.is_enabled is True
     assert callback.message.edit_text.await_args.args == (
-        "Настройки summary:\n"
-        "- тренировки: выключено\n"
-        "Диеты:\n"
+        "Раздел «Диеты»:\n"
+        "Включённые диеты используются в оценке записей и дневных итогов.\n\n"
         "- низкопуриновая: включено\n"
         "- при инсулинорезистентности: выключено\n"
-        "- при гастрите: выключено\n"
-        "- калории: включено\n"
-        "- белки: включено\n"
-        "- жиры: включено\n"
-        "- углеводы: включено\n"
-        "- клетчатка: включено\n"
-        "- вода: включено\n"
-        "- прогресс дня: выключено\n"
-        "- дельта записи: включено\n"
-        "- отображение: текст\n"
-        "- начало дня: 04:00\n"
-        "- допуск к цели: 10%\n"
-        "- порог заметных записей: 80%",
+        "- при гастрите: выключено",
     )
     button_texts = flatten_inline_button_texts(callback.message.edit_text.await_args.kwargs["reply_markup"])
-    assert "Диета: Низкопуриновая on" in button_texts
-    assert "Диета: При инсулинорезистентности off" in button_texts
-    assert "Диета: При гастрите off" in button_texts
+    assert "Диета: Низкопуриновая: on" in button_texts
+    assert "Диета: При инсулинорезистентности: off" in button_texts
+    assert "Диета: При гастрите: off" in button_texts
     callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
@@ -5253,21 +5242,8 @@ async def test_cycle_nutrition_day_start_hour_updates_preference_and_message() -
 
     assert saved_preference.nutrition_day_start_hour == 6
     assert callback.message.edit_text.await_args.args == (
-        "Настройки summary:\n"
-        "- тренировки: выключено\n"
-        "Диеты:\n"
-        "- низкопуриновая: выключено\n"
-        "- при инсулинорезистентности: выключено\n"
-        "- при гастрите: выключено\n"
-        "- калории: включено\n"
-        "- белки: включено\n"
-        "- жиры: включено\n"
-        "- углеводы: включено\n"
-        "- клетчатка: включено\n"
-        "- вода: включено\n"
-        "- прогресс дня: выключено\n"
-        "- дельта записи: включено\n"
-        "- отображение: текст\n"
+        "Раздел «Отчёты»:\n"
+        "Эти параметры влияют на границы дня и на чувствительность периодических отчётов.\n\n"
         "- начало дня: 06:00\n"
         "- допуск к цели: 10%\n"
         "- порог заметных записей: 80%",
@@ -5317,27 +5293,14 @@ async def test_cycle_summary_display_mode_updates_preference_and_message() -> No
 
     assert saved_preference.summary_display_mode == "bars"
     assert callback.message.edit_text.await_args.args == (
-        "Настройки summary:\n"
-        "- тренировки: выключено\n"
-        "Диеты:\n"
-        "- низкопуриновая: выключено\n"
-        "- при инсулинорезистентности: выключено\n"
-        "- при гастрите: выключено\n"
-        "- калории: включено\n"
-        "- белки: включено\n"
-        "- жиры: включено\n"
-        "- углеводы: включено\n"
-        "- клетчатка: включено\n"
-        "- вода: включено\n"
+        "Раздел «Отображение»:\n"
+        "Эти настройки меняют вид ответа бота, но не сами данные.\n\n"
         "- прогресс дня: выключено\n"
-        "- дельта записи: включено\n"
-        "- отображение: бары\n"
-        "- начало дня: 04:00\n"
-        "- допуск к цели: 10%\n"
-        "- порог заметных записей: 80%",
+        "- текст/бары: бары\n"
+        "- дельта записи: включено",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
-    assert "Отображение: бары" in flatten_inline_button_texts(reply_markup)
+    assert "Текст/бары: бары" in flatten_inline_button_texts(reply_markup)
 
 
 async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -> None:
@@ -5379,24 +5342,11 @@ async def test_toggle_post_entry_delta_suffix_updates_preference_and_message() -
 
     assert saved_preference.show_post_entry_delta_suffix is False
     assert callback.message.edit_text.await_args.args == (
-        "Настройки summary:\n"
-        "- тренировки: выключено\n"
-        "Диеты:\n"
-        "- низкопуриновая: выключено\n"
-        "- при инсулинорезистентности: выключено\n"
-        "- при гастрите: выключено\n"
-        "- калории: включено\n"
-        "- белки: включено\n"
-        "- жиры: включено\n"
-        "- углеводы: включено\n"
-        "- клетчатка: включено\n"
-        "- вода: включено\n"
+        "Раздел «Отображение»:\n"
+        "Эти настройки меняют вид ответа бота, но не сами данные.\n\n"
         "- прогресс дня: выключено\n"
-        "- дельта записи: выключено\n"
-        "- отображение: текст\n"
-        "- начало дня: 04:00\n"
-        "- допуск к цели: 10%\n"
-        "- порог заметных записей: 80%",
+        "- текст/бары: текст\n"
+        "- дельта записи: выключено",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert "Дельта записи: off" in flatten_inline_button_texts(reply_markup)
@@ -5443,24 +5393,11 @@ async def test_toggle_day_progress_bar_updates_preference_and_message() -> None:
 
     assert saved_preference.show_day_progress_bar is True
     assert callback.message.edit_text.await_args.args == (
-        "Настройки summary:\n"
-        "- тренировки: выключено\n"
-        "Диеты:\n"
-        "- низкопуриновая: выключено\n"
-        "- при инсулинорезистентности: выключено\n"
-        "- при гастрите: выключено\n"
-        "- калории: включено\n"
-        "- белки: включено\n"
-        "- жиры: включено\n"
-        "- углеводы: включено\n"
-        "- клетчатка: включено\n"
-        "- вода: включено\n"
+        "Раздел «Отображение»:\n"
+        "Эти настройки меняют вид ответа бота, но не сами данные.\n\n"
         "- прогресс дня: включено\n"
-        "- дельта записи: включено\n"
-        "- отображение: текст\n"
-        "- начало дня: 04:00\n"
-        "- допуск к цели: 10%\n"
-        "- порог заметных записей: 80%",
+        "- текст/бары: текст\n"
+        "- дельта записи: включено",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert "Прогресс дня: on" in flatten_inline_button_texts(reply_markup)
@@ -5559,24 +5496,15 @@ async def test_toggle_workout_logging_updates_user_and_message() -> None:
 
     assert saved_user.workout_logging_enabled is True
     assert callback.message.edit_text.await_args.args == (
-        "Настройки summary:\n"
-        "- тренировки: включено\n"
-        "Диеты:\n"
-        "- низкопуриновая: выключено\n"
-        "- при инсулинорезистентности: выключено\n"
-        "- при гастрите: выключено\n"
+        "Раздел «Метрики»:\n"
+        "Здесь выбирается, какие показатели бот показывает и учитывает в summary и отчётах.\n\n"
         "- калории: включено\n"
         "- белки: включено\n"
         "- жиры: включено\n"
         "- углеводы: включено\n"
         "- клетчатка: включено\n"
         "- вода: включено\n"
-        "- прогресс дня: выключено\n"
-        "- дельта записи: включено\n"
-        "- отображение: текст\n"
-        "- начало дня: 04:00\n"
-        "- допуск к цели: 10%\n"
-        "- порог заметных записей: 80%",
+        "- тренировки: включено",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert "Тренировки: on" in flatten_inline_button_texts(reply_markup)
@@ -5874,211 +5802,96 @@ async def test_goal_returns_default_goals_when_preference_is_not_created() -> No
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="goal_user"),
         answer=AsyncMock(),
     )
-    command = SimpleNamespace(args=None)
-
-    original_datetime = handle_goal.__globals__["datetime"]
-
-    class FixedDateTime:
-        @staticmethod
-        def now(tz=None):
-            return datetime(2026, 5, 19, 9, 0, tzinfo=timezone.utc)
-
-    handle_goal.__globals__["datetime"] = FixedDateTime
-    try:
-        await handle_goal(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
-    finally:
-        handle_goal.__globals__["datetime"] = original_datetime
+    await handle_goal(message, session_factory, admin_user_ids=(ADMIN_ID,))
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Текущие цели:\n"
+        "Раздел «Цели»:\n"
+        "Настрой дневные цели кнопками ниже.\n"
+        "Шаг изменения: 100 ккал, 10 г для БЖУ и клетчатки, 100 мл для воды.\n\n"
         "- калории: 1800 ккал\n"
         "- белки: 90 г\n"
         "- жиры: 60 г\n"
         "- углеводы: 210 г\n"
         "- клетчатка: 25 г\n"
-        "- вода: 2000 мл\n"
-        "\n"
-        "Настройка:\n"
-        "- <code>/goal 1800</code>\n"
-        "- <code>/goal protein 90</code>\n"
-        "- <code>/goal fat 60</code>\n"
-        "- <code>/goal carbs 210</code>\n"
-        "- <code>/goal fiber 25</code>\n"
-        "- <code>/goal water 2000</code>\n"
-        "\n"
-        "Пищевой день 2026-05-19:\n"
-        "- калории: 1800 ккал\n"
-        "- белки: 90 г\n"
-        "- жиры: 60 г\n"
-        "- углеводы: 210 г\n"
-        "- клетчатка: 25 г\n"
-        "- вода: 2000 мл\n"
-        "Часовой пояс дня: Europe/Moscow.\n"
-        "Начало пищевого дня: 04:00.",
+        "- вода: 2000 мл",
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
-    assert reply_markup.inline_keyboard[0][0].text == "Закрыть"
+    assert flatten_inline_button_texts(reply_markup)[:3] == ["−100", "Калории: 1800", "+100"]
 
 
-async def test_goal_sets_preference_and_creates_snapshot_for_current_nutrition_day() -> None:
+async def test_goal_increment_updates_preference_via_settings_callback() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "goal_user")
-    message = SimpleNamespace(
+    callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="goal_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
         answer=AsyncMock(),
     )
-    command = SimpleNamespace(args="1800")
 
-    original_datetime = handle_goal.__globals__["datetime"]
-
-    class FixedDateTime:
-        @staticmethod
-        def now(tz=None):
-            return datetime(2026, 5, 19, 9, 0, tzinfo=timezone.utc)
-
-    handle_goal.__globals__["datetime"] = FixedDateTime
-    try:
-        await handle_goal(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
-    finally:
-        handle_goal.__globals__["datetime"] = original_datetime
+    await handle_toggle_summary_metric(
+        callback,
+        SummarySettingsCallback(action="goal_inc_calories"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
 
     with session_factory() as session:
         saved_goal = session.query(UserGoalPreference).one()
-        saved_snapshot = session.query(DailyGoalSnapshot).one()
 
-    assert saved_goal.calorie_goal == 1800
-    assert saved_goal.protein_goal == 90
-    assert saved_goal.fiber_goal == 25
-    assert saved_goal.water_goal == 2000
-    assert saved_snapshot.summary_date.isoformat() == "2026-05-19"
-    assert saved_snapshot.calorie_goal == 1800
-    assert saved_snapshot.protein_goal == 90
-    assert saved_snapshot.fiber_goal == 25
-    assert saved_snapshot.water_goal == 2000
-    assert saved_snapshot.timezone == "Europe/Moscow"
-    assert saved_snapshot.nutrition_day_start_hour == 4
-    message.answer.assert_awaited_once()
-    assert message.answer.await_args.args == (
-        "Текущие цели:\n"
-        "- калории: 1800 ккал\n"
-        "- белки: 90 г\n"
-        "- жиры: 60 г\n"
-        "- углеводы: 210 г\n"
-        "- клетчатка: 25 г\n"
-        "- вода: 2000 мл\n"
-        "\n"
-        "Настройка:\n"
-        "- <code>/goal 1800</code>\n"
-        "- <code>/goal protein 90</code>\n"
-        "- <code>/goal fat 60</code>\n"
-        "- <code>/goal carbs 210</code>\n"
-        "- <code>/goal fiber 25</code>\n"
-        "- <code>/goal water 2000</code>\n"
-        "\n"
-        "Пищевой день 2026-05-19:\n"
-        "- калории: 1800 ккал\n"
-        "- белки: 90 г\n"
-        "- жиры: 60 г\n"
-        "- углеводы: 210 г\n"
-        "- клетчатка: 25 г\n"
-        "- вода: 2000 мл\n"
-        "Часовой пояс дня: Europe/Moscow.\n"
-        "Начало пищевого дня: 04:00.",
-    )
+    assert saved_goal.calorie_goal == 1900
+    assert "калории: 1900 ккал" in callback.message.edit_text.await_args.args[0]
+    callback.answer.assert_awaited_once_with("Сохранил настройки.")
 
 
-async def test_goal_sets_macro_goal_by_metric_code() -> None:
+async def test_goal_decrement_respects_minimum_step() -> None:
     session_factory = create_session_factory()
-    allow_user(session_factory, ALLOWED_USER_ID, "goal_macro_user")
-    message = SimpleNamespace(
-        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="goal_macro_user"),
-        answer=AsyncMock(),
-    )
-    command = SimpleNamespace(args="protein 110")
-
-    original_datetime = handle_goal.__globals__["datetime"]
-
-    class FixedDateTime:
-        @staticmethod
-        def now(tz=None):
-            return datetime(2026, 5, 19, 9, 0, tzinfo=timezone.utc)
-
-    handle_goal.__globals__["datetime"] = FixedDateTime
-    try:
-        await handle_goal(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
-    finally:
-        handle_goal.__globals__["datetime"] = original_datetime
-
+    allow_user(session_factory, ALLOWED_USER_ID, "goal_min_user")
     with session_factory() as session:
-        saved_goal = session.query(UserGoalPreference).one()
-        saved_snapshot = session.query(DailyGoalSnapshot).one()
-
-    assert saved_goal.protein_goal == 110
-    assert saved_snapshot.protein_goal == 110
-    message.answer.assert_awaited_once()
-    assert "белки: 110 г" in message.answer.await_args.args[0]
-
-
-async def test_goal_hint_respects_enabled_summary_metrics() -> None:
-    session_factory = create_session_factory()
-    allow_user(session_factory, ALLOWED_USER_ID, "goal_hint_user")
-    with session_factory() as session:
-        user = User(telegram_user_id=ALLOWED_USER_ID, username="goal_hint_user", timezone="Europe/Moscow")
+        user = User(telegram_user_id=ALLOWED_USER_ID, username="goal_min_user", timezone="Europe/Moscow")
         session.add(user)
         session.flush()
-        session.add(
-            UserSummaryPreference(
-                user_id=user.id,
-                show_calories=False,
-                show_protein=True,
-                show_fat=False,
-                show_carbs=True,
-                show_fiber=False,
-                show_water=False,
-            )
-        )
+        session.add(UserGoalPreference(user_id=user.id, calorie_goal=100, protein_goal=10, fat_goal=10, carbs_goal=10, fiber_goal=10, water_goal=100))
         session.commit()
 
-    message = SimpleNamespace(
-        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="goal_hint_user"),
-        answer=AsyncMock(),
-    )
-    command = SimpleNamespace(args=None)
-
-    original_datetime = handle_goal.__globals__["datetime"]
-
-    class FixedDateTime:
-        @staticmethod
-        def now(tz=None):
-            return datetime(2026, 5, 19, 9, 0, tzinfo=timezone.utc)
-
-    handle_goal.__globals__["datetime"] = FixedDateTime
-    try:
-        await handle_goal(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
-    finally:
-        handle_goal.__globals__["datetime"] = original_datetime
-
-    rendered = message.answer.await_args.args[0]
-    assert "Настройка:\n- <code>/goal protein 90</code>\n- <code>/goal carbs 210</code>\n" in rendered
-    assert "<code>/goal 1800</code>" not in rendered
-    assert "<code>/goal fat 60</code>" not in rendered
-    assert "<code>/goal water 2000</code>" not in rendered
-
-
-async def test_goal_close_callback_deletes_message() -> None:
     callback = SimpleNamespace(
-        message=SimpleNamespace(delete=AsyncMock()),
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="goal_min_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
         answer=AsyncMock(),
     )
 
-    await handle_goal_message_callback(
+    await handle_toggle_summary_metric(
         callback,
-        GoalMessageCallback(action="close"),
+        SummarySettingsCallback(action="goal_dec_water"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
     )
 
-    callback.message.delete.assert_awaited_once()
-    callback.answer.assert_awaited_once_with()
+    with session_factory() as session:
+        saved_goal = session.query(UserGoalPreference).one()
+
+    assert saved_goal.water_goal == 100
+    assert "вода: 100 мл" in callback.message.edit_text.await_args.args[0]
+
+
+async def test_settings_root_open_callback_updates_message() -> None:
+    session_factory = create_session_factory()
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="settings_open_user"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+    allow_user(session_factory, ALLOWED_USER_ID, "settings_open_user")
+
+    await handle_toggle_summary_metric(
+        callback,
+        SummarySettingsCallback(action="open_display"),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert "Раздел «Отображение»" in callback.message.edit_text.await_args.args[0]
+    callback.answer.assert_awaited_once_with("")
 
 
 async def test_water_button_creates_water_entry_for_allowed_user() -> None:

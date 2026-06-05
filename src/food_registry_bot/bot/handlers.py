@@ -20,6 +20,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.keyboards import (
+    RECENT_BUTTON_TEXT,
+    REPORT_BUTTON_TEXT,
+    SETTINGS_BUTTON_TEXT,
+    TODAY_BUTTON_TEXT,
     WATER_250_ML_BUTTON_TEXT,
     build_admin_delete_entries_confirmation_keyboard,
     build_admin_llm_issues_keyboard,
@@ -27,8 +31,13 @@ from food_registry_bot.bot.keyboards import (
     build_admin_user_actions_keyboard,
     build_admin_user_list_keyboard,
     build_data_exchange_files_keyboard,
-    build_goal_keyboard,
     build_main_keyboard,
+    build_settings_diets_keyboard,
+    build_settings_display_keyboard,
+    build_settings_goals_keyboard,
+    build_settings_metrics_keyboard,
+    build_settings_reports_keyboard,
+    build_settings_root_keyboard,
     build_post_entry_details_keyboard,
     build_period_report_dynamics_keyboard,
     build_period_report_keyboard,
@@ -45,7 +54,6 @@ from food_registry_bot.bot.keyboards import (
     build_recent_non_food_entry_keyboard,
     build_recent_entry_confirmation_keyboard,
     build_recent_entry_selection_keyboard,
-    build_summary_settings_keyboard,
 )
 from food_registry_bot.bot.message_routing import (
     AMBIGUOUS,
@@ -56,7 +64,6 @@ from food_registry_bot.bot.message_routing import (
 from food_registry_bot.bot.payloads import (
     AdminPanelCallback,
     DataExchangeFileCallback,
-    GoalMessageCallback,
     PeriodReportCallback,
     ProviderMenuCallback,
     RecentEntryActionCallback,
@@ -243,6 +250,12 @@ PROVIDER_PLACEHOLDER = "<PROVIDER>"
 SUPPORTED_PERSONAL_PROVIDERS = (LLMProvider.OPENAI, LLMProvider.MISTRAL)
 SUPPORTED_DIET_METRIC_CODES = get_supported_diet_metric_codes()
 USER_LLM_CONTEXT_COMMENT_MAX_LENGTH = 1000
+SETTINGS_SECTION_ROOT = "root"
+SETTINGS_SECTION_GOALS = "goals"
+SETTINGS_SECTION_METRICS = "metrics"
+SETTINGS_SECTION_DISPLAY = "display"
+SETTINGS_SECTION_REPORTS = "reports"
+SETTINGS_SECTION_DIETS = "diets"
 
 
 class FoodWriteFlowError(RuntimeError):
@@ -395,6 +408,11 @@ async def safe_delete_message(message: Message) -> None:
         return
     with suppress(TelegramBadRequest):
         await delete()
+
+
+async def refresh_main_keyboard(message: Message) -> None:
+    keyboard_message = await message.answer("\u2060", reply_markup=build_main_keyboard())
+    await safe_delete_message(keyboard_message)
 
 
 async def safe_edit_message_by_id(
@@ -1756,53 +1774,115 @@ def get_enabled_summary_metric_codes(preference) -> tuple[str, ...]:
     return tuple(enabled_metric_codes)
 
 
-def build_summary_settings_response(
+def build_settings_root_response() -> str:
+    return (
+        "Настройки:\n"
+        "- Цели: дневные цели по калориям, БЖУ, клетчатке и воде.\n"
+        "- Метрики: какие показатели учитывать в итогах дня и отчётах.\n"
+        "- Отображение: формат summary, прогресс дня и дельта после записи.\n"
+        "- Отчёты: начало пищевого дня, допуск к цели и порог заметных записей.\n"
+        "- Диеты: какие диетические оценки учитывать.\n\n"
+        "Другие команды:\n"
+        "- /provider — управление LLM-подключениями.\n"
+        "- /context — пользовательский контекст для LLM.\n"
+        "- /files — импорт и экспорт данных.\n"
+        "- /ping — техническая проверка доступности.\n\n"
+        "Выбери раздел кнопкой ниже."
+    )
+
+
+def build_settings_goals_response(*, goal_preference) -> str:
+    return "\n".join(
+        [
+            "Раздел «Цели»:",
+            "Настрой дневные цели кнопками ниже.",
+            "Шаг изменения: 100 ккал, 10 г для БЖУ и клетчатки, 100 мл для воды.",
+            "",
+            f"- калории: {goal_preference.calorie_goal} ккал",
+            f"- белки: {goal_preference.protein_goal} г",
+            f"- жиры: {goal_preference.fat_goal} г",
+            f"- углеводы: {goal_preference.carbs_goal} г",
+            f"- клетчатка: {goal_preference.fiber_goal} г",
+            f"- вода: {goal_preference.water_goal} мл",
+        ]
+    )
+
+
+def build_settings_metrics_response(
     *,
     workout_logging_enabled: bool,
-    diets: list[SupportedDietView],
     show_calories: bool,
     show_protein: bool,
     show_fat: bool,
     show_carbs: bool,
     show_fiber: bool,
     show_water: bool,
-    show_day_progress_bar: bool,
-    show_post_entry_delta_suffix: bool,
-    summary_display_mode: str,
-    nutrition_day_start_hour: int,
-    report_goal_tolerance_percent: int,
-    report_noticeable_entry_percentile: int,
 ) -> str:
-    statuses = {
-        True: "включено",
-        False: "выключено",
-    }
-    lines = [
-        "Настройки summary:",
-        f"- тренировки: {statuses[workout_logging_enabled]}",
-    ]
-    if diets:
-        lines.append("Диеты:")
-        lines.extend(
-            f"- {diet.name.lower()}: {statuses[diet.is_selected]}"
-            for diet in diets
-        )
-    lines.extend(
+    statuses = {True: "включено", False: "выключено"}
+    return "\n".join(
         [
+            "Раздел «Метрики»:",
+            "Здесь выбирается, какие показатели бот показывает и учитывает в summary и отчётах.",
+            "",
             f"- калории: {statuses[show_calories]}",
             f"- белки: {statuses[show_protein]}",
             f"- жиры: {statuses[show_fat]}",
             f"- углеводы: {statuses[show_carbs]}",
             f"- клетчатка: {statuses[show_fiber]}",
             f"- вода: {statuses[show_water]}",
+            f"- тренировки: {statuses[workout_logging_enabled]}",
+        ]
+    )
+
+
+def build_settings_display_response(
+    *,
+    show_day_progress_bar: bool,
+    summary_display_mode: str,
+    show_post_entry_delta_suffix: bool,
+) -> str:
+    statuses = {True: "включено", False: "выключено"}
+    return "\n".join(
+        [
+            "Раздел «Отображение»:",
+            "Эти настройки меняют вид ответа бота, но не сами данные.",
+            "",
             f"- прогресс дня: {statuses[show_day_progress_bar]}",
+            f"- текст/бары: {SUMMARY_DISPLAY_MODE_LABELS[summary_display_mode]}",
             f"- дельта записи: {statuses[show_post_entry_delta_suffix]}",
-            f"- отображение: {SUMMARY_DISPLAY_MODE_LABELS[summary_display_mode]}",
+        ]
+    )
+
+
+def build_settings_reports_response(
+    *,
+    nutrition_day_start_hour: int,
+    report_goal_tolerance_percent: int,
+    report_noticeable_entry_percentile: int,
+) -> str:
+    return "\n".join(
+        [
+            "Раздел «Отчёты»:",
+            "Эти параметры влияют на границы дня и на чувствительность периодических отчётов.",
+            "",
             f"- начало дня: {nutrition_day_start_hour:02d}:00",
             f"- допуск к цели: {report_goal_tolerance_percent}%",
             f"- порог заметных записей: {report_noticeable_entry_percentile}%",
         ]
     )
+
+
+def build_settings_diets_response(*, diets: list[SupportedDietView]) -> str:
+    statuses = {True: "включено", False: "выключено"}
+    lines = [
+        "Раздел «Диеты»:",
+        "Включённые диеты используются в оценке записей и дневных итогов.",
+        "",
+    ]
+    if not diets:
+        lines.append("Поддержанные диеты пока недоступны.")
+        return "\n".join(lines)
+    lines.extend(f"- {diet.name.lower()}: {statuses[diet.is_selected]}" for diet in diets)
     return "\n".join(lines)
 
 
@@ -1916,6 +1996,126 @@ def payload_contains_food_or_water_entries(payload) -> bool:
 
 def build_diet_buttons(diets: list[SupportedDietView]) -> list[tuple[str, str, bool]]:
     return [(diet.code, diet.name, diet.is_selected) for diet in diets]
+
+
+def resolve_settings_section(action: str) -> str:
+    if action in {"open_goals", "goal_dec_calories", "goal_inc_calories", "goal_dec_protein", "goal_inc_protein", "goal_dec_fat", "goal_inc_fat", "goal_dec_carbs", "goal_inc_carbs", "goal_dec_fiber", "goal_inc_fiber", "goal_dec_water", "goal_inc_water"}:
+        return SETTINGS_SECTION_GOALS
+    if action in {
+        "open_metrics",
+        "toggle_calories",
+        "toggle_protein",
+        "toggle_fat",
+        "toggle_carbs",
+        "toggle_fiber",
+        "toggle_water",
+        "toggle_workout_logging",
+    }:
+        return SETTINGS_SECTION_METRICS
+    if action in {"open_display", "toggle_day_progress_bar", "toggle_post_entry_delta_suffix", "cycle_summary_display_mode"}:
+        return SETTINGS_SECTION_DISPLAY
+    if action in {
+        "open_reports",
+        "cycle_nutrition_day_start_hour",
+        "cycle_report_goal_tolerance_percent",
+        "cycle_report_noticeable_entry_percentile",
+    }:
+        return SETTINGS_SECTION_REPORTS
+    if action == "open_diets" or action.startswith("toggle_diet_"):
+        return SETTINGS_SECTION_DIETS
+    return SETTINGS_SECTION_ROOT
+
+
+def adjust_goal_value(*, current_value: int, delta: int, minimum_value: int) -> int:
+    return max(current_value + delta, minimum_value)
+
+
+def build_settings_response(
+    *,
+    section: str,
+    goal_preference,
+    preference,
+    diets: list[SupportedDietView],
+    workout_logging_enabled: bool,
+) -> str:
+    if section == SETTINGS_SECTION_GOALS:
+        return build_settings_goals_response(goal_preference=goal_preference)
+    if section == SETTINGS_SECTION_METRICS:
+        return build_settings_metrics_response(
+            workout_logging_enabled=workout_logging_enabled,
+            show_calories=preference.show_calories,
+            show_protein=preference.show_protein,
+            show_fat=preference.show_fat,
+            show_carbs=preference.show_carbs,
+            show_fiber=preference.show_fiber,
+            show_water=preference.show_water,
+        )
+    if section == SETTINGS_SECTION_DISPLAY:
+        return build_settings_display_response(
+            show_day_progress_bar=preference.show_day_progress_bar,
+            summary_display_mode=preference.summary_display_mode,
+            show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
+        )
+    if section == SETTINGS_SECTION_REPORTS:
+        return build_settings_reports_response(
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
+            report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
+            report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
+        )
+    if section == SETTINGS_SECTION_DIETS:
+        return build_settings_diets_response(diets=diets)
+    return build_settings_root_response()
+
+
+def build_settings_reply_markup(
+    *,
+    section: str,
+    goal_preference,
+    preference,
+    diets: list[SupportedDietView],
+    workout_logging_enabled: bool,
+):
+    if section == SETTINGS_SECTION_GOALS:
+        return build_settings_goals_keyboard(
+            calorie_goal=goal_preference.calorie_goal,
+            protein_goal=goal_preference.protein_goal,
+            fat_goal=goal_preference.fat_goal,
+            carbs_goal=goal_preference.carbs_goal,
+            fiber_goal=goal_preference.fiber_goal,
+            water_goal=goal_preference.water_goal,
+        )
+    if section == SETTINGS_SECTION_METRICS:
+        return build_settings_metrics_keyboard(
+            show_calories=preference.show_calories,
+            show_protein=preference.show_protein,
+            show_fat=preference.show_fat,
+            show_carbs=preference.show_carbs,
+            show_fiber=preference.show_fiber,
+            show_water=preference.show_water,
+            workout_logging_enabled=workout_logging_enabled,
+        )
+    if section == SETTINGS_SECTION_DISPLAY:
+        return build_settings_display_keyboard(
+            show_day_progress_bar=preference.show_day_progress_bar,
+            summary_display_mode=preference.summary_display_mode,
+            show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
+        )
+    if section == SETTINGS_SECTION_REPORTS:
+        return build_settings_reports_keyboard(
+            nutrition_day_start_hour=preference.nutrition_day_start_hour,
+            report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
+            report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
+        )
+    if section == SETTINGS_SECTION_DIETS:
+        return build_settings_diets_keyboard(diet_buttons=build_diet_buttons(diets))
+    return build_settings_root_keyboard()
+
+
+def load_settings_state(*, session: Session, user_id: int, user):
+    preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+    goal_preference, _created = UserGoalPreferenceRepository(session).get_or_create(user_id=user_id)
+    diets = UserDietPreferenceRepository(session).list_diets_for_user(user_id=user_id)
+    return user, preference, goal_preference, diets
 
 
 def resolve_diet_service(
@@ -3625,46 +3825,32 @@ async def handle_start(
         return
 
     with session_scope(session_factory) as session:
-        created, _ = ensure_user_registered(message, session)
-
-    if created:
-        await message.answer(
-            "Профиль создан.\n"
-            "Что можно сделать:\n"
-            "- отправить запись еды текстом или фото блюда;\n"
-            "- нажать кнопку воды;\n"
-            "- при желании включить запись тренировок в /settings;\n"
-            "- задать вопрос о питании;\n"
-            "- посмотреть итог дня: /today;\n"
-            "- посмотреть отчёт за период: /report;\n"
-            "- посмотреть и удалить последние записи: /recent;\n"
-            "- посмотреть или изменить цели: /goal;\n"
-            "- настроить summary: /settings;\n"
-            "- задать пользовательский контекст для ЛЛМ: /context;\n"
-            "- управлять файлами импорта и экспорта: /files.",
-            reply_markup=build_main_keyboard(),
-        )
-        return
+        created, user_id = ensure_user_registered(message, session)
+        user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
+        if user is None:
+            raise RuntimeError("User profile was not found after registration")
+        user, preference, goal_preference, diets = load_settings_state(session=session, user_id=user_id, user=user)
 
     await message.answer(
-        "Бот готов.\n"
-        "Что можно сделать:\n"
-        "- отправить запись еды текстом или фото блюда;\n"
-        "- нажать кнопку воды;\n"
-        "- при желании включить запись тренировок в /settings;\n"
-        "- задать вопрос о питании;\n"
-        "- посмотреть итог дня: /today;\n"
-        "- посмотреть отчёт за период: /report;\n"
-        "- посмотреть и удалить последние записи: /recent;\n"
-        "- посмотреть или изменить цели: /goal;\n"
-        "- настроить summary: /settings;\n"
-        "- задать пользовательский контекст для ЛЛМ: /context;\n"
-        "- управлять файлами импорта и экспорта: /files.",
-        reply_markup=build_main_keyboard(),
+        build_settings_response(
+            section=SETTINGS_SECTION_ROOT,
+            goal_preference=goal_preference,
+            preference=preference,
+            diets=diets,
+            workout_logging_enabled=user.workout_logging_enabled,
+        ),
+        reply_markup=build_settings_reply_markup(
+            section=SETTINGS_SECTION_ROOT,
+            goal_preference=goal_preference,
+            preference=preference,
+            diets=diets,
+            workout_logging_enabled=user.workout_logging_enabled,
+        ),
     )
+    await refresh_main_keyboard(message)
 
 
-@router.message(Command("health"))
+@router.message(Command("ping"))
 async def handle_health(
     message: Message,
     session_factory: sessionmaker[Session],
@@ -4899,41 +5085,22 @@ async def handle_settings(
         user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
         if user is None:
             raise RuntimeError("User profile was not found after registration")
-        preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
-        diets = UserDietPreferenceRepository(session).list_diets_for_user(user_id=user_id)
+        user, preference, goal_preference, diets = load_settings_state(session=session, user_id=user_id, user=user)
 
     await message.answer(
-        build_summary_settings_response(
-            workout_logging_enabled=user.workout_logging_enabled,
+        build_settings_response(
+            section=SETTINGS_SECTION_ROOT,
+            goal_preference=goal_preference,
+            preference=preference,
             diets=diets,
-            show_calories=preference.show_calories,
-            show_protein=preference.show_protein,
-            show_fat=preference.show_fat,
-            show_carbs=preference.show_carbs,
-            show_fiber=preference.show_fiber,
-            show_water=preference.show_water,
-            show_day_progress_bar=preference.show_day_progress_bar,
-            show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
-            summary_display_mode=preference.summary_display_mode,
-            nutrition_day_start_hour=preference.nutrition_day_start_hour,
-            report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
-            report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
-        ),
-        reply_markup=build_summary_settings_keyboard(
             workout_logging_enabled=user.workout_logging_enabled,
-            diet_buttons=build_diet_buttons(diets),
-            show_calories=preference.show_calories,
-            show_protein=preference.show_protein,
-            show_fat=preference.show_fat,
-            show_carbs=preference.show_carbs,
-            show_fiber=preference.show_fiber,
-            show_water=preference.show_water,
-            show_day_progress_bar=preference.show_day_progress_bar,
-            show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
-            summary_display_mode=preference.summary_display_mode,
-            nutrition_day_start_hour=preference.nutrition_day_start_hour,
-            report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
-            report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
+        ),
+        reply_markup=build_settings_reply_markup(
+            section=SETTINGS_SECTION_ROOT,
+            goal_preference=goal_preference,
+            preference=preference,
+            diets=diets,
+            workout_logging_enabled=user.workout_logging_enabled,
         ),
     )
 
@@ -4949,14 +5116,22 @@ async def handle_toggle_summary_metric(
     if telegram_user is None:
         await callback.answer("Пользователь не найден.", show_alert=True)
         return
+    if callback_data.action == "noop":
+        await callback.answer()
+        return
     if not (
         callback_data.action.startswith("toggle_")
         or callback_data.action.startswith("toggle_diet_")
-        or callback_data.action == "cycle_summary_display_mode"
-        or callback_data.action == "cycle_nutrition_day_start_hour"
-        or callback_data.action == "cycle_report_goal_tolerance_percent"
-        or callback_data.action == "cycle_report_noticeable_entry_percentile"
-        or callback_data.action == "close"
+        or callback_data.action.startswith("goal_")
+        or callback_data.action.startswith("open_")
+        or callback_data.action in {
+            "back_root",
+            "cycle_summary_display_mode",
+            "cycle_nutrition_day_start_hour",
+            "cycle_report_goal_tolerance_percent",
+            "cycle_report_noticeable_entry_percentile",
+            "close",
+        }
     ):
         await callback.answer("Неизвестное действие.", show_alert=True)
         return
@@ -4983,22 +5158,35 @@ async def handle_toggle_summary_metric(
             )
 
         preference_repository = UserSummaryPreferenceRepository(session)
+        goal_preference_repository = UserGoalPreferenceRepository(session)
         diet_preference_repository = UserDietPreferenceRepository(session)
-        if callback_data.action == "cycle_nutrition_day_start_hour":
+        section = resolve_settings_section(callback_data.action)
+        if callback_data.action.startswith("open_") or callback_data.action == "back_root":
+            user, preference, goal_preference, diets = load_settings_state(session=session, user_id=user.id, user=user)
+            if callback_data.action == "back_root":
+                section = SETTINGS_SECTION_ROOT
+        elif callback_data.action == "cycle_nutrition_day_start_hour":
             preference = preference_repository.cycle_nutrition_day_start_hour(user_id=user.id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
         elif callback_data.action == "cycle_summary_display_mode":
             preference = preference_repository.cycle_summary_display_mode(user_id=user.id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
         elif callback_data.action == "cycle_report_goal_tolerance_percent":
             preference = preference_repository.cycle_report_goal_tolerance_percent(user_id=user.id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
         elif callback_data.action == "cycle_report_noticeable_entry_percentile":
             preference = preference_repository.cycle_report_noticeable_entry_percentile(user_id=user.id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
         elif callback_data.action == "toggle_workout_logging":
             user = UserRepository(session).toggle_workout_logging_enabled(user_id=user.id)
             preference, _created = preference_repository.get_or_create(user_id=user.id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
         elif callback_data.action == "toggle_day_progress_bar":
             preference = preference_repository.toggle_day_progress_bar(user_id=user.id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
         elif callback_data.action == "toggle_post_entry_delta_suffix":
             preference = preference_repository.toggle_post_entry_delta_suffix(user_id=user.id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
         elif callback_data.action.startswith("toggle_diet_"):
             diet_code = callback_data.action.removeprefix("toggle_diet_")
             supported_diet_model = SupportedDietRepository(session).get_by_code(code=diet_code)
@@ -5007,50 +5195,58 @@ async def handle_toggle_summary_metric(
                 return
             diet_preference_repository.toggle(user_id=user.id, diet_id=supported_diet_model.id)
             preference, _created = preference_repository.get_or_create(user_id=user.id)
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
+        elif callback_data.action.startswith("goal_"):
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
+            goal_adjustments = {
+                "goal_dec_calories": ("calories", -100, 100),
+                "goal_inc_calories": ("calories", 100, 100),
+                "goal_dec_protein": ("protein", -10, 10),
+                "goal_inc_protein": ("protein", 10, 10),
+                "goal_dec_fat": ("fat", -10, 10),
+                "goal_inc_fat": ("fat", 10, 10),
+                "goal_dec_carbs": ("carbs", -10, 10),
+                "goal_inc_carbs": ("carbs", 10, 10),
+                "goal_dec_fiber": ("fiber", -10, 10),
+                "goal_inc_fiber": ("fiber", 10, 10),
+                "goal_dec_water": ("water", -100, 100),
+                "goal_inc_water": ("water", 100, 100),
+            }
+            metric_code, delta, minimum_value = goal_adjustments[callback_data.action]
+            current_value = getattr(goal_preference, UserGoalPreferenceRepository._resolve_goal_attribute(metric_code))
+            goal_preference = goal_preference_repository.set_goal(
+                user_id=user.id,
+                metric_code=metric_code,
+                goal_value=adjust_goal_value(current_value=current_value, delta=delta, minimum_value=minimum_value),
+            )
+            preference, _created = preference_repository.get_or_create(user_id=user.id)
         else:
             metric_code = callback_data.action.removeprefix("toggle_")
             preference = preference_repository.toggle_metric_visibility(
                 user_id=user.id,
                 metric_code=metric_code,
             )
+            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user.id)
         diets = diet_preference_repository.list_diets_for_user(user_id=user.id)
 
     if callback.message is not None:
         await callback.message.edit_text(
-            build_summary_settings_response(
-                workout_logging_enabled=user.workout_logging_enabled,
+            build_settings_response(
+                section=section,
+                goal_preference=goal_preference,
+                preference=preference,
                 diets=diets,
-                show_calories=preference.show_calories,
-                show_protein=preference.show_protein,
-                show_fat=preference.show_fat,
-                show_carbs=preference.show_carbs,
-                show_fiber=preference.show_fiber,
-                show_water=preference.show_water,
-                show_day_progress_bar=preference.show_day_progress_bar,
-                show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
-                summary_display_mode=preference.summary_display_mode,
-                nutrition_day_start_hour=preference.nutrition_day_start_hour,
-                report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
-                report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
-            ),
-            reply_markup=build_summary_settings_keyboard(
                 workout_logging_enabled=user.workout_logging_enabled,
-                diet_buttons=build_diet_buttons(diets),
-                show_calories=preference.show_calories,
-                show_protein=preference.show_protein,
-                show_fat=preference.show_fat,
-                show_carbs=preference.show_carbs,
-                show_fiber=preference.show_fiber,
-                show_water=preference.show_water,
-                show_day_progress_bar=preference.show_day_progress_bar,
-                show_post_entry_delta_suffix=preference.show_post_entry_delta_suffix,
-                summary_display_mode=preference.summary_display_mode,
-                nutrition_day_start_hour=preference.nutrition_day_start_hour,
-                report_goal_tolerance_percent=preference.report_goal_tolerance_percent,
-                report_noticeable_entry_percentile=preference.report_noticeable_entry_percentile,
+            ),
+            reply_markup=build_settings_reply_markup(
+                section=section,
+                goal_preference=goal_preference,
+                preference=preference,
+                diets=diets,
+                workout_logging_enabled=user.workout_logging_enabled,
             ),
         )
-    await callback.answer("Сохранил настройки.")
+    await callback.answer("" if callback_data.action.startswith("open_") or callback_data.action == "back_root" else "Сохранил настройки.")
 
 
 @router.message(Command("today"))
@@ -5133,6 +5329,42 @@ async def handle_report(
         rendered_report,
         reply_markup=build_period_report_keyboard(period_days=DEFAULT_PERIOD_REPORT_DAYS),
     )
+
+
+@router.message(F.text == TODAY_BUTTON_TEXT)
+async def handle_today_button(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    await handle_today(message, session_factory, admin_user_ids=admin_user_ids)
+
+
+@router.message(F.text == RECENT_BUTTON_TEXT)
+async def handle_recent_button(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    await handle_recent(message, CommandObject(args=None), session_factory, admin_user_ids=admin_user_ids)
+
+
+@router.message(F.text == SETTINGS_BUTTON_TEXT)
+async def handle_settings_button(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    await handle_settings(message, session_factory, admin_user_ids=admin_user_ids)
+
+
+@router.message(F.text == REPORT_BUTTON_TEXT)
+async def handle_report_button(
+    message: Message,
+    session_factory: sessionmaker[Session],
+    admin_user_ids: tuple[int, ...] = (),
+) -> None:
+    await handle_report(message, session_factory, admin_user_ids=admin_user_ids)
 
 
 @router.callback_query(PeriodReportCallback.filter())
@@ -5309,7 +5541,6 @@ async def handle_period_report_callback(
 @router.message(Command("goal"))
 async def handle_goal(
     message: Message,
-    command: CommandObject,
     session_factory: sessionmaker[Session],
     admin_user_ids: tuple[int, ...] = (),
 ) -> None:
@@ -5320,72 +5551,29 @@ async def handle_goal(
     if telegram_user is None:
         raise ValueError("Incoming message does not contain Telegram user")
 
-    parsed_goal = parse_goal_command_args(command)
-    if command.args is not None and command.args.strip() and parsed_goal is None:
-        await message.answer(
-            "Использование: <code>/goal 1800</code>, <code>/goal protein 90</code>, <code>/goal fiber 25</code> или <code>/goal water 2000</code>"
-        )
-        return
-
     with session_scope(session_factory) as session:
         _, user_id = ensure_user_registered(message, session)
         user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
         if user is None:
             raise RuntimeError("User profile was not found after registration")
-
-        summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
-        goal_preference_repository = UserGoalPreferenceRepository(session)
-        if parsed_goal is not None:
-            metric_code, goal_value = parsed_goal
-            goal_preference = goal_preference_repository.set_goal(
-                user_id=user_id,
-                metric_code=metric_code,
-                goal_value=goal_value,
-            )
-        else:
-            goal_preference, _created = goal_preference_repository.get_or_create(user_id=user_id)
-
-        summary_date = resolve_local_summary_date(
-            reference_at=datetime.now(timezone.utc),
-            timezone_name=user.timezone,
-            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-        )
-        snapshot = DailyNutritionGoalSnapshotUseCase(session).get_or_create(
-            user_id=user_id,
-            summary_date=summary_date,
-            timezone_name=user.timezone,
-            nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-        )
-        timezone_name = user.timezone
-        nutrition_day_start_hour = summary_preference.nutrition_day_start_hour
+        user, preference, goal_preference, diets = load_settings_state(session=session, user_id=user_id, user=user)
 
     await message.answer(
-        build_goal_response(
+        build_settings_response(
+            section=SETTINGS_SECTION_GOALS,
             goal_preference=goal_preference,
-            enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
-            summary_date=summary_date,
-            goal_snapshot=snapshot,
-            timezone_name=timezone_name,
-            nutrition_day_start_hour=nutrition_day_start_hour,
+            preference=preference,
+            diets=diets,
+            workout_logging_enabled=user.workout_logging_enabled,
         ),
-        reply_markup=build_goal_keyboard(),
+        reply_markup=build_settings_reply_markup(
+            section=SETTINGS_SECTION_GOALS,
+            goal_preference=goal_preference,
+            preference=preference,
+            diets=diets,
+            workout_logging_enabled=user.workout_logging_enabled,
+        ),
     )
-
-
-@router.callback_query(GoalMessageCallback.filter())
-async def handle_goal_message_callback(
-    callback: CallbackQuery,
-    callback_data: GoalMessageCallback,
-) -> None:
-    if callback.message is None:
-        await callback.answer("Сообщение недоступно.", show_alert=True)
-        return
-    if callback_data.action != "close":
-        await callback.answer("Неизвестное действие.", show_alert=True)
-        return
-
-    await safe_delete_message(callback.message)
-    await callback.answer()
 
 
 @router.message(Command("files"))

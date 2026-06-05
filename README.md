@@ -397,7 +397,7 @@ CONVERSATION_MODEL=gpt-5-mini
 
 1. `./scripts/docker-compose.sh ps` показывает `postgres` и `bot` в состоянии `running`.
 2. В `./scripts/docker-compose.sh logs -f bot` нет ошибок `BOT_TOKEN is not configured`, `OPENAI_API_KEY is required` или ошибок миграций.
-3. Бот отвечает на `/start` и `/today`.
+3. Бот отвечает на `/start`, открывает экран настроек и показывает постоянное меню; `/today` тоже работает.
 
 Если нужно обновить приложение на сервере:
 

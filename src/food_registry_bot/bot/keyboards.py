@@ -14,6 +14,10 @@ from food_registry_bot.bot.payloads import (
 )
 from food_registry_bot.db.models import DataExchangeDirection, DataExchangeFile, DataExchangeStatus
 
+TODAY_BUTTON_TEXT = "Сегодня"
+RECENT_BUTTON_TEXT = "Недавние"
+SETTINGS_BUTTON_TEXT = "Настройки"
+REPORT_BUTTON_TEXT = "Отчёт"
 WATER_250_ML_BUTTON_TEXT = "Вода 250 мл"
 SUMMARY_DISPLAY_MODE_BUTTON_LABELS = {
     "text": "текст",
@@ -25,101 +29,190 @@ PERIOD_REPORT_PERIOD_SEQUENCE = (8, 16, 32)
 def build_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
+            [KeyboardButton(text=TODAY_BUTTON_TEXT), KeyboardButton(text=RECENT_BUTTON_TEXT)],
+            [KeyboardButton(text=SETTINGS_BUTTON_TEXT), KeyboardButton(text=REPORT_BUTTON_TEXT)],
             [KeyboardButton(text=WATER_250_ML_BUTTON_TEXT)],
         ],
+        is_persistent=True,
         resize_keyboard=True,
         input_field_placeholder="Напиши сообщение или выбери действие",
     )
 
 
-def build_summary_settings_keyboard(
+def build_settings_root_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Цели", callback_data=SummarySettingsCallback(action="open_goals").pack())],
+            [InlineKeyboardButton(text="Метрики", callback_data=SummarySettingsCallback(action="open_metrics").pack())],
+            [InlineKeyboardButton(text="Отображение", callback_data=SummarySettingsCallback(action="open_display").pack())],
+            [InlineKeyboardButton(text="Отчёты", callback_data=SummarySettingsCallback(action="open_reports").pack())],
+            [InlineKeyboardButton(text="Диеты", callback_data=SummarySettingsCallback(action="open_diets").pack())],
+            _build_close_row(SummarySettingsCallback(action="close").pack()),
+        ]
+    )
+
+
+def build_settings_goals_keyboard(
     *,
-    workout_logging_enabled: bool,
-    diet_buttons: list[tuple[str, str, bool]],
+    calorie_goal: int,
+    protein_goal: int,
+    fat_goal: int,
+    carbs_goal: int,
+    fiber_goal: int,
+    water_goal: int,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="−100",
+                    callback_data=SummarySettingsCallback(action="goal_dec_calories").pack(),
+                ),
+                InlineKeyboardButton(
+                    text=f"Калории: {calorie_goal}",
+                    callback_data=SummarySettingsCallback(action="noop").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="+100",
+                    callback_data=SummarySettingsCallback(action="goal_inc_calories").pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="−10",
+                    callback_data=SummarySettingsCallback(action="goal_dec_protein").pack(),
+                ),
+                InlineKeyboardButton(
+                    text=f"Белки: {protein_goal}",
+                    callback_data=SummarySettingsCallback(action="noop").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="+10",
+                    callback_data=SummarySettingsCallback(action="goal_inc_protein").pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="−10",
+                    callback_data=SummarySettingsCallback(action="goal_dec_fat").pack(),
+                ),
+                InlineKeyboardButton(
+                    text=f"Жиры: {fat_goal}",
+                    callback_data=SummarySettingsCallback(action="noop").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="+10",
+                    callback_data=SummarySettingsCallback(action="goal_inc_fat").pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="−10",
+                    callback_data=SummarySettingsCallback(action="goal_dec_carbs").pack(),
+                ),
+                InlineKeyboardButton(
+                    text=f"Углеводы: {carbs_goal}",
+                    callback_data=SummarySettingsCallback(action="noop").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="+10",
+                    callback_data=SummarySettingsCallback(action="goal_inc_carbs").pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="−10",
+                    callback_data=SummarySettingsCallback(action="goal_dec_fiber").pack(),
+                ),
+                InlineKeyboardButton(
+                    text=f"Клетчатка: {fiber_goal}",
+                    callback_data=SummarySettingsCallback(action="noop").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="+10",
+                    callback_data=SummarySettingsCallback(action="goal_inc_fiber").pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="−100",
+                    callback_data=SummarySettingsCallback(action="goal_dec_water").pack(),
+                ),
+                InlineKeyboardButton(
+                    text=f"Вода: {water_goal}",
+                    callback_data=SummarySettingsCallback(action="noop").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="+100",
+                    callback_data=SummarySettingsCallback(action="goal_inc_water").pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="К разделам",
+                    callback_data=SummarySettingsCallback(action="back_root").pack(),
+                )
+            ],
+            _build_close_row(SummarySettingsCallback(action="close").pack()),
+        ]
+    )
+
+
+def build_settings_metrics_keyboard(
+    *,
     show_calories: bool,
     show_protein: bool,
     show_fat: bool,
     show_carbs: bool,
     show_fiber: bool,
     show_water: bool,
+    workout_logging_enabled: bool,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_build_settings_toggle_button("Калории", show_calories, "toggle_calories")],
+            [_build_settings_toggle_button("Белки", show_protein, "toggle_protein")],
+            [_build_settings_toggle_button("Жиры", show_fat, "toggle_fat")],
+            [_build_settings_toggle_button("Углеводы", show_carbs, "toggle_carbs")],
+            [_build_settings_toggle_button("Клетчатка", show_fiber, "toggle_fiber")],
+            [_build_settings_toggle_button("Вода", show_water, "toggle_water")],
+            [_build_settings_toggle_button("Тренировки", workout_logging_enabled, "toggle_workout_logging")],
+            [InlineKeyboardButton(text="К разделам", callback_data=SummarySettingsCallback(action="back_root").pack())],
+            _build_close_row(SummarySettingsCallback(action="close").pack()),
+        ]
+    )
+
+
+def build_settings_display_keyboard(
+    *,
     show_day_progress_bar: bool,
-    show_post_entry_delta_suffix: bool,
     summary_display_mode: str,
+    show_post_entry_delta_suffix: bool,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_build_settings_toggle_button("Прогресс дня", show_day_progress_bar, "toggle_day_progress_bar")],
+            [
+                InlineKeyboardButton(
+                    text=f"Текст/бары: {SUMMARY_DISPLAY_MODE_BUTTON_LABELS[summary_display_mode]}",
+                    callback_data=SummarySettingsCallback(action="cycle_summary_display_mode").pack(),
+                )
+            ],
+            [_build_settings_toggle_button("Дельта записи", show_post_entry_delta_suffix, "toggle_post_entry_delta_suffix")],
+            [InlineKeyboardButton(text="К разделам", callback_data=SummarySettingsCallback(action="back_root").pack())],
+            _build_close_row(SummarySettingsCallback(action="close").pack()),
+        ]
+    )
+
+
+def build_settings_reports_keyboard(
+    *,
     nutrition_day_start_hour: int,
     report_goal_tolerance_percent: int,
     report_noticeable_entry_percentile: int,
 ) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"Тренировки: {'on' if workout_logging_enabled else 'off'}",
-                    callback_data=SummarySettingsCallback(action="toggle_workout_logging").pack(),
-                )
-            ],
-            *[
-                [
-                    InlineKeyboardButton(
-                        text=f"Диета: {diet_name} {'on' if is_enabled else 'off'}",
-                        callback_data=SummarySettingsCallback(action=f"toggle_diet_{diet_code}").pack(),
-                    )
-                ]
-                for diet_code, diet_name, is_enabled in diet_buttons
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"Калории: {'on' if show_calories else 'off'}",
-                    callback_data=SummarySettingsCallback(action="toggle_calories").pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"Белки: {'on' if show_protein else 'off'}",
-                    callback_data=SummarySettingsCallback(action="toggle_protein").pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"Жиры: {'on' if show_fat else 'off'}",
-                    callback_data=SummarySettingsCallback(action="toggle_fat").pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"Углеводы: {'on' if show_carbs else 'off'}",
-                    callback_data=SummarySettingsCallback(action="toggle_carbs").pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"Клетчатка: {'on' if show_fiber else 'off'}",
-                    callback_data=SummarySettingsCallback(action="toggle_fiber").pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"Вода: {'on' if show_water else 'off'}",
-                    callback_data=SummarySettingsCallback(action="toggle_water").pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"Прогресс дня: {'on' if show_day_progress_bar else 'off'}",
-                    callback_data=SummarySettingsCallback(action="toggle_day_progress_bar").pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"Дельта записи: {'on' if show_post_entry_delta_suffix else 'off'}",
-                    callback_data=SummarySettingsCallback(action="toggle_post_entry_delta_suffix").pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"Отображение: {SUMMARY_DISPLAY_MODE_BUTTON_LABELS[summary_display_mode]}",
-                    callback_data=SummarySettingsCallback(action="cycle_summary_display_mode").pack(),
-                )
-            ],
             [
                 InlineKeyboardButton(
                     text=f"Начало дня: {nutrition_day_start_hour:02d}:00",
@@ -138,9 +231,23 @@ def build_summary_settings_keyboard(
                     callback_data=SummarySettingsCallback(action="cycle_report_noticeable_entry_percentile").pack(),
                 )
             ],
+            [InlineKeyboardButton(text="К разделам", callback_data=SummarySettingsCallback(action="back_root").pack())],
             _build_close_row(SummarySettingsCallback(action="close").pack()),
         ]
     )
+
+
+def build_settings_diets_keyboard(
+    *,
+    diet_buttons: list[tuple[str, str, bool]],
+) -> InlineKeyboardMarkup:
+    rows = [
+        [_build_settings_toggle_button(f"Диета: {diet_name}", is_enabled, f"toggle_diet_{diet_code}")]
+        for diet_code, diet_name, is_enabled in diet_buttons
+    ]
+    rows.append([InlineKeyboardButton(text="К разделам", callback_data=SummarySettingsCallback(action="back_root").pack())])
+    rows.append(_build_close_row(SummarySettingsCallback(action="close").pack()))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_recent_entries_delete_keyboard(
@@ -953,6 +1060,13 @@ def _build_data_exchange_primary_button(exchange_file: DataExchangeFile) -> Inli
             callback_data=DataExchangeFileCallback(action="download", file_id=exchange_file.id).pack(),
         )
     return None
+
+
+def _build_settings_toggle_button(label: str, is_enabled: bool, action: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(
+        text=f"{label}: {'on' if is_enabled else 'off'}",
+        callback_data=SummarySettingsCallback(action=action).pack(),
+    )
 
 
 def _build_close_row(callback_data: str) -> list[InlineKeyboardButton]:
