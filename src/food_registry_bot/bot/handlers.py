@@ -410,9 +410,11 @@ async def safe_delete_message(message: Message) -> None:
         await delete()
 
 
-async def refresh_main_keyboard(message: Message) -> None:
-    keyboard_message = await message.answer("\u2060", reply_markup=build_main_keyboard())
-    await safe_delete_message(keyboard_message)
+async def send_main_keyboard_message(message: Message) -> None:
+    await message.answer(
+        "Основные действия доступны на клавиатуре ниже.",
+        reply_markup=build_main_keyboard(),
+    )
 
 
 async def safe_edit_message_by_id(
@@ -3996,7 +3998,7 @@ async def handle_start(
             workout_logging_enabled=user.workout_logging_enabled,
         ),
     )
-    await refresh_main_keyboard(message)
+    await send_main_keyboard_message(message)
 
 
 @router.message(Command("ping"))

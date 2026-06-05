@@ -288,7 +288,7 @@ async def test_start_creates_user_for_allowed_user() -> None:
         "- /ping — техническая проверка доступности.\n\n"
         "Выбери раздел кнопкой ниже.",
     )
-    assert message.answer.await_args_list[1].args == ("\u2060",)
+    assert message.answer.await_args_list[1].args == ("Основные действия доступны на клавиатуре ниже.",)
     assert message.answer.await_args_list[1].kwargs["reply_markup"].is_persistent is True
 
 
