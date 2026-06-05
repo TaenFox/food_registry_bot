@@ -6,6 +6,7 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
+from food_registry_bot.config import get_settings
 from food_registry_bot.db.repositories import (
     EntryRepository,
     UserDietPreferenceRepository,
@@ -180,14 +181,20 @@ class NutritionCoachContextBuilder:
                 occurred_at_to=occurred_at_to,
             )
         recent_entries = self._entry_repository.list_recent_for_user(user_id=user_id, limit=5)
+        encryption_secret = get_settings().personal_api_keys_secret
+        try:
+            user_context_comment = UserLLMProfileRepository(self._session).get_user_context_comment(
+                user_id=user_id,
+                encryption_secret=encryption_secret,
+            )
+        except ValueError:
+            user_context_comment = None
 
         return NutritionCoachFactualContext(
             summary_date=summary_date,
             timezone=timezone_name,
             nutrition_day_start_hour=nutrition_day_start_hour,
-            user_context_comment=(
-                UserLLMProfileRepository(self._session).get_or_create(user_id=user_id)[0].user_context_comment
-            ),
+            user_context_comment=user_context_comment,
             day_totals={
                 "calories": nutrition_summary.totals.calories,
                 "protein": nutrition_summary.totals.protein,

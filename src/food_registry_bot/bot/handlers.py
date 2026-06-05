@@ -3742,9 +3742,16 @@ async def handle_llm_context(
     message: Message,
     command: CommandObject,
     session_factory: sessionmaker[Session],
+    settings: Settings | None = None,
     admin_user_ids: tuple[int, ...] = (),
 ) -> None:
     if not await require_user_access(message, session_factory, admin_user_ids):
+        return
+
+    resolved_settings = settings or get_settings()
+    encryption_secret = resolved_settings.personal_api_keys_secret
+    if encryption_secret is None or not encryption_secret.strip():
+        await message.answer("Пользовательский контекст сейчас недоступен: не настроен секрет шифрования.")
         return
 
     parsed_comment = parse_llm_context_command_arg(command)
@@ -3752,9 +3759,13 @@ async def handle_llm_context(
         _, user_id = ensure_user_registered(message, session)
         repository = UserLLMProfileRepository(session)
         if parsed_comment is None:
-            profile, _created = repository.get_or_create(user_id=user_id)
             await message.answer(
-                build_llm_context_response(user_context_comment=profile.user_context_comment)
+                build_llm_context_response(
+                    user_context_comment=repository.get_user_context_comment(
+                        user_id=user_id,
+                        encryption_secret=encryption_secret,
+                    )
+                )
             )
             return
 
@@ -3765,14 +3776,15 @@ async def handle_llm_context(
             )
             return
 
-        profile = repository.set_user_context_comment(
+        repository.set_user_context_comment(
             user_id=user_id,
             user_context_comment=parsed_comment,
+            encryption_secret=encryption_secret,
         )
 
     await message.answer(
         "Сохранил пользовательский контекст для LLM.\n\n"
-        + build_llm_context_response(user_context_comment=profile.user_context_comment)
+        + build_llm_context_response(user_context_comment=parsed_comment)
     )
 
 

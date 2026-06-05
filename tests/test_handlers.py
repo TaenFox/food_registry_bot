@@ -471,6 +471,7 @@ async def test_provider_command_shows_saved_connections() -> None:
 async def test_llm_context_command_shows_empty_state() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "llm_context_user")
+    settings = make_settings(personal_api_keys_secret="test-secret")
     message = SimpleNamespace(
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="llm_context_user"),
         answer=AsyncMock(),
@@ -480,6 +481,7 @@ async def test_llm_context_command_shows_empty_state() -> None:
         message,
         SimpleNamespace(args=None),
         session_factory,
+        settings=settings,
         admin_user_ids=(ADMIN_ID,),
     )
 
@@ -493,6 +495,7 @@ async def test_llm_context_command_shows_empty_state() -> None:
 async def test_llm_context_command_saves_comment_and_renders_it() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "llm_context_set_user")
+    settings = make_settings(personal_api_keys_secret="test-secret")
     message = SimpleNamespace(
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="llm_context_set_user"),
         answer=AsyncMock(),
@@ -502,6 +505,7 @@ async def test_llm_context_command_saves_comment_and_renders_it() -> None:
         message,
         SimpleNamespace(args="Инсулинорезистентность и гастрит, хочу щадящие рекомендации."),
         session_factory,
+        settings=settings,
         admin_user_ids=(ADMIN_ID,),
     )
 
@@ -509,13 +513,49 @@ async def test_llm_context_command_saves_comment_and_renders_it() -> None:
         user = session.query(User).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
         profile = session.query(UserLLMProfile).filter_by(user_id=user.id).one()
 
-    assert profile.user_context_comment == "Инсулинорезистентность и гастрит, хочу щадящие рекомендации."
+    assert profile.user_context_comment != "Инсулинорезистентность и гастрит, хочу щадящие рекомендации."
+    assert profile.user_context_comment.startswith("enc:")
     assert message.answer.await_args.args == (
         "Сохранил пользовательский контекст для LLM.\n\n"
         "Пользовательский контекст для LLM:\n"
         "Инсулинорезистентность и гастрит, хочу щадящие рекомендации.\n\n"
         "Чтобы заменить его, отправь /context с новым текстом.",
     )
+
+    message.answer.reset_mock()
+    await handle_llm_context(
+        message,
+        SimpleNamespace(args=None),
+        session_factory,
+        settings=settings,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert message.answer.await_args.args == (
+        "Пользовательский контекст для LLM:\n"
+        "Инсулинорезистентность и гастрит, хочу щадящие рекомендации.\n\n"
+        "Чтобы заменить его, отправь /context с новым текстом.",
+    )
+
+
+async def test_llm_context_command_rejects_too_long_comment() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "llm_context_too_long_user")
+    settings = make_settings(personal_api_keys_secret="test-secret")
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="llm_context_too_long_user"),
+        answer=AsyncMock(),
+    )
+
+    await handle_llm_context(
+        message,
+        SimpleNamespace(args="а" * 1001),
+        session_factory,
+        settings=settings,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    message.answer.assert_awaited_once_with("Комментарий слишком длинный.\nМаксимум: 1000 символов.")
 
 
 async def test_provider_save_marks_invalid_key_as_unusable() -> None:

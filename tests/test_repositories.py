@@ -250,10 +250,28 @@ def test_user_llm_profile_repository_sets_user_context_comment() -> None:
     profile = repository.set_user_context_comment(
         user_id=user.id,
         user_context_comment="Инсулинорезистентность и гастрит, без острых советов.",
+        encryption_secret="test-secret",
     )
 
     assert profile.selection_mode.value == "project"
-    assert profile.user_context_comment == "Инсулинорезистентность и гастрит, без острых советов."
+    assert profile.user_context_comment != "Инсулинорезистентность и гастрит, без острых советов."
+    assert profile.user_context_comment.startswith("enc:")
+    assert repository.get_user_context_comment(user_id=user.id, encryption_secret="test-secret") == (
+        "Инсулинорезистентность и гастрит, без острых советов."
+    )
+
+
+def test_user_llm_profile_repository_reads_legacy_plaintext_context_comment() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=70042, username="legacy_context_user")
+    profile, _created = UserLLMProfileRepository(session).get_or_create(user_id=user.id)
+    profile.user_context_comment = "старый plaintext context"
+    session.flush()
+
+    assert UserLLMProfileRepository(session).get_user_context_comment(
+        user_id=user.id,
+        encryption_secret="test-secret",
+    ) == "старый plaintext context"
 
 
 def test_user_summary_preference_repository_toggles_metric_visibility() -> None:

@@ -39,6 +39,7 @@ from food_registry_bot.db.models import (
     UserDietPreference,
     UserSummaryPreference,
 )
+from food_registry_bot.llm_access.crypto import SecretCipher, SecretCipherError
 if TYPE_CHECKING:
     from food_registry_bot.nutrition.journal_adapter import PreparedNutritionRequest, ResolvedNutritionEstimate
 
@@ -55,6 +56,7 @@ DEFAULT_DAILY_GOALS = {
     "fiber": 25,
     "water": 2000,
 }
+USER_CONTEXT_COMMENT_ENCRYPTED_PREFIX = "enc:"
 
 
 @dataclass(frozen=True)
@@ -325,11 +327,55 @@ class UserLLMProfileRepository:
         *,
         user_id: int,
         user_context_comment: str | None,
+        encryption_secret: str,
     ) -> UserLLMProfile:
         profile, _created = self.get_or_create(user_id=user_id)
-        profile.user_context_comment = user_context_comment
+        profile.user_context_comment = self._serialize_user_context_comment(
+            user_context_comment=user_context_comment,
+            encryption_secret=encryption_secret,
+        )
         self._session.flush()
         return profile
+
+    def get_user_context_comment(
+        self,
+        *,
+        user_id: int,
+        encryption_secret: str | None,
+    ) -> str | None:
+        profile, _created = self.get_or_create(user_id=user_id)
+        return self._deserialize_user_context_comment(
+            stored_value=profile.user_context_comment,
+            encryption_secret=encryption_secret,
+        )
+
+    @staticmethod
+    def _serialize_user_context_comment(
+        *,
+        user_context_comment: str | None,
+        encryption_secret: str,
+    ) -> str | None:
+        if user_context_comment is None:
+            return None
+        return USER_CONTEXT_COMMENT_ENCRYPTED_PREFIX + SecretCipher(encryption_secret).encrypt(user_context_comment)
+
+    @staticmethod
+    def _deserialize_user_context_comment(
+        *,
+        stored_value: str | None,
+        encryption_secret: str | None,
+    ) -> str | None:
+        if stored_value is None:
+            return None
+        if not stored_value.startswith(USER_CONTEXT_COMMENT_ENCRYPTED_PREFIX):
+            return stored_value
+        if encryption_secret is None or not encryption_secret.strip():
+            raise ValueError("A non-empty secret is required for user context decryption")
+        encrypted_payload = stored_value.removeprefix(USER_CONTEXT_COMMENT_ENCRYPTED_PREFIX)
+        try:
+            return SecretCipher(encryption_secret).decrypt(encrypted_payload)
+        except SecretCipherError as exc:
+            raise ValueError("User context decryption failed") from exc
 
 
 class UserLLMConnectionRepository:
