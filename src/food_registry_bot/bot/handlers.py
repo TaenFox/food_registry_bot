@@ -1452,11 +1452,48 @@ def build_recent_entry_delete_confirmation(*, entry, timezone_name: str) -> str:
     )
 
 
+def build_deleted_entry_restore_message(entry) -> str:
+    return f"Была удалена запись: ({build_recent_entry_title(entry)})"
+
+
 def build_recent_entry_item_button_label(item) -> str:
     return truncate_button_label(format_saved_item_line(item.name, item.quantity, item.unit).removeprefix("- "))
 
 
-def build_recent_food_entry_response(*, entry, timezone_name: str) -> str:
+def resolve_entry_metric_totals(entry) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for item in sorted(entry.items, key=lambda current: current.position):
+        for metric in item.metrics:
+            metric_code = metric.metric.code if metric.metric is not None else None
+            if metric_code not in GOAL_METRIC_LABELS:
+                continue
+            totals[metric_code] = totals.get(metric_code, 0.0) + float(metric.value)
+    return totals
+
+
+def build_recent_entry_metric_total_lines(
+    *,
+    entry,
+    enabled_metric_codes: tuple[str, ...],
+) -> list[str]:
+    totals = resolve_entry_metric_totals(entry)
+    lines: list[str] = []
+    for metric_code, _short_label, unit in SUMMARY_METRIC_LINES:
+        if metric_code not in enabled_metric_codes:
+            continue
+        metric_value = totals.get(metric_code)
+        if metric_value is None:
+            continue
+        lines.append(f"- {GOAL_METRIC_LABELS[metric_code]}: {round(metric_value, 1)} {unit}")
+    return lines
+
+
+def build_recent_food_entry_response(
+    *,
+    entry,
+    timezone_name: str,
+    enabled_metric_codes: tuple[str, ...],
+) -> str:
     lines = [
         "Запись еды:",
         "",
@@ -1464,7 +1501,13 @@ def build_recent_food_entry_response(*, entry, timezone_name: str) -> str:
     ]
     average_diet_score = format_entry_average_diet_score(entry)
     if average_diet_score is not None:
-        lines.extend(["", f"Средний diet score: {average_diet_score}"])
+        lines.extend(["", f"Средний балл по диетам: {average_diet_score}"])
+    total_metric_lines = build_recent_entry_metric_total_lines(
+        entry=entry,
+        enabled_metric_codes=enabled_metric_codes,
+    )
+    if total_metric_lines:
+        lines.extend(["", "По всей записи:", *total_metric_lines])
     lines.extend(["", "Блюда:"])
     for index, item in enumerate(sorted(entry.items, key=lambda current: current.position), start=1):
         lines.append(f"{index}. {format_saved_item_line(item.name, item.quantity, item.unit).removeprefix('- ')}")
@@ -1565,7 +1608,7 @@ def build_recent_non_food_entry_response(*, entry, timezone_name: str) -> str:
     ]
     average_diet_score = format_entry_average_diet_score(entry)
     if average_diet_score is not None:
-        lines.extend(["", f"Средний diet score: {average_diet_score}"])
+        lines.extend(["", f"Средний балл по диетам: {average_diet_score}"])
     lines.extend(["", "Для этой записи сейчас доступно удаление целиком."])
     return "\n".join(lines)
 
@@ -2489,10 +2532,11 @@ async def render_post_entry_root_message(
         entry_id=root_entry_id,
     )
     if root_entry is None:
-        await callback.message.edit_text("Эта запись уже недоступна.", reply_markup=None)
+        await safe_edit_message_text(callback.message, text="Эта запись уже недоступна.", reply_markup=None)
         return
-    await callback.message.edit_text(
-        build_post_entry_confirmation_response(
+    await safe_edit_message_text(
+        callback.message,
+        text=build_post_entry_confirmation_response(
             session=session,
             user=user,
             summary_preference=summary_preference,
@@ -3238,9 +3282,7 @@ async def handle_admin_panel_callback(
         await callback.answer("Команда доступна только администратору.", show_alert=True)
         return
 
-    if callback_data.action == "close" and not (
-        callback_data.origin == "post_entry" and callback_data.parent_message_id == 0
-    ):
+    if callback_data.action == "close":
         await safe_delete_message(callback.message)
         await callback.answer()
         return
@@ -4071,9 +4113,7 @@ async def handle_recent_delete_callback(
     if callback.message is None:
         await callback.answer("Сообщение недоступно.", show_alert=True)
         return
-    if callback_data.action == "close" and not (
-        callback_data.origin == "post_entry" and callback_data.parent_message_id == 0
-    ):
+    if callback_data.action == "close":
         await safe_delete_message(callback.message)
         await callback.answer()
         return
@@ -4102,8 +4142,9 @@ async def handle_recent_delete_callback(
         )
 
         if callback_data.action == "list":
-            await callback.message.edit_text(
-                build_recent_entries_response(
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_entries_response(
                     recent_entries,
                     timezone_name=user.timezone,
                     page=page,
@@ -4126,8 +4167,9 @@ async def handle_recent_delete_callback(
             return
 
         if callback_data.action == "open":
-            await callback.message.edit_text(
-                build_recent_entries_response(
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_entries_response(
                     recent_entries,
                     timezone_name=user.timezone,
                     page=page,
@@ -4163,8 +4205,9 @@ async def handle_recent_delete_callback(
             return
 
         if callback_data.action == "select":
-            await callback.message.edit_text(
-                build_recent_entry_delete_confirmation(entry=selected_entry, timezone_name=user.timezone),
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_entry_delete_confirmation(entry=selected_entry, timezone_name=user.timezone),
                 reply_markup=build_recent_entry_confirmation_keyboard(
                     entry_id=selected_entry.id,
                     page=page,
@@ -4186,8 +4229,9 @@ async def handle_recent_delete_callback(
             page_size=callback_data.count,
         )
 
-    await callback.message.edit_text(
-        build_recent_entries_response(
+    await safe_edit_message_text(
+        callback.message,
+        text=build_recent_entries_response(
             updated_recent_entries,
             timezone_name=user.timezone,
             page=page,
@@ -4278,8 +4322,9 @@ async def handle_recent_action_callback(
             return
 
         if callback_data.action == "back_to_list":
-            await callback.message.edit_text(
-                build_recent_entries_response(
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_entries_response(
                     recent_entries,
                     timezone_name=user.timezone,
                     page=page,
@@ -4302,8 +4347,9 @@ async def handle_recent_action_callback(
             return
 
         if callback_data.action == "open_entries":
-            await callback.message.edit_text(
-                build_recent_entry_selection_response(
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_entry_selection_response(
                     recent_entries,
                     timezone_name=user.timezone,
                     page=page,
@@ -4336,8 +4382,13 @@ async def handle_recent_action_callback(
 
         if callback_data.action == "open_entry":
             if selected_entry.entry_type is EntryType.FOOD:
-                await callback.message.edit_text(
-                    build_recent_food_entry_response(entry=selected_entry, timezone_name=user.timezone),
+                await safe_edit_message_text(
+                    callback.message,
+                    text=build_recent_food_entry_response(
+                        entry=selected_entry,
+                        timezone_name=user.timezone,
+                        enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
+                    ),
                     reply_markup=build_recent_food_entry_reply_markup(
                         session=session,
                         entry=selected_entry,
@@ -4350,8 +4401,9 @@ async def handle_recent_action_callback(
                     ),
                 )
             else:
-                await callback.message.edit_text(
-                    build_recent_non_food_entry_response(entry=selected_entry, timezone_name=user.timezone),
+                await safe_edit_message_text(
+                    callback.message,
+                    text=build_recent_non_food_entry_response(entry=selected_entry, timezone_name=user.timezone),
                     reply_markup=build_recent_non_food_entry_reply_markup(
                         session=session,
                         entry=selected_entry,
@@ -4391,8 +4443,9 @@ async def handle_recent_action_callback(
                 page=0,
                 page_size=callback_data.count,
             )
-            await callback.message.edit_text(
-                build_recent_entries_response(
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_entries_response(
                     updated_recent_entries,
                     timezone_name=user.timezone,
                     page=page,
@@ -4422,8 +4475,9 @@ async def handle_recent_action_callback(
                     timezone_name=user.timezone,
                 )
             )
-            await callback.message.edit_text(
-                confirmation_text,
+            await safe_edit_message_text(
+                callback.message,
+                text=confirmation_text,
                 reply_markup=build_recent_food_entry_delete_confirmation_keyboard(
                     confirm_callback_data=create_recent_action_callback_data(
                         state_repository=CallbackStateRepository(session),
@@ -4463,16 +4517,10 @@ async def handle_recent_action_callback(
             return
 
         if callback_data.action == "confirm_delete_entry":
+            deleted_entry_message = build_deleted_entry_restore_message(selected_entry)
             entry_repository.delete(selected_entry)
             if callback_data.origin == "post_entry":
-                await render_post_entry_root_message(
-                    callback=callback,
-                    session=session,
-                    user=user,
-                    summary_preference=summary_preference,
-                    entry_repository=entry_repository,
-                    root_entry_id=callback_data.root_entry_id,
-                )
+                await safe_edit_message_text(callback.message, text=deleted_entry_message, reply_markup=None)
                 await callback.answer("Запись удалена. Список уже обновлён.")
                 return
             page, updated_recent_entries, has_previous_page, has_next_page = load_recent_entries_page(
@@ -4481,8 +4529,9 @@ async def handle_recent_action_callback(
                 page=page,
                 page_size=callback_data.count,
             )
-            await callback.message.edit_text(
-                build_recent_entries_response(
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_entries_response(
                     updated_recent_entries,
                     timezone_name=user.timezone,
                     page=page,
@@ -4514,8 +4563,9 @@ async def handle_recent_action_callback(
             return
 
         if callback_data.action == "delete_item":
-            await callback.message.edit_text(
-                build_recent_food_item_delete_confirmation(item=selected_item),
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_food_item_delete_confirmation(item=selected_item),
                 reply_markup=build_recent_food_item_delete_confirmation_keyboard(
                     confirm_callback_data=create_recent_action_callback_data(
                         state_repository=CallbackStateRepository(session),
@@ -4603,7 +4653,11 @@ async def handle_recent_action_callback(
                 getattr(callback.message, "bot", None),
                 chat_id=getattr(getattr(callback.message, "chat", None), "id", None),
                 message_id=callback_data.parent_message_id,
-                text=build_recent_food_entry_response(entry=updated_entry, timezone_name=user.timezone),
+                text=build_recent_food_entry_response(
+                    entry=updated_entry,
+                    timezone_name=user.timezone,
+                    enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
+                ),
                 reply_markup=build_recent_food_entry_reply_markup(
                     session=session,
                     entry=updated_entry,
@@ -4615,8 +4669,9 @@ async def handle_recent_action_callback(
                     include_back_button=callback_data.origin != "post_entry",
                 ),
             )
-            await callback.message.edit_text(
-                build_recent_food_item_response(
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_food_item_response(
                     entry=updated_entry,
                     item=updated_item,
                     timezone_name=user.timezone,
@@ -4657,8 +4712,9 @@ async def handle_recent_action_callback(
             if updated_item is None:
                 await callback.answer("Это блюдо уже недоступно.", show_alert=True)
                 return
-            await callback.message.edit_text(
-                build_recent_food_item_response(
+            await safe_edit_message_text(
+                callback.message,
+                text=build_recent_food_item_response(
                     entry=updated_entry,
                     item=updated_item,
                     timezone_name=user.timezone,
@@ -4678,6 +4734,7 @@ async def handle_recent_action_callback(
             return
 
         if callback_data.action == "confirm_delete_item":
+            deleted_entry_message = build_deleted_entry_restore_message(selected_entry)
             entry_survived = delete_recent_entry_item(
                 session=session,
                 entry_repository=entry_repository,
@@ -4703,7 +4760,11 @@ async def handle_recent_action_callback(
                     getattr(callback.message, "bot", None),
                     chat_id=getattr(getattr(callback.message, "chat", None), "id", None),
                     message_id=callback_data.parent_message_id,
-                    text=build_recent_food_entry_response(entry=updated_entry, timezone_name=user.timezone),
+                    text=build_recent_food_entry_response(
+                        entry=updated_entry,
+                        timezone_name=user.timezone,
+                        enabled_metric_codes=get_enabled_summary_metric_codes(summary_preference),
+                    ),
                     reply_markup=build_recent_food_entry_reply_markup(
                         session=session,
                         entry=updated_entry,
@@ -4724,7 +4785,7 @@ async def handle_recent_action_callback(
                     getattr(callback.message, "bot", None),
                     chat_id=getattr(getattr(callback.message, "chat", None), "id", None),
                     message_id=callback_data.parent_message_id,
-                    text="Эта запись уже недоступна.",
+                    text=deleted_entry_message,
                     reply_markup=None,
                 )
                 await safe_delete_message(callback.message)
@@ -4780,7 +4841,7 @@ async def handle_recent_action_callback(
         if callback_data.open_in_new_message:
             await callback.message.answer(item_response_text, reply_markup=item_reply_markup)
         else:
-            await callback.message.edit_text(item_response_text, reply_markup=item_reply_markup)
+            await safe_edit_message_text(callback.message, text=item_response_text, reply_markup=item_reply_markup)
         await callback.answer()
         return
 

@@ -17,6 +17,7 @@ def test_core_tables_registered() -> None:
         "user_diet_preferences",
         "supported_metrics",
         "entry_item_metrics",
+        "callback_states",
         "llm_issue_logs",
         "conversation_sessions",
         "conversation_messages",

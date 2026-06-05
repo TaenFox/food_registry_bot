@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -32,6 +33,7 @@ from food_registry_bot.bot.handlers import (
     handle_period_report_callback,
     handle_recent,
     handle_recent_action_callback,
+    handle_recent_action_state_callback,
     handle_recent_delete_callback,
     handle_report,
     handle_settings,
@@ -1744,6 +1746,13 @@ async def test_post_entry_details_open_and_close_return_to_confirmation() -> Non
         "\n"
         "13:00 — яблоко (180 г)\n"
         "\n"
+        "По всей записи:\n"
+        "- калории: 220.0 ккал\n"
+        "- белки: 7.6 г\n"
+        "- жиры: 2.2 г\n"
+        "- углеводы: 42.8 г\n"
+        "- клетчатка: 5.1 г\n"
+        "\n"
         "Блюда:\n"
         "1. яблоко (180 г)\n"
         "\n"
@@ -1783,6 +1792,72 @@ async def test_post_entry_details_open_and_close_return_to_confirmation() -> Non
     )
     assert flatten_inline_button_texts(callback.message.edit_text.await_args.kwargs["reply_markup"]) == ["Подробнее"]
     callback.answer.assert_awaited_once_with()
+
+
+async def test_post_entry_confirm_delete_last_item_shows_restore_message() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "post_entry_delete_last_item_user")
+    with session_factory() as session:
+        user = User(
+            telegram_user_id=ALLOWED_USER_ID,
+            username="post_entry_delete_last_item_user",
+            timezone="Europe/Moscow",
+        )
+        session.add(user)
+        session.flush()
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            source_text="яблоко",
+            occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        item = EntryItem(entry_id=entry.id, position=0, name="яблоко", quantity=180, unit="g")
+        session.add(item)
+        session.flush()
+        session.add(EntryItemMetric(entry_item_id=item.id, metric_id=1, value=220.0, confidence="medium"))
+        session.commit()
+        entry_id = entry.id
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="post_entry_delete_last_item_user"),
+        message=SimpleNamespace(
+            edit_text=AsyncMock(),
+            answer=AsyncMock(),
+            delete=AsyncMock(),
+            bot=SimpleNamespace(edit_message_text=AsyncMock()),
+            chat=SimpleNamespace(id=5003),
+        ),
+        answer=AsyncMock(),
+    )
+
+    await handle_recent_action_callback(
+        callback,
+        RecentEntryActionCallback(
+            action="confirm_delete_item",
+            entry_id=entry_id,
+            item_position=0,
+            page=0,
+            count=5,
+            parent_message_id=903,
+            origin="post_entry",
+            root_entry_id=entry_id,
+        ),
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    callback.message.bot.edit_message_text.assert_awaited_once_with(
+        chat_id=5003,
+        message_id=903,
+        text="Была удалена запись: (яблоко (180 г))",
+        reply_markup=None,
+    )
+    callback.message.delete.assert_awaited_once()
+    callback.answer.assert_awaited_once_with(
+        "Блюдо удалено. Если это была единственная позиция, запись тоже удалена."
+    )
 
 
 async def test_regular_message_denies_unallowed_user_before_processing() -> None:
@@ -2305,6 +2380,64 @@ async def test_recent_action_open_entry_shows_items_for_food_record() -> None:
     ]
 
 
+async def test_recent_action_open_entry_repeat_click_ignores_message_not_modified() -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "recent_repeat_click_user")
+    with session_factory() as session:
+        user = User(
+            telegram_user_id=ALLOWED_USER_ID,
+            username="recent_repeat_click_user",
+            timezone="Europe/Moscow",
+        )
+        session.add(user)
+        session.flush()
+
+        entry = Entry(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            source_text="обед",
+            occurred_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.flush()
+        session.add(EntryItem(entry_id=entry.id, position=0, name="рис", quantity=150, unit="g"))
+        session.commit()
+        entry_id = entry.id
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="recent_repeat_click_user"),
+        message=SimpleNamespace(
+            edit_text=AsyncMock(
+                side_effect=[
+                    None,
+                    TelegramBadRequest(SimpleNamespace(), "Bad Request: message is not modified"),
+                ]
+            ),
+            answer=AsyncMock(),
+            message_id=778,
+        ),
+        answer=AsyncMock(),
+    )
+
+    callback_data = RecentEntryActionCallback(action="open_entry", entry_id=entry_id, page=0, count=5)
+
+    await handle_recent_action_callback(
+        callback,
+        callback_data,
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+    await handle_recent_action_callback(
+        callback,
+        callback_data,
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+    )
+
+    assert callback.message.edit_text.await_count == 2
+    assert callback.answer.await_count == 2
+
+
 async def test_recent_action_open_item_shows_food_item_screen() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "recent_item_view_user")
@@ -2479,6 +2612,9 @@ async def test_recent_action_confirm_delete_item_updates_entry_screen() -> None:
         text="Запись еды:\n"
         "\n"
         "13:00 — курица (120 г)\n"
+        "\n"
+        "По всей записи:\n"
+        "- калории: 300.0 ккал\n"
         "\n"
         "Блюда:\n"
         "1. курица (120 г)\n"
@@ -6575,7 +6711,7 @@ async def test_recent_action_open_entry_shows_average_diet_score() -> None:
         "\n"
         "13:00 — рис (150 г), курица (120 г)\n"
         "\n"
-        "Средний diet score: 8.9/10\n"
+        "Средний балл по диетам: 8.9/10\n"
         "\n"
         "Блюда:\n"
         "1. рис (150 г)\n"
@@ -6627,7 +6763,7 @@ async def test_recent_entry_average_diet_score_is_quantity_weighted() -> None:
         admin_user_ids=(ADMIN_ID,),
     )
 
-    assert "Средний diet score: 8.7/10" in callback.message.edit_text.await_args.args[0]
+    assert "Средний балл по диетам: 8.7/10" in callback.message.edit_text.await_args.args[0]
 
 
 async def test_recent_list_shows_average_diet_score() -> None:
