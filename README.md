@@ -375,6 +375,19 @@ CONVERSATION_MODEL=gpt-5-mini
 - выполняет `alembic upgrade head`;
 - запускает polling-процесс бота.
 
+Для бота также включён watchdog liveness-контроль:
+
+- event loop периодически обновляет heartbeat-файл `var/run/bot-heartbeat`;
+- container `healthcheck` проверяет свежесть этого heartbeat;
+- если event loop зависнет и heartbeat перестанет обновляться, внутренний watchdog завершит процесс с кодом `1`, после чего `restart: unless-stopped` перезапустит контейнер.
+- при следующем старте бот добавит в startup-уведомление админам признак нештатного рестарта и его причину, если она была зафиксирована.
+
+Под это поведение доступны env-переменные:
+
+- `WATCHDOG_ENABLED=true|false`
+- `WATCHDOG_HEARTBEAT_INTERVAL_SECONDS=15`
+- `WATCHDOG_TIMEOUT_SECONDS=90`
+
 Для просмотра логов:
 
 ```bash
