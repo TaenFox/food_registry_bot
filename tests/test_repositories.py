@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.db.base import Base
 from food_registry_bot.db.models import (
+    AccountCategory,
     ConversationMessageRole,
     DailyGoalSnapshot,
     EntryItem,
@@ -147,6 +148,34 @@ def test_user_access_repository_sets_and_updates_access() -> None:
     saved_access = session.query(UserAccess).filter_by(telegram_user_id=9001).one()
     assert saved_access.username == "first_user_renamed"
     assert saved_access.is_allowed is False
+
+
+def test_user_access_repository_grants_temporary_internal_without_changing_base_category() -> None:
+    session = create_test_session()
+    repository = UserAccessRepository(session)
+    repository.set_access(
+        telegram_user_id=9002,
+        username="temporary_internal_user",
+        is_allowed=True,
+        account_category=AccountCategory.EXTERNAL,
+    )
+
+    access = repository.grant_temporary_internal(
+        telegram_user_id=9002,
+        username="temporary_internal_user",
+        now=datetime(2026, 6, 5, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert access.account_category is AccountCategory.EXTERNAL
+    assert access.temporary_internal_until == datetime(2026, 6, 6, 9, 0, tzinfo=timezone.utc)
+    assert repository.get_effective_account_category(
+        9002,
+        now=datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc),
+    ) is AccountCategory.INTERNAL
+    assert repository.get_effective_account_category(
+        9002,
+        now=datetime(2026, 6, 6, 9, 1, tzinfo=timezone.utc),
+    ) is AccountCategory.EXTERNAL
 
 
 def test_llm_issue_log_repository_creates_and_lists_recent_issues() -> None:

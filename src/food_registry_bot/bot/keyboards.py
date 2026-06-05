@@ -844,6 +844,7 @@ def build_admin_user_actions_keyboard(
     is_allowed: bool,
     is_admin: bool,
     account_category: str,
+    temporary_internal_active: bool = False,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if not is_admin:
@@ -881,6 +882,19 @@ def build_admin_user_actions_keyboard(
                 ),
             ]
         )
+        if account_category != "internal":
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="Продлить Internal на 24ч" if temporary_internal_active else "Internal на 24ч",
+                        callback_data=AdminPanelCallback(
+                            action="grant_temporary_internal",
+                            telegram_user_id=telegram_user_id,
+                            page=page,
+                        ).pack(),
+                    )
+                ]
+            )
     rows.extend(
         [
             [

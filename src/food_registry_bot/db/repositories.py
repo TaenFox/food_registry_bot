@@ -88,6 +88,8 @@ class KnownUserAccessView:
     has_profile: bool
     is_allowed: bool
     account_category: str
+    effective_account_category: str
+    temporary_internal_until: datetime | None
 
 
 @dataclass(frozen=True)
@@ -203,6 +205,40 @@ class UserAccessRepository:
             return AccountCategory.UNASSIGNED
         return access.account_category
 
+    def get_effective_account_category(
+        self,
+        telegram_user_id: int,
+        *,
+        now: datetime | None = None,
+    ) -> AccountCategory:
+        access = self.get_by_telegram_user_id(telegram_user_id)
+        return self.resolve_effective_account_category(access, now=now)
+
+    def grant_temporary_internal(
+        self,
+        *,
+        telegram_user_id: int,
+        username: str | None,
+        duration: timedelta = timedelta(hours=24),
+        now: datetime | None = None,
+    ) -> UserAccess:
+        access = self.get_by_telegram_user_id(telegram_user_id)
+        if access is None:
+            access = UserAccess(
+                telegram_user_id=telegram_user_id,
+                username=username,
+                is_allowed=False,
+                account_category=AccountCategory.UNASSIGNED,
+            )
+            self._session.add(access)
+        else:
+            access.username = username
+
+        effective_now = now or datetime.now(timezone.utc)
+        access.temporary_internal_until = effective_now + duration
+        self._session.flush()
+        return access
+
     def set_access(
         self,
         *,
@@ -252,17 +288,49 @@ class UserAccessRepository:
         else:
             access.username = username
             access.account_category = account_category
+            access.temporary_internal_until = None
             if account_category is AccountCategory.UNASSIGNED:
                 access.is_allowed = False
 
         self._session.flush()
         return access
 
+    @staticmethod
+    def resolve_effective_account_category(
+        access: UserAccess | None,
+        *,
+        now: datetime | None = None,
+    ) -> AccountCategory:
+        if access is None:
+            return AccountCategory.UNASSIGNED
+        if UserAccessRepository.is_temporary_internal_active(access, now=now):
+            return AccountCategory.INTERNAL
+        return access.account_category
+
+    @staticmethod
+    def is_temporary_internal_active(
+        access: UserAccess | None,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        if access is None or access.temporary_internal_until is None:
+            return False
+        effective_now = now or datetime.now(timezone.utc)
+        temporary_internal_until = UserAccessRepository.normalize_datetime(access.temporary_internal_until)
+        return temporary_internal_until > effective_now
+
+    @staticmethod
+    def normalize_datetime(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
     def list_known_users(self) -> list[KnownUserAccessView]:
         users = list(self._session.scalars(select(User).order_by(User.telegram_user_id.asc())))
         access_rows = list(
             self._session.scalars(select(UserAccess).order_by(UserAccess.telegram_user_id.asc()))
         )
+        now = datetime.now(timezone.utc)
 
         users_by_telegram_id = {user.telegram_user_id: user for user in users}
         access_by_telegram_id = {
@@ -286,6 +354,15 @@ class UserAccessRepository:
                         access.account_category.value
                         if access is not None
                         else AccountCategory.UNASSIGNED.value
+                    ),
+                    effective_account_category=self.resolve_effective_account_category(
+                        access,
+                        now=now,
+                    ).value,
+                    temporary_internal_until=(
+                        self.normalize_datetime(access.temporary_internal_until)
+                        if access is not None and access.temporary_internal_until is not None
+                        else None
                     ),
                 )
             )

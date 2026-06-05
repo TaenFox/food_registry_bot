@@ -33,7 +33,6 @@ from food_registry_bot.bot.handlers import (
     handle_recent,
     handle_recent_button,
     handle_recent_action_callback,
-    handle_recent_action_state_callback,
     handle_recent_delete_callback,
     handle_report,
     handle_settings,
@@ -53,7 +52,7 @@ from food_registry_bot.bot.payloads import (
     RecentEntryStateCallback,
     SummarySettingsCallback,
 )
-from food_registry_bot.bot.keyboards import RECENT_BUTTON_TEXT, REPORT_BUTTON_TEXT, SETTINGS_BUTTON_TEXT, TODAY_BUTTON_TEXT, WATER_250_ML_BUTTON_TEXT
+from food_registry_bot.bot.keyboards import RECENT_BUTTON_TEXT, WATER_250_ML_BUTTON_TEXT
 from food_registry_bot.bot.keyboards import build_data_exchange_files_keyboard
 from food_registry_bot.db.base import Base
 from food_registry_bot.db.models import (
@@ -1197,6 +1196,7 @@ async def test_admin_panel_open_user_and_toggle_access() -> None:
     assert reply_markup.inline_keyboard[0][0].text == "Разрешить доступ"
     assert reply_markup.inline_keyboard[1][0].text == "Internal"
     assert reply_markup.inline_keyboard[1][1].text == "External"
+    assert reply_markup.inline_keyboard[2][0].text == "Internal на 24ч"
 
     callback.message.edit_text.reset_mock()
     callback.answer.reset_mock()
@@ -1220,6 +1220,48 @@ async def test_admin_panel_open_user_and_toggle_access() -> None:
     assert reply_markup.inline_keyboard[0][0].text == "Запретить доступ"
     assert reply_markup.inline_keyboard[1][1].text == "External · текущая"
     callback.answer.assert_awaited_once_with("Доступ разрешён.")
+
+
+async def test_admin_panel_can_grant_temporary_internal_for_24_hours() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        session.add(
+            UserAccess(
+                telegram_user_id=ALLOWED_USER_ID,
+                username="allowed_user",
+                is_allowed=True,
+                account_category=AccountCategory.EXTERNAL,
+            )
+        )
+        session.commit()
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handle_admin_panel_callback(
+        callback,
+        AdminPanelCallback(action="grant_temporary_internal", telegram_user_id=ALLOWED_USER_ID, page=0),
+        session_factory,
+        backfill_tracker=AdminBackfillTracker(),
+        admin_user_ids=(ADMIN_ID,),
+        app_version="v1",
+    )
+
+    with session_factory() as session:
+        access = session.query(UserAccess).filter_by(telegram_user_id=ALLOWED_USER_ID).one()
+        assert access.account_category == AccountCategory.EXTERNAL
+        assert access.temporary_internal_until is not None
+
+    edited_text = callback.message.edit_text.await_args.args[0]
+    assert "- категория аккаунта: external\n" in edited_text
+    assert "- активная категория аккаунта: internal\n" in edited_text
+    assert "- временный internal до: " in edited_text
+    reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[2][0].text == "Продлить Internal на 24ч"
+    callback.answer.assert_awaited_once_with("Временный internal включён на 24 часа.")
 
 
 async def test_admin_panel_open_admin_user_without_access_toggle() -> None:

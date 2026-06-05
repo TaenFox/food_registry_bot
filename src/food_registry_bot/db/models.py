@@ -138,6 +138,7 @@ class UserAccess(Base):
         Enum(AccountCategory, name="account_category", values_callable=enum_values),
         default=AccountCategory.UNASSIGNED,
     )
+    temporary_internal_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
