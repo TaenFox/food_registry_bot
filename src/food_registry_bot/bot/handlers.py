@@ -1416,7 +1416,7 @@ def build_recent_entry_button_label(entry, timezone_name: str) -> str:
 def build_recent_entry_display_line(*, index: int, entry, timezone_name: str) -> str:
     title = truncate_button_label(build_recent_entry_title(entry), max_length=RECENT_ENTRY_LIST_TITLE_MAX_LENGTH)
     average_diet_score = format_entry_average_diet_score(entry)
-    suffix = f" · diet {average_diet_score}" if average_diet_score is not None else ""
+    suffix = f" · диеты {average_diet_score}" if average_diet_score is not None else ""
     return f"{index}. {format_entry_timestamp(entry, timezone_name)} — {title}{suffix}"
 
 

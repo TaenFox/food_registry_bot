@@ -6676,7 +6676,7 @@ async def test_recent_list_shows_average_diet_score() -> None:
     await handle_recent(message, command, session_factory, admin_user_ids=(ADMIN_ID,))
 
     assert message.answer.await_args.args == (
-        "Последние записи (страница 1, по 5):\n\n18.05.2026\n1. 13:00 — яблоко (180 г) · diet 9.0/10",
+        "Последние записи (страница 1, по 5):\n\n18.05.2026\n1. 13:00 — яблоко (180 г) · диеты 9.0/10",
     )
 
 
