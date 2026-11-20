@@ -13,9 +13,10 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Router
 from aiogram import F
+from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, FSInputFile, Message
+from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, Message, WebAppInfo
 from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
@@ -4037,6 +4038,7 @@ async def handle_start(
     message: Message,
     session_factory: sessionmaker[Session],
     admin_user_ids: tuple[int, ...] = (),
+    settings: Settings | None = None,
 ) -> None:
     if not await require_user_access(message, session_factory, admin_user_ids):
         return
@@ -4048,6 +4050,18 @@ async def handle_start(
             raise RuntimeError("User profile was not found after registration")
         user, preference, goal_preference, diets = load_settings_state(session=session, user_id=user_id, user=user)
 
+    reply_markup = build_settings_root_keyboard()
+    if settings and settings.mini_app_url and message.chat.type == ChatType.PRIVATE:
+        reply_markup.inline_keyboard.insert(
+            0,
+            [
+                InlineKeyboardButton(
+                    text="Открыть дневник",
+                    web_app=WebAppInfo(url=str(settings.mini_app_url)),
+                )
+            ],
+        )
+
     await message.answer(
         build_settings_response(
             section=SETTINGS_SECTION_ROOT,
@@ -4056,13 +4070,7 @@ async def handle_start(
             diets=diets,
             workout_logging_enabled=user.workout_logging_enabled,
         ),
-        reply_markup=build_settings_reply_markup(
-            section=SETTINGS_SECTION_ROOT,
-            goal_preference=goal_preference,
-            preference=preference,
-            diets=diets,
-            workout_logging_enabled=user.workout_logging_enabled,
-        ),
+        reply_markup=reply_markup,
     )
     await send_main_keyboard_message(message)
 

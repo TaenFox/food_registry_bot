@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -241,10 +243,16 @@ async def test_start_denies_unallowed_user() -> None:
     session_factory = create_session_factory()
     message = SimpleNamespace(
         from_user=SimpleNamespace(id=DENIED_USER_ID, username="denied_user"),
+        chat=SimpleNamespace(type=ChatType.PRIVATE),
         answer=AsyncMock(),
     )
 
-    await handle_start(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    await handle_start(
+        message,
+        session_factory,
+        admin_user_ids=(ADMIN_ID,),
+        settings=Settings(_env_file=None, MINI_APP_URL="https://diary.example.com/"),
+    )
 
     with session_factory() as session:
         assert session.query(User).count() == 0
@@ -289,6 +297,38 @@ async def test_start_creates_user_for_allowed_user() -> None:
     )
     assert message.answer.await_args_list[1].args == ("Основные действия доступны на клавиатуре ниже.",)
     assert message.answer.await_args_list[1].kwargs["reply_markup"].is_persistent is True
+
+
+@pytest.mark.parametrize(
+    ("chat_type", "mini_app_url", "expected_url"),
+    [
+        (ChatType.PRIVATE, "https://diary.example.com/", "https://diary.example.com/"),
+        (ChatType.PRIVATE, "", None),
+        (ChatType.GROUP, "https://diary.example.com/", None),
+    ],
+)
+async def test_start_offers_mini_app_only_in_private_chat_when_configured(
+    chat_type: ChatType, mini_app_url: str, expected_url: str | None
+) -> None:
+    session_factory = create_session_factory()
+    allow_user(session_factory, ALLOWED_USER_ID, "allowed_user")
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="allowed_user"),
+        chat=SimpleNamespace(type=chat_type),
+        answer=AsyncMock(),
+    )
+
+    settings = Settings(_env_file=None, MINI_APP_URL=mini_app_url)
+    await handle_start(message, session_factory, settings=settings)
+
+    markup = message.answer.await_args_list[0].kwargs["reply_markup"]
+    web_app_buttons = [button for row in markup.inline_keyboard for button in row if button.web_app]
+    if expected_url is None:
+        assert web_app_buttons == []
+    else:
+        (button,) = web_app_buttons
+        assert button.text == "Открыть дневник"
+        assert button.web_app.url == expected_url
 
 
 async def test_health_denies_unallowed_user() -> None:
