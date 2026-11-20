@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from food_registry_bot import __version__
 from food_registry_bot.config import Settings, get_data_exchange_dir, resolve_app_version
 
@@ -73,3 +76,10 @@ def test_get_data_exchange_dir_respects_environment_value(monkeypatch, tmp_path:
         assert get_data_exchange_dir() == expected_dir
     finally:
         get_data_exchange_dir.__globals__["get_settings"].cache_clear()
+
+
+def test_mini_app_url_must_use_https(monkeypatch) -> None:
+    monkeypatch.setenv("MINI_APP_URL", "http://diary.example.com/")
+
+    with pytest.raises(ValidationError, match="URL scheme should be 'https'"):
+        Settings(_env_file=None)

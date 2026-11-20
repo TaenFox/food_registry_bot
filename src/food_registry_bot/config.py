@@ -3,9 +3,9 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 import subprocess
-from typing import Optional
+from typing import Annotated, Optional
 
-from pydantic import Field
+from pydantic import Field, HttpUrl, UrlConstraints, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import enum
 
@@ -100,6 +100,9 @@ class Settings(BaseSettings):
     app_env: str = "local"
     app_version: str = Field(default_factory=resolve_app_version, alias="APP_VERSION")
     bot_token: Optional[str] = Field(default=None, alias="BOT_TOKEN")
+    mini_app_url: Optional[Annotated[HttpUrl, UrlConstraints(allowed_schemes=["https"])]] = Field(
+        default=None, alias="MINI_APP_URL"
+    )
     admin_user_ids_raw: str = Field(default="", alias="ADMIN_USER_IDS")
     extraction_provider: ExtractionProvider = Field(
         default=ExtractionProvider.STRUCTURED_PAYLOAD,
@@ -151,6 +154,11 @@ class Settings(BaseSettings):
     postgres_user: str = Field(default="food_registry", alias="POSTGRES_USER")
     postgres_password: str = Field(default="food_registry", alias="POSTGRES_PASSWORD")
     database_url: Optional[str] = Field(default=None, alias="DATABASE_URL")
+
+    @field_validator("mini_app_url", mode="before")
+    @classmethod
+    def normalize_mini_app_url(cls, value: str | None) -> str | None:
+        return value or None
 
     @property
     def sqlalchemy_database_url(self) -> str:
