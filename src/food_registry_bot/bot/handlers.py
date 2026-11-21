@@ -13,12 +13,12 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Router
 from aiogram import F
-from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, Message, WebAppInfo
+from aiogram.types import CallbackQuery, FSInputFile, Message
 from sqlalchemy.orm import Session, sessionmaker
 
+from food_registry_bot.bot.access import can_access_bot
 from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.keyboards import (
     RECENT_BUTTON_TEXT,
@@ -481,10 +481,7 @@ def user_has_access(message: Message, session: Session, admin_user_ids: tuple[in
     if telegram_user is None:
         return False
 
-    if is_admin_user(telegram_user.id, admin_user_ids):
-        return True
-
-    return UserAccessRepository(session).is_allowed(telegram_user.id)
+    return can_access_bot(session, telegram_user.id, admin_user_ids)
 
 
 async def require_user_access(
@@ -4038,7 +4035,6 @@ async def handle_start(
     message: Message,
     session_factory: sessionmaker[Session],
     admin_user_ids: tuple[int, ...] = (),
-    settings: Settings | None = None,
 ) -> None:
     if not await require_user_access(message, session_factory, admin_user_ids):
         return
@@ -4050,18 +4046,6 @@ async def handle_start(
             raise RuntimeError("User profile was not found after registration")
         user, preference, goal_preference, diets = load_settings_state(session=session, user_id=user_id, user=user)
 
-    reply_markup = build_settings_root_keyboard()
-    if settings and settings.mini_app_url and message.chat.type == ChatType.PRIVATE:
-        reply_markup.inline_keyboard.insert(
-            0,
-            [
-                InlineKeyboardButton(
-                    text="Открыть дневник",
-                    web_app=WebAppInfo(url=str(settings.mini_app_url)),
-                )
-            ],
-        )
-
     await message.answer(
         build_settings_response(
             section=SETTINGS_SECTION_ROOT,
@@ -4070,7 +4054,7 @@ async def handle_start(
             diets=diets,
             workout_logging_enabled=user.workout_logging_enabled,
         ),
-        reply_markup=reply_markup,
+        reply_markup=build_settings_root_keyboard(),
     )
     await send_main_keyboard_message(message)
 

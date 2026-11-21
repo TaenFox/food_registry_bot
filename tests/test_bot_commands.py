@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, call
 
-from aiogram.types import BotCommandScopeAllPrivateChats, BotCommandScopeChat, BotCommandScopeDefault
+from aiogram.types import (
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+    MenuButtonCommands,
+    MenuButtonWebApp,
+    WebAppInfo,
+)
 
 from food_registry_bot.bot.commands import (
     ADMIN_COMMAND_SPECS,
@@ -10,6 +17,7 @@ from food_registry_bot.bot.commands import (
     build_admin_bot_commands,
     build_user_bot_commands,
     setup_bot_commands,
+    setup_diary_menu_button,
 )
 
 
@@ -45,3 +53,16 @@ def test_build_user_bot_commands_excludes_button_replaced_commands() -> None:
     commands = build_user_bot_commands()
 
     assert [command.command for command in commands] == ["start", "provider", "context", "files", "ping"]
+
+
+async def test_diary_menu_button_follows_mini_app_configuration() -> None:
+    bot = AsyncMock()
+    url = "https://diary.example.com/"
+
+    await setup_diary_menu_button(bot, mini_app_url=url)
+    await setup_diary_menu_button(bot, mini_app_url=None)
+
+    assert bot.set_chat_menu_button.await_args_list == [
+        call(menu_button=MenuButtonWebApp(text="Дневник", web_app=WebAppInfo(url=url))),
+        call(menu_button=MenuButtonCommands()),
+    ]

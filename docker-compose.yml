@@ -61,6 +61,7 @@ services:
       - "127.0.0.1:${MINI_APP_PORT:-8080}:80"
     volumes:
       - ./mini-app:/usr/share/nginx/html:ro
+      - ./docker/mini-app.conf:/etc/nginx/conf.d/default.conf:ro
 
 volumes:
   postgres_data:

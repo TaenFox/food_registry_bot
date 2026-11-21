@@ -3,7 +3,15 @@ from __future__ import annotations
 import logging
 
 from aiogram import Bot
-from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat, BotCommandScopeDefault
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+    MenuButtonCommands,
+    MenuButtonWebApp,
+    WebAppInfo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,3 +57,15 @@ async def setup_bot_commands(bot: Bot, *, admin_user_ids: tuple[int, ...]) -> No
             )
     except Exception:
         logger.exception("Failed to register bot commands")
+
+
+async def setup_diary_menu_button(bot: Bot, *, mini_app_url: str | None) -> None:
+    button = (
+        MenuButtonWebApp(text="Дневник", web_app=WebAppInfo(url=mini_app_url))
+        if mini_app_url
+        else MenuButtonCommands()
+    )
+    try:
+        await bot.set_chat_menu_button(menu_button=button)
+    except Exception:
+        logger.exception("Failed to configure the diary menu button")

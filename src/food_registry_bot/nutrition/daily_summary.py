@@ -133,7 +133,13 @@ class DailyNutritionSummaryUseCase:
             occurred_at_from=occurred_at_from,
             occurred_at_to=occurred_at_to,
         )
+        return self.summarize_entries(
+            entries, summary_date=summary_date, timezone_name=timezone_name
+        )
 
+    def summarize_entries(
+        self, entries: list[Entry], *, summary_date: date, timezone_name: str
+    ) -> DailyNutritionSummary:
         entry_summaries: list[DailyNutritionEntrySummary] = []
         day_totals = _empty_totals()
         excluded_entry_count = 0
