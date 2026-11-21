@@ -1,0 +1,90 @@
+:root { color-scheme: light dark; }
+#diary-trends {
+  --page: var(--tg-theme-bg-color, light-dark(#f9fafc, #171d27));
+  --ink: var(--tg-theme-text-color, light-dark(#182538, #edf2fa));
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+}
+#diary-trends .phone {
+  --muted: light-dark(#506071, #a9b7c8);
+  --rule: light-dark(#dbe1e8, #343e4d);
+  --band: light-dark(#e6f3ee, #233c38);
+  --threshold: light-dark(#539281, #72a899);
+  --kcal: light-dark(#11665d, #81d9c6);
+  --protein: light-dark(#6745b3, #bcadff);
+  --fat: light-dark(#a4491e, #ffad7d);
+  --carbs: light-dark(#225bb0, #86b8ff);
+  --selection: light-dark(#e2eaf2, #2c3c50);
+  box-sizing: border-box; width: min(100%, 480px); margin: 0 auto;
+  padding: 16px 16px 12px;
+  font: 14px/1.35 system-ui, sans-serif; font-variant-numeric: tabular-nums;
+}
+#diary-trends :is(h1, h2, p, figure, ul) { margin: 0; }
+#diary-trends h1 { font-size: 24px; letter-spacing: -.035em; }
+#diary-trends .unit { margin-top: 10px; color: var(--muted); font-size: 11px; }
+#diary-trends .graph { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 6px; margin-top: 4px; }
+#diary-trends .scale, #diary-trends .plot { position: relative; height: 154px; }
+#diary-trends .scale span {
+  position: absolute; right: 0; top: var(--y); transform: translateY(-50%);
+  color: var(--muted); font-size: 11px;
+}
+#diary-trends .scale .limit { font-weight: 650; color: var(--kcal); }
+#diary-trends .plot svg { position: relative; width: 100%; height: 100%; display: block; }
+#diary-trends .plot line { vector-effect: non-scaling-stroke; }
+#diary-trends .axis { stroke: var(--rule); stroke-width: 1; }
+#diary-trends .range { fill: var(--band); fill-opacity: .78; }
+#diary-trends .weekend-zone { fill: var(--selection); opacity: .44; }
+#diary-trends .limit-line { stroke: var(--threshold); stroke-width: 1; stroke-dasharray: 3 3; }
+#diary-trends .focus-column {
+  position: absolute; z-index: 1; left: var(--selected, 90%); top: 0; bottom: 1px; width: 20px;
+  transform: translateX(-50%); border-radius: 8px; background: var(--selection);
+  opacity: .27; pointer-events: none;
+}
+#diary-trends .series { fill: none; stroke: var(--series); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+#diary-trends .kcal { --series: var(--kcal); }
+#diary-trends .protein { --series: var(--protein); }
+#diary-trends .fat { --series: var(--fat); }
+#diary-trends .carbs { --series: var(--carbs); }
+#diary-trends .series.kcal { stroke-width: 2.8; }
+#diary-trends .partial { stroke-dasharray: 3 4; }
+#diary-trends .dates { position: relative; height: 44px; margin: -2px 0 0 40px; }
+#diary-trends .dates button {
+  position: absolute; left: var(--x); transform: translateX(-50%);
+  min-width: 44px; min-height: 44px; border: 0; border-radius: 9px;
+  padding: 4px; background: transparent; color: var(--muted); font: inherit; font-size: 12px;
+}
+#diary-trends .dates button[aria-pressed="true"] { font-weight: 700; color: var(--ink); }
+#diary-trends .dates button[aria-pressed="true"] span { background: var(--selection); }
+#diary-trends .dates button span { display: inline-block; padding: 2px 4px; border-radius: 6px; white-space: nowrap; }
+#diary-trends .dates .weekend { color: var(--kcal); }
+#diary-trends .legend { display: flex; flex-wrap: wrap; gap: 5px 10px; padding: 2px 0 0; list-style: none; font-size: 12px; }
+#diary-trends .legend li, #diary-trends .notes span { display: inline-flex; align-items: center; gap: 5px; }
+#diary-trends .legend i { width: 13px; height: 3px; border-radius: 2px; background: var(--series); }
+#diary-trends .notes { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: var(--muted); }
+#diary-trends .band-key { width: 13px; height: 7px; background: var(--band); border-block: 1px dashed var(--threshold); }
+#diary-trends .dash-key { width: 13px; border-top: 2px dotted var(--muted); }
+#diary-trends .meals { margin-top: 13px; }
+#diary-trends .meals ul { padding: 4px 0 0; list-style: none; }
+#diary-trends .meal { border-top: 1px solid var(--rule); padding: 10px 0 8px; }
+#diary-trends .meal h2, #diary-trends .meal li {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px;
+  align-items: baseline;
+}
+#diary-trends .meal h2 { font-size: 13px; font-weight: 650; }
+#diary-trends .meal li { padding: 2px 0 2px 12px; }
+#diary-trends .amount { font-size: 12px; color: var(--muted); white-space: nowrap; }
+#diary-trends [hidden] { display: none; }
+#diary-trends .point { fill: var(--series); }
+#diary-trends .point.current {
+  fill: var(--page); stroke: var(--series); stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+#diary-trends .legend button {
+  background: transparent; border: 0; border-radius: 6px;
+  color: inherit; font: inherit; padding: 5px 2px; min-height: 30px;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+#diary-trends .legend button[aria-pressed="true"] { background: var(--selection); }
+#diary-trends .dates button, #diary-trends .legend button { cursor: pointer; }
+#diary-trends .meal-note { font-size: 12px; color: var(--muted); padding-bottom: 8px; }

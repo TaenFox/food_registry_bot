@@ -3,22 +3,37 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
   <title>Дневник питания</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      font-family: system-ui, sans-serif;
-    }
-    h1 { margin: 1rem; font-size: 1.5rem; }
-  </style>
+  <link rel="stylesheet" href="diary.css">
+  <script defer src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script defer src="diary.js"></script>
 </head>
-<body>
-  <main>
-    <h1>Дневник питания</h1>
+<body id="diary-trends">
+  <main class="phone">
+    <p id="status" role="status">Загрузка…</p>
+    <article id="diary" aria-labelledby="diary-date" hidden>
+      <h1 id="diary-date"><time></time></h1>
+      <figure aria-label="Калории, белки, жиры и углеводы в процентах от целей выбранных дней">
+        <p class="unit">% от цели дня</p>
+        <div class="graph">
+          <div class="scale" aria-hidden="true"></div>
+          <div class="plot">
+            <div class="focus-column" aria-hidden="true"></div>
+            <svg viewBox="0 0 400 200" preserveAspectRatio="none" role="img" aria-label="Динамика КБЖУ. Точные значения доступны по датам и метрикам под графиком."></svg>
+          </div>
+        </div>
+        <div class="dates" role="group" aria-label="Выбрать пищевой день"></div>
+        <p id="plot-empty" class="notes" hidden></p>
+        <ul class="legend" aria-label="Уточнить значения выбранного дня"></ul>
+        <div class="notes">
+          <span id="threshold-key"><i class="band-key" aria-hidden="true"></i><span></span></span>
+          <span><i class="dash-key" aria-hidden="true"></i>День ещё идёт</span>
+        </div>
+        <p id="metric-detail" class="notes" aria-live="polite" hidden></p>
+      </figure>
+      <section class="meals" aria-label="Приёмы пищи за выбранный день" aria-live="polite"></section>
+    </article>
   </main>
 </body>
 </html>

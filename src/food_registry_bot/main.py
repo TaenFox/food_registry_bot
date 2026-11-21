@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from food_registry_bot.bot.commands import setup_bot_commands
+from aiohttp import web
+
+from food_registry_bot.bot.commands import setup_bot_commands, setup_diary_menu_button
 from food_registry_bot.bot.factory import create_bot, create_dispatcher
 from food_registry_bot.conversation.factory import create_conversation_service
 from food_registry_bot.config import get_settings
 from food_registry_bot.db.session import create_session_factory
 from food_registry_bot.extraction.factory import create_extraction_service
+from food_registry_bot.mini_app import MINI_APP_PORT, create_diary_app
 from food_registry_bot.nutrition.factory import create_nutrition_service
 from food_registry_bot.runtime_state import (
     RestartMarker,
@@ -93,10 +96,24 @@ async def run() -> None:
         heartbeat_task = asyncio.create_task(heartbeat_monitor.run_heartbeat_loop())
 
     bot = create_bot(settings.bot_token)
+    diary_runner = None
     try:
+        session_factory = create_session_factory()
+        if settings.mini_app_url:
+            diary_runner = web.AppRunner(
+                create_diary_app(
+                    session_factory, token=settings.bot_token, admin_user_ids=settings.admin_user_ids
+                ),
+                access_log=None,
+            )
+            await diary_runner.setup()
+            await web.TCPSite(diary_runner, host="0.0.0.0", port=MINI_APP_PORT).start()
         await setup_bot_commands(bot, admin_user_ids=settings.admin_user_ids)
+        await setup_diary_menu_button(
+            bot, mini_app_url=str(settings.mini_app_url) if settings.mini_app_url else None
+        )
         dispatcher = create_dispatcher(
-            create_session_factory(),
+            session_factory,
             extraction_service=create_extraction_service(settings),
             nutrition_service=create_nutrition_service(settings),
             conversation_service=create_conversation_service(settings),
@@ -112,7 +129,7 @@ async def run() -> None:
         )
         if restart_marker is not None:
             clear_restart_marker(settings.restart_marker_file)
-        await dispatcher.start_polling(bot)
+        await dispatcher.start_polling(bot, close_bot_session=False)
     except Exception as exc:
         write_restart_marker(
             settings.restart_marker_file,
@@ -120,12 +137,17 @@ async def run() -> None:
         )
         raise
     finally:
-        if heartbeat_task is not None:
-            heartbeat_task.cancel()
-            await asyncio.gather(heartbeat_task, return_exceptions=True)
-        if heartbeat_monitor is not None:
-            heartbeat_monitor.stop()
-        clear_runtime_state(settings.runtime_state_file)
+        try:
+            if diary_runner is not None:
+                await diary_runner.cleanup()
+            await bot.session.close()
+        finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
+            if heartbeat_monitor is not None:
+                heartbeat_monitor.stop()
+            clear_runtime_state(settings.runtime_state_file)
 
 
 def main() -> None:
