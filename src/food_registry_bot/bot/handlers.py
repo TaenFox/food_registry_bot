@@ -3533,8 +3533,13 @@ def build_goal_response(
     return "\n".join(lines)
 
 
+def get_journal_message_text(message: Message) -> str | None:
+    text = getattr(message, "text", None) or getattr(message, "caption", None)
+    return text if text and text.strip() else None
+
+
 async def build_extraction_request(message: Message) -> JournalExtractionRequest | None:
-    message_text = getattr(message, "text", None) or getattr(message, "caption", None)
+    message_text = get_journal_message_text(message)
     photo_sizes = getattr(message, "photo", None) or []
     if photo_sizes:
         photo_buffer = BytesIO()
@@ -3544,7 +3549,7 @@ async def build_extraction_request(message: Message) -> JournalExtractionRequest
             images=(ExtractionImageInput(data=photo_buffer.getvalue(), media_type="image/jpeg"),),
         )
 
-    if message_text and message_text.strip():
+    if message_text:
         return JournalExtractionRequest(text=message_text)
 
     return None
@@ -6402,6 +6407,10 @@ async def handle_message(
                 saved_items = build_saved_items_from_payload(extraction_result.payload)
                 extracted_workout_metric_lines = build_extracted_workout_metric_lines(extraction_result.payload)
                 occurred_at_values: list[datetime] = []
+                source_text_by_type = {
+                    EntryType.FOOD: get_journal_message_text(message),
+                    EntryType.WORKOUT: extraction_request.text,
+                }
                 for extracted_entry in extraction_result.payload.entries:
                     occurred_at = extracted_entry.occurred_at or datetime.now(timezone.utc)
                     entry_extraction_raw_payload = json.dumps(
@@ -6412,7 +6421,7 @@ async def handle_message(
                         user_id=user_id,
                         entry_type=extracted_entry.type,
                         occurred_at=occurred_at,
-                        source_text=extraction_request.text if extracted_entry.type is EntryType.WORKOUT else None,
+                        source_text=source_text_by_type.get(extracted_entry.type),
                         extraction_provider=extraction_result.extraction_provider,
                         extraction_model=extraction_result.extraction_model,
                         extraction_raw_payload=entry_extraction_raw_payload,
