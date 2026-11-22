@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Iterable
 
-from food_registry_bot.db.models import Entry, EntryType
+from food_registry_bot.db.models import Entry, EntryItem, EntryType
 from food_registry_bot.extraction.contract import ExtractedJournalPayload
 from food_registry_bot.extraction.explicit_weights import match_explicit_food_weights
 from food_registry_bot.nutrition.contract import (
@@ -123,18 +123,67 @@ def prepare_nutrition_request_from_extracted_payload(
 
 
 def recoverable_food_weights(entry: Entry) -> dict[int, int]:
-    if entry.entry_type is not EntryType.FOOD or not entry.source_text:
+    if entry.entry_type is not EntryType.FOOD:
         return {}
     items = sorted(entry.items, key=lambda item: item.position)
-    if not any(item.quantity is None or item.unit is None for item in items):
+    missing = [item for item in items if item.quantity is None or item.unit is None]
+    if not missing:
         return {}
-    grams = match_explicit_food_weights(entry.source_text, [item.name for item in items])
-    if grams is None:
+    legacy_weights = (
+        _entry_text_weights(entry, items) if any(item.source_facts is None for item in missing) else {}
+    )
+    weights = {}
+    for item in missing:
+        weight = (
+            legacy_weights.get(item.id)
+            if item.source_facts is None
+            else item.source_facts.get("weight_grams")
+        )
+        if isinstance(weight, int) and weight > 0:
+            weights[item.id] = weight
+    return weights
+
+
+def _entry_text_weights(entry: Entry, items: list[EntryItem]) -> dict[int, int]:
+    if not entry.source_text:
         return {}
-    return {
-        item.id: weight for item, weight in zip(items, grams)
-        if item.quantity is None or item.unit is None
-    }
+    weights = match_explicit_food_weights(entry.source_text, [item.name for item in items])
+    return {item.id: grams for item, grams in zip(items, weights or [])}
+
+
+def preserve_entry_item_source_facts(entry: Entry) -> None:
+    """Keep recoverable facts with their existing item IDs before changing the entry."""
+    items = sorted(entry.items, key=lambda item: item.position)
+    if all(item.source_facts is not None for item in items):
+        return
+    weights = _entry_text_weights(entry, items)
+    labels = _legacy_item_labels(entry)
+    for item in items:
+        if item.source_facts is None:
+            facts = {}
+            if item.id in weights:
+                facts["weight_grams"] = weights[item.id]
+            if item in labels:
+                facts["nutrition_label"] = labels[item].model_dump(mode="json")
+            item.source_facts = facts
+
+
+def _legacy_item_labels(entry: Entry) -> dict[EntryItem, NutritionLabelData]:
+    payload = _parse_entry_extraction_payload(entry.extraction_raw_payload)
+    if payload is not None and len(payload.entries) == 1:
+        (candidate,) = payload.entries
+        extracted = candidate if candidate.type is entry.entry_type else None
+    else:
+        extracted = _resolve_matching_extracted_entry(entry=entry, payload=payload)
+    if extracted is None:
+        return {}
+    labels = {}
+    for item in entry.items:
+        if 0 <= item.position < len(extracted.items):
+            original = extracted.items[item.position]
+            if original.name == item.name and original.nutrition_label is not None:
+                labels[item] = original.nutrition_label
+    return labels
 
 
 def prepare_nutrition_request_from_entries(
@@ -150,9 +199,7 @@ def prepare_nutrition_request_from_entries(
         if not _is_supported_food_item(entry_type=entry.entry_type):
             continue
 
-        extracted_payload = _parse_entry_extraction_payload(entry.extraction_raw_payload)
-        extracted_entry = _resolve_matching_extracted_entry(entry=entry, payload=extracted_payload)
-        extracted_items = extracted_entry.items if extracted_entry is not None else []
+        labels = _legacy_item_labels(entry) if any(item.source_facts is None for item in entry.items) else {}
 
         for item in sorted(entry.items, key=lambda current: current.position):
             if selected_item_ids is not None and item.id not in selected_item_ids:
@@ -162,11 +209,10 @@ def prepare_nutrition_request_from_entries(
                 quantity, unit = grams, NutritionUnit.GRAM.value
             else:
                 quantity, unit = _sanitize_quantity_unit(quantity=item.quantity, unit=item.unit)
-            extracted_item = (
-                extracted_items[item.position]
-                if 0 <= item.position < len(extracted_items)
-                else None
-            )
+            label = labels.get(item)
+            if item.source_facts is not None:
+                stored_label = item.source_facts.get("nutrition_label")
+                label = NutritionLabelData.model_validate(stored_label) if stored_label else None
             item_refs.append(
                 NutritionJournalItemRef(
                     client_item_id=f"entry-{entry.id}:item-{item.position}",
@@ -175,7 +221,7 @@ def prepare_nutrition_request_from_entries(
                     name=item.name,
                     quantity=quantity,
                     unit=unit,
-                    nutrition_label=extracted_item.nutrition_label if extracted_item is not None else None,
+                    nutrition_label=label,
                 )
             )
 

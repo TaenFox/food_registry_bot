@@ -4,7 +4,7 @@ import enum
 from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from food_registry_bot.db.base import Base
@@ -343,6 +343,7 @@ class EntryItem(Base):
     unit: Mapped[Optional[str]] = mapped_column(String(32))
     confidence: Mapped[Optional[str]] = mapped_column(String(32))
     source_type: Mapped[Optional[str]] = mapped_column(String(64))
+    source_facts: Mapped[Optional[dict]] = mapped_column(JSON(none_as_null=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

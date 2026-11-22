@@ -13,6 +13,7 @@ const mealList = document.querySelector(".meals");
 const detail = document.querySelector("#metric-detail");
 const chartEmpty = document.querySelector("#plot-empty");
 const thresholdKey = document.querySelector("#threshold-key");
+const actionStatus = document.querySelector("#action-status");
 const metricLabels = {
     calories: "Калории",
     protein: "Белки",
@@ -21,10 +22,15 @@ const metricLabels = {
 };
 const formatter = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
 const fullDate = new Intl.DateTimeFormat("ru", { day: "numeric", month: "long", timeZone: "UTC" });
+const shortWeekday = new Intl.DateTimeFormat("ru", { weekday: "short", timeZone: "UTC" });
+const longWeekday = new Intl.DateTimeFormat("ru", { weekday: "long", timeZone: "UTC" });
 let model;
 let selectedDay;
 let selectedMetric;
 let expiresAt;
+let expiryTimer;
+let openedDish;
+let savingDish = false;
 
 function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -96,8 +102,12 @@ function renderChart() {
         }
     }
 
-    for (const code of model.metrics) {
+    const series = selectedMetric
+        ? [...model.metrics.filter(code => code !== selectedMetric), selectedMetric]
+        : model.metrics;
+    for (const code of series) {
         const style = seriesClass(code);
+        const emphasis = !selectedMetric ? "" : code === selectedMetric ? " highlighted" : " subdued";
         let previous = null;
         for (const [index, day] of model.days.entries()) {
             const value = day.metrics[code].percent;
@@ -109,10 +119,10 @@ function renderChart() {
             if (previous) {
                 draw("line", {
                     x1: previous.x, y1: previous.y, x2: point.x, y2: point.y,
-                }, "series " + style + (day.current ? " partial" : ""));
+                }, "series " + style + emphasis + (day.current ? " partial" : ""));
             }
             draw("circle", { cx: point.x, cy: point.y, r: 3 },
-                "point " + style + (day.current ? " current" : ""));
+                "point " + style + emphasis + (day.current ? " current" : ""));
             previous = point;
         }
     }
@@ -140,14 +150,149 @@ function renderMetric() {
     if (observation.goal !== null) {
         text += ` · пороги ${formatter.format(observation.lower)}–${amount(observation.upper)}`;
     }
+    if (observation.value !== null && !observation.complete) text += " · неполные данные";
     detail.textContent = text;
 }
 
-function calories(value) {
-    return value === null ? "—" : formatter.format(value) + " ккал";
+function formatAmount(value, code) {
+    const unit = code === "calories" ? "ккал" : "г";
+    return value === null ? "—" : formatter.format(value) + " " + unit;
+}
+
+function actionButton(label, handler, className) {
+    const button = element("button", label, className);
+    button.type = "button";
+    button.addEventListener("click", handler);
+    return button;
+}
+
+function setActionStatus(message) {
+    actionStatus.textContent = message;
+    actionStatus.hidden = !message;
+}
+
+function focusDish(itemId, selector = ".dish") {
+    mealList.querySelector(`[data-dish-id="${itemId}"] ${selector}`)?.focus({ preventScroll: true });
+}
+
+function closeDish(itemId) {
+    openedDish = undefined;
+    renderMeals(model.days[selectedDay]);
+    focusDish(itemId);
+}
+
+function numberField(labelText, name, value) {
+    const label = element("label", labelText);
+    const input = element("input");
+    input.type = "number";
+    input.name = name;
+    input.min = name === "weight" ? "1" : "0";
+    input.step = name === "weight" ? "1" : "any";
+    input.required = true;
+    if (value !== undefined) input.value = value;
+    label.append(input);
+    return label;
+}
+
+function formActions(itemId, label) {
+    const actions = element("div", undefined, "dish-actions");
+    const cancel = actionButton("Отмена", () => closeDish(itemId));
+    const submit = element("button", label, "primary");
+    submit.type = "submit";
+    actions.append(cancel, submit);
+    return actions;
+}
+
+function editDishForm(meal, dish) {
+    const form = element("form");
+    const grams = ["g", "г", "гр"].includes(dish.unit?.trim().toLowerCase()) && dish.quantity > 0
+        ? dish.quantity : undefined;
+    form.append(numberField("Вес, г", "weight", grams));
+    if (!grams && dish.quantity != null && dish.unit) {
+        form.append(element("p", `Сохранено: ${dish.quantity} ${dish.unit === "ml" ? "мл" : dish.unit}`, "meal-note"));
+    }
+    const fieldset = element("fieldset");
+    fieldset.append(element("legend", "КБЖУ на 100 г"));
+    const fields = element("div", undefined, "dish-fields");
+    const initial = {};
+    for (const code of Object.keys(metricLabels)) {
+        const value = grams && dish.metrics[code] !== null
+            ? Number((dish.metrics[code] * 100 / grams).toFixed(4))
+            : undefined;
+        initial[code] = value;
+        const unit = code === "calories" ? "ккал" : "г";
+        fields.append(numberField(`${metricLabels[code]}, ${unit}`, code, value));
+    }
+    fieldset.append(fields);
+    form.append(fieldset, formActions(dish.id, "Сохранить"));
+    form.addEventListener("submit", event => {
+        event.preventDefault();
+        const data = new FormData(form);
+        const per100g = {};
+        for (const code of Object.keys(metricLabels)) {
+            const value = Number(data.get(code));
+            if (initial[code] !== value) per100g[code] = value;
+        }
+        saveDish(form, {
+            action: "edit", entry_id: meal.id, item_id: dish.id,
+            revision: dish.revision, weight: Number(data.get("weight")), per_100g: per100g,
+        }, "Блюдо обновлено.");
+    });
+    return form;
+}
+
+function moveDishForm(day, meal, dish) {
+    const form = element("form");
+    const label = element("label", "Перенести в запись");
+    const select = element("select");
+    for (const candidate of day.meals) {
+        if (candidate.id === meal.id) continue;
+        const firstDish = candidate.dishes[0]?.name;
+        const option = element("option", firstDish ? `${candidate.time} · ${firstDish}` : candidate.time);
+        option.value = candidate.id;
+        select.append(option);
+    }
+    label.append(select);
+    form.append(label);
+    const lastDish = meal.dishes.length === 1;
+    if (lastDish) {
+        form.append(element("p", `После переноса запись в ${meal.time} будет удалена.`, "dish-warning"));
+    }
+    form.append(formActions(dish.id, lastDish ? "Перенести и удалить" : "Перенести"));
+    form.addEventListener("submit", event => {
+        event.preventDefault();
+        saveDish(form, {
+            action: "move", entry_id: meal.id, item_id: dish.id,
+            target_entry_id: Number(select.value), confirm_delete: lastDish,
+        }, lastDish ? "Блюдо перенесено, пустая запись удалена." : "Блюдо перенесено.");
+    });
+    return form;
+}
+
+function dishPanel(day, meal, dish) {
+    const panel = element("div", undefined, "dish-panel");
+    if (openedDish.mode === "edit") {
+        panel.append(editDishForm(meal, dish));
+    } else if (openedDish.mode === "move") {
+        panel.append(moveDishForm(day, meal, dish));
+    } else {
+        const actions = element("div", undefined, "dish-actions");
+        const open = (mode, selector) => {
+            openedDish.mode = mode;
+            renderMeals(day);
+            focusDish(dish.id, selector);
+        };
+        const edit = actionButton("Изменить", () => open("edit", "input"));
+        const move = actionButton("Перенести", () => open("move", "select"));
+        move.disabled = day.meals.length < 2;
+        actions.append(edit, move);
+        panel.append(actions);
+    }
+    return panel;
 }
 
 function renderMeals(day) {
+    const code = selectedMetric || "calories";
     mealList.replaceChildren();
     if (!day.complete) {
         mealList.append(element("p", "У части записей неполные данные о питании.", "meal-note"));
@@ -161,13 +306,27 @@ function renderMeals(day) {
         const heading = element("h2");
         const time = element("time", meal.time);
         time.dateTime = meal.time;
-        const total = calories(meal.calories);
-        heading.append(time, element("span", meal.complete ? total : total + " · неполные данные"));
+        const summary = meal.totals[code];
+        const total = formatAmount(summary.value, code);
+        heading.append(time, element("span", summary.complete || summary.value === null
+            ? total : total + " · неполные данные"));
         header.append(heading);
         const list = element("ul");
         for (const dish of meal.dishes) {
             const row = element("li");
-            row.append(element("span", dish.name), element("span", calories(dish.calories), "amount"));
+            row.dataset.dishId = dish.id;
+            const expanded = openedDish?.id === dish.id;
+            const control = actionButton(undefined, () => {
+                if (expire()) return;
+                openedDish = expanded ? undefined : { id: dish.id, mode: "actions" };
+                setActionStatus("");
+                renderMeals(day);
+                focusDish(dish.id, expanded ? ".dish" : ".dish-actions button");
+            }, "dish");
+            control.setAttribute("aria-expanded", String(expanded));
+            control.append(element("span", dish.name), element("span", formatAmount(dish.metrics[code], code), "amount"));
+            row.append(control);
+            if (expanded) row.append(dishPanel(day, meal, dish));
             list.append(row);
         }
         group.append(header, list);
@@ -178,6 +337,7 @@ function renderMeals(day) {
 function selectDay(index) {
     if (expire()) return;
     selectedDay = index;
+    openedDish = undefined;
     const day = model.days[index];
     date.dateTime = day.date;
     date.textContent = fullDate.format(new Date(day.date));
@@ -192,14 +352,14 @@ function selectDay(index) {
 function renderControls() {
     dates.replaceChildren();
     for (const [index, day] of model.days.entries()) {
-        const weekday = new Date(day.date).getUTCDay();
-        const suffix = weekday === 6 ? " сб" : weekday === 0 ? " вс" : "";
+        const calendarDate = new Date(day.date);
         const button = element("button", undefined, isWeekend(day) ? "weekend" : "");
         button.type = "button";
         button.dataset.index = index;
         button.style.setProperty("--x", x(index) / 4 + "%");
-        button.setAttribute("aria-label", fullDate.format(new Date(day.date)) + (day.current ? ", сегодня" : ""));
-        button.append(element("span", Number(day.date.slice(-2)) + suffix));
+        button.setAttribute("aria-label", fullDate.format(calendarDate) + ", " + longWeekday.format(calendarDate)
+            + (day.current ? ", сегодня" : ""));
+        button.append(element("span", Number(day.date.slice(-2)) + " " + shortWeekday.format(calendarDate)));
         button.addEventListener("click", () => selectDay(index));
         dates.append(button);
     }
@@ -216,7 +376,10 @@ function renderControls() {
         button.addEventListener("click", () => {
             if (expire()) return;
             selectedMetric = selectedMetric === code ? undefined : code;
+            openedDish = undefined;
+            renderChart();
             renderMetric();
+            renderMeals(model.days[selectedDay]);
         });
         item.append(button);
         legend.append(item);
@@ -229,18 +392,106 @@ function showStatus(message) {
     status.textContent = message;
 }
 
-function expire() {
-    if (!expiresAt || Date.now() < expiresAt) return false;
+function clearDiary(message) {
     model = undefined;
+    openedDish = undefined;
+    clearTimeout(expiryTimer);
     mealList.replaceChildren();
     chart.replaceChildren();
+    scale.replaceChildren();
     detail.textContent = "";
     date.textContent = "";
     date.removeAttribute("datetime");
     dates.replaceChildren();
     legend.replaceChildren();
-    showStatus("Срок входа истёк. Откройте дневник заново из Telegram.");
+    setActionStatus("");
+    showStatus(message);
+}
+
+function expire() {
+    if (!expiresAt || Date.now() < expiresAt) return false;
+    clearDiary("Срок входа истёк. Откройте дневник заново из Telegram.");
     return true;
+}
+
+async function diaryRequest(command) {
+    const requestedAt = Date.now();
+    const headers = { Authorization: "tma " + telegram.initData };
+    const options = { headers, cache: "no-store", credentials: "omit" };
+    if (command) {
+        headers["Content-Type"] = "application/json";
+        options.method = "POST";
+        options.body = JSON.stringify(command);
+    }
+    const response = await fetch("/api/diary", options);
+    const payload = await response.json().catch(() => ({}));
+    return { response, payload, requestedAt };
+}
+
+function handleAccessError({ response, payload }) {
+    if (response.status === 401) {
+        clearDiary("Не удалось подтвердить вход. Откройте дневник заново из Telegram.");
+    } else if (response.status === 403) {
+        clearDiary("Доступ к дневнику не разрешён.");
+    } else if (response.status === 404 && payload.error === "profile_missing") {
+        clearDiary("Сначала отправьте /start боту, затем откройте дневник снова.");
+    } else {
+        return false;
+    }
+    return true;
+}
+
+function installDiary({ payload, requestedAt }) {
+    if (!Number.isFinite(payload.expires_in_ms)) throw new Error("Missing authorization expiry");
+    const previousDate = model?.days[selectedDay]?.date;
+    model = payload;
+    expiresAt = requestedAt + model.expires_in_ms;
+    if (expire()) return;
+    clearTimeout(expiryTimer);
+    expiryTimer = setTimeout(expire, expiresAt - Date.now());
+    if (!model.metrics.includes(selectedMetric)) selectedMetric = undefined;
+    const previousIndex = model.days.findIndex(day => day.date === previousDate);
+    renderChart();
+    renderControls();
+    selectDay(previousIndex >= 0 ? previousIndex : model.days.findIndex(day => day.current));
+    if (expire()) return;
+    status.hidden = true;
+    diary.hidden = false;
+}
+
+async function saveDish(form, command, successMessage) {
+    if (savingDish || expire()) return;
+    savingDish = true;
+    setActionStatus("Сохраняю…");
+    const controls = [...form.elements];
+    controls.forEach(control => { control.disabled = true; });
+    try {
+        const result = await diaryRequest(command);
+        if (handleAccessError(result)) return;
+        if (result.response.ok) {
+            installDiary(result);
+            if (!model) return;
+            setActionStatus(successMessage);
+            focusDish(command.item_id);
+        } else if (result.response.status === 409 || result.response.status === 404) {
+            const latest = await diaryRequest();
+            if (handleAccessError(latest)) return;
+            if (!latest.response.ok) throw new Error("Diary refresh failed");
+            installDiary(latest);
+            if (model) setActionStatus("Запись изменилась. Дневник обновлён, повторите действие.");
+        } else if (result.payload.error === "missing_per_100g") {
+            setActionStatus("Укажите все значения КБЖУ на 100 г.");
+        } else if (result.payload.error === "different_food_day") {
+            setActionStatus("Перенос доступен только внутри одного пищевого дня.");
+        } else {
+            setActionStatus("Не удалось сохранить изменения. Проверьте введённые данные.");
+        }
+    } catch {
+        if (model) setActionStatus("Не удалось подтвердить сохранение. Попробуйте ещё раз.");
+    } finally {
+        savingDish = false;
+        controls.forEach(control => { control.disabled = false; });
+    }
 }
 
 async function openDiary() {
@@ -251,40 +502,13 @@ async function openDiary() {
         return;
     }
 
-    const requestedAt = Date.now();
     try {
-        const response = await fetch("/api/diary", {
-            headers: { Authorization: "tma " + telegram.initData },
-            cache: "no-store",
-            credentials: "omit",
-        });
-        if (response.status === 401) {
-            showStatus("Не удалось подтвердить вход. Откройте дневник заново из Telegram.");
-            return;
-        }
-        if (response.status === 403) {
-            showStatus("Доступ к дневнику не разрешён.");
-            return;
-        }
-        if (response.status === 404 && (await response.json()).error === "profile_missing") {
-            showStatus("Сначала отправьте /start боту, затем откройте дневник снова.");
-            return;
-        }
-        if (!response.ok) throw new Error("Diary request failed");
-
-        model = await response.json();
-        if (!Number.isFinite(model.expires_in_ms)) throw new Error("Missing authorization expiry");
-        expiresAt = requestedAt + model.expires_in_ms;
-        if (expire()) return;
-        setTimeout(expire, expiresAt - Date.now());
-        renderChart();
-        renderControls();
-        selectDay(model.days.findIndex(day => day.current));
-        if (expire()) return;
-        status.hidden = true;
-        diary.hidden = false;
+        const result = await diaryRequest();
+        if (handleAccessError(result)) return;
+        if (!result.response.ok) throw new Error("Diary request failed");
+        installDiary(result);
     } catch {
-        showStatus("Не удалось загрузить дневник. Попробуйте открыть его ещё раз.");
+        clearDiary("Не удалось загрузить дневник. Попробуйте открыть его ещё раз.");
     }
 }
 

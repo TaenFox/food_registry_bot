@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 from sqlalchemy.orm import Session
@@ -13,6 +13,7 @@ from food_registry_bot.db.repositories import (
 from food_registry_bot.nutrition.contract import NutritionUnit, SUPPORTED_NUTRITION_METRIC_CODES
 from food_registry_bot.nutrition.journal_adapter import (
     prepare_nutrition_request_from_entries,
+    preserve_entry_item_source_facts,
     recoverable_food_weights,
     resolve_nutrition_estimates,
 )
@@ -109,12 +110,28 @@ class StoredEntryNutritionEstimationUseCase:
             return FailedNutritionEstimation(message=nutrition_result.message, issue=nutrition_result)
 
         resolved_estimates = resolve_nutrition_estimates(prepared_request, nutrition_result.payload)
+        manual_metrics = {
+            f"entry-{entry.id}:item-{item.position}": set(item.source_facts["manual_metrics"])
+            for entry in entries
+            for item in entry.items
+            if item.source_facts and item.source_facts.get("manual_metrics")
+        }
+        if manual_metrics:
+            resolved_estimates = [
+                replace(estimate, metrics=[
+                    metric for metric in estimate.metrics
+                    if metric.code not in manual_metrics.get(estimate.item_ref.client_item_id, ())
+                ])
+                for estimate in resolved_estimates
+            ]
         saved_metrics = self._persistence_service.save_resolved_estimates_for_entries(
             prepared_request=prepared_request,
             resolved_estimates=resolved_estimates,
         )
         if recovered_weights:
             for entry in entries:
+                if any(item.id in recovered_weights for item in entry.items):
+                    preserve_entry_item_source_facts(entry)
                 for item in entry.items:
                     if item.id in recovered_weights:
                         item.quantity = recovered_weights[item.id]
