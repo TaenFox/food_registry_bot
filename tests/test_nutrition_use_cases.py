@@ -1,5 +1,8 @@
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import Mock
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -229,3 +232,56 @@ def test_backfill_use_case_skips_entries_with_additional_diet_metrics() -> None:
     assert result.skipped_entry_ids == []
     assert result.failed_entries == []
     assert result.saved_metric_count == 0
+
+
+@pytest.mark.parametrize("nutrition_succeeds", [True, False])
+def test_backfill_recovers_saved_weight_only_with_successful_nutrition(nutrition_succeeds):
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=706, username="weight_backfill_user")
+    repository = EntryRepository(session)
+    for hour, source_text in [(10, None), (11, "Запиши 220 гр каши, помидор 100 гр")]:
+        entry = repository.create(
+            user_id=user.id,
+            entry_type=EntryType.FOOD,
+            occurred_at=datetime(2026, 5, 18, hour, 0, tzinfo=timezone.utc),
+            source_text=source_text,
+            items=[
+                EntryItemCreate(name="каша"),
+                EntryItemCreate(name="помидор", quantity=95, unit="g"),
+            ],
+        )
+        session.add_all(
+            EntryItemMetric(entry_item_id=item.id, metric_id=metric_id, value=10)
+            for item in entry.items
+            for metric_id in range(1, 6)
+        )
+    session.commit()
+
+    item_id = f"entry-{entry.id}:item-0"
+    payload = build_metric_payload([item_id]) if nutrition_succeeds else ""
+    estimator = Mock(wraps=StaticNutritionEstimationService(raw_payload=payload).estimate)
+    backfill = BackfillNutritionEstimationUseCase(session, SimpleNamespace(estimate=estimator))
+
+    result = backfill.run(limit=1)
+    session.commit()
+    session.expire_all()
+
+    assert result.selected_entry_ids == [entry.id]
+    estimator.assert_called_once()
+    (requested_item,) = estimator.call_args.args[0].items
+    assert (requested_item.client_item_id, requested_item.quantity, requested_item.unit) == (
+        item_id, 220, "g"
+    )
+    porridge, tomato = sorted(entry.items, key=lambda item: item.position)
+    assert (tomato.quantity, tomato.unit) == (95, "g")
+    assert all(metric.value == 10 for metric in tomato.metrics)
+    if nutrition_succeeds:
+        assert result.processed_entry_ids == [entry.id]
+        assert result.saved_metric_count == 5
+        assert (porridge.quantity, porridge.unit) == (220, "g")
+        assert next(metric.value for metric in porridge.metrics if metric.metric.code == "calories") == 220
+        assert backfill.run(limit=1).selected_entry_ids == []
+    else:
+        assert [failure.entry_id for failure in result.failed_entries] == [entry.id]
+        assert (porridge.quantity, porridge.unit) == (None, None)
+        assert all(metric.value == 10 for metric in porridge.metrics)

@@ -119,6 +119,7 @@ async def test_diary_preserves_daily_goals_and_meal_groups_with_partial_data(dia
                     user_id=user.id,
                     entry_type=EntryType.FOOD,
                     occurred_at=at,
+                    source_text="Приватный исходный текст сообщения",
                     items=[
                         EntryItem(
                             name=name,
@@ -163,6 +164,7 @@ async def test_diary_preserves_daily_goals_and_meal_groups_with_partial_data(dia
     assert payload["metrics"] == ["calories", "protein", "carbs"]
     assert len(payload["days"]) == 5
     assert "Чужая запись" not in str(payload)
+    assert "Приватный исходный текст сообщения" not in str(payload)
     by_date = {day["date"]: day for day in payload["days"]}
     today_data = by_date[today.isoformat()]
     assert today_data["current"]

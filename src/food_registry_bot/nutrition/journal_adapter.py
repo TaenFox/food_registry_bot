@@ -6,6 +6,7 @@ from typing import Iterable
 
 from food_registry_bot.db.models import Entry, EntryType
 from food_registry_bot.extraction.contract import ExtractedJournalPayload
+from food_registry_bot.extraction.explicit_weights import match_explicit_food_weights
 from food_registry_bot.nutrition.contract import (
     NutritionConfidence,
     NutritionEstimationItemInput,
@@ -121,8 +122,29 @@ def prepare_nutrition_request_from_extracted_payload(
     return _build_prepared_request(item_refs)
 
 
-def prepare_nutrition_request_from_entries(entries: Iterable[Entry]) -> PreparedNutritionRequest | None:
+def recoverable_food_weights(entry: Entry) -> dict[int, int]:
+    if entry.entry_type is not EntryType.FOOD or not entry.source_text:
+        return {}
+    items = sorted(entry.items, key=lambda item: item.position)
+    if not any(item.quantity is None or item.unit is None for item in items):
+        return {}
+    grams = match_explicit_food_weights(entry.source_text, [item.name for item in items])
+    if grams is None:
+        return {}
+    return {
+        item.id: weight for item, weight in zip(items, grams)
+        if item.quantity is None or item.unit is None
+    }
+
+
+def prepare_nutrition_request_from_entries(
+    entries: Iterable[Entry],
+    *,
+    recovered_weights: dict[int, int] | None = None,
+    selected_item_ids: set[int] | None = None,
+) -> PreparedNutritionRequest | None:
     item_refs: list[NutritionJournalItemRef] = []
+    weights = recovered_weights or {}
 
     for entry in entries:
         if not _is_supported_food_item(entry_type=entry.entry_type):
@@ -133,7 +155,13 @@ def prepare_nutrition_request_from_entries(entries: Iterable[Entry]) -> Prepared
         extracted_items = extracted_entry.items if extracted_entry is not None else []
 
         for item in sorted(entry.items, key=lambda current: current.position):
-            quantity, unit = _sanitize_quantity_unit(quantity=item.quantity, unit=item.unit)
+            if selected_item_ids is not None and item.id not in selected_item_ids:
+                continue
+            grams = weights.get(item.id)
+            if grams is not None:
+                quantity, unit = grams, NutritionUnit.GRAM.value
+            else:
+                quantity, unit = _sanitize_quantity_unit(quantity=item.quantity, unit=item.unit)
             extracted_item = (
                 extracted_items[item.position]
                 if 0 <= item.position < len(extracted_items)

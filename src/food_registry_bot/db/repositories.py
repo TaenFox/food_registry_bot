@@ -4,7 +4,7 @@ import json
 import secrets
 from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass
-from typing import Optional, TYPE_CHECKING
+from typing import Callable, Optional, TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -850,6 +850,11 @@ class DailyGoalSnapshotRepository:
         return snapshot
 
 
+def item_lacks_metrics(item: EntryItem, required_metric_codes: set[str]) -> bool:
+    available_codes = {metric.metric.code for metric in item.metrics if metric.metric is not None}
+    return not required_metric_codes.issubset(available_codes)
+
+
 class EntryRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -1034,6 +1039,7 @@ class EntryRepository:
         *,
         required_metric_codes: list[str],
         limit: int,
+        additional_candidate: Callable[[Entry], bool] | None = None,
     ) -> list[int]:
         if limit <= 0:
             return []
@@ -1052,18 +1058,10 @@ class EntryRepository:
         incomplete_entry_ids: list[int] = []
         required_metric_code_set = set(required_metric_codes)
         for entry in self._session.scalars(statement):
-            is_incomplete = False
-            for item in entry.items:
-                item_metric_codes = {
-                    metric.metric.code
-                    for metric in item.metrics
-                    if metric.metric is not None
-                }
-                if not required_metric_code_set.issubset(item_metric_codes):
-                    is_incomplete = True
-                    break
-
-            if is_incomplete:
+            lacks_metrics = any(
+                item_lacks_metrics(item, required_metric_code_set) for item in entry.items
+            )
+            if lacks_metrics or (additional_candidate is not None and additional_candidate(entry)):
                 incomplete_entry_ids.append(entry.id)
                 if len(incomplete_entry_ids) >= limit:
                     break
@@ -1086,19 +1084,10 @@ class EntryRepository:
         )
 
         required_metric_code_set = set(required_metric_codes)
-        count = 0
-        for entry in self._session.scalars(statement):
-            for item in entry.items:
-                item_metric_codes = {
-                    metric.metric.code
-                    for metric in item.metrics
-                    if metric.metric is not None
-                }
-                if not required_metric_code_set.issubset(item_metric_codes):
-                    count += 1
-                    break
-
-        return count
+        return sum(
+            any(item_lacks_metrics(item, required_metric_code_set) for item in entry.items)
+            for entry in self._session.scalars(statement)
+        )
 
 
 class CallbackStateRepository:

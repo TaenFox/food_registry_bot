@@ -7,6 +7,7 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from food_registry_bot.extraction.contract import ExtractedJournalPayload
+from food_registry_bot.extraction.explicit_weights import recover_explicit_food_weights
 from food_registry_bot.extraction.llm_client import LLMExtractionClient, LLMExtractionClientError
 from food_registry_bot.extraction.request import JournalExtractionRequest
 
@@ -103,7 +104,9 @@ class LLMExtractionService:
                 is_llm=True,
             )
 
-        normalized_raw_payload = _normalize_llm_raw_payload(raw_payload)
+        normalized_raw_payload = _normalize_llm_raw_payload(
+            raw_payload, text=request.text if not request.images else None
+        )
 
         try:
             payload = ExtractedJournalPayload.model_validate_json(normalized_raw_payload)
@@ -132,7 +135,13 @@ class LLMExtractionService:
 _FOOD_BASE_UNIT_ALIASES = {
     "g": "g",
     "гр": "g",
+    "гр.": "g",
     "г": "g",
+    "г.": "g",
+    "грамм": "g",
+    "грамма": "g",
+    "граммы": "g",
+    "граммов": "g",
     "gram": "g",
     "grams": "g",
     "ml": "ml",
@@ -191,7 +200,7 @@ _FOOD_PIECE_GRAM_FACTORS = (
 )
 
 
-def _normalize_llm_raw_payload(raw_payload: str) -> str:
+def _normalize_llm_raw_payload(raw_payload: str, *, text: str | None = None) -> str:
     try:
         parsed_payload = json.loads(raw_payload)
     except json.JSONDecodeError:
@@ -205,6 +214,7 @@ def _normalize_llm_raw_payload(raw_payload: str) -> str:
         return raw_payload
 
     normalized = False
+    food_items: list[dict] = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -242,6 +252,7 @@ def _normalize_llm_raw_payload(raw_payload: str) -> str:
             if entry_type != "food":
                 continue
 
+            food_items.append(item)
             quantity = item.get("quantity")
             unit = item.get("unit")
             if quantity is None or unit is None:
@@ -253,7 +264,11 @@ def _normalize_llm_raw_payload(raw_payload: str) -> str:
                 unit=unit,
             )
             if normalized_quantity is not None and normalized_unit is not None:
-                if normalized_quantity != quantity or normalized_unit != unit:
+                if (
+                    type(quantity) is not int
+                    or normalized_quantity != quantity
+                    or normalized_unit != unit
+                ):
                     item["quantity"] = normalized_quantity
                     item["unit"] = normalized_unit
                     normalized = True
@@ -262,6 +277,9 @@ def _normalize_llm_raw_payload(raw_payload: str) -> str:
             item.pop("quantity", None)
             item.pop("unit", None)
             normalized = True
+
+    if text and recover_explicit_food_weights(text, food_items):
+        normalized = True
 
     if not normalized:
         return raw_payload
@@ -275,7 +293,9 @@ def _normalize_food_quantity_unit(
     quantity: object,
     unit: object,
 ) -> tuple[int | None, str | None]:
-    if not isinstance(quantity, int) or quantity <= 0:
+    if isinstance(quantity, float) and quantity.is_integer():
+        quantity = int(quantity)
+    if type(quantity) is not int or quantity <= 0:
         return None, None
 
     normalized_name = name.strip().lower()

@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -311,6 +312,86 @@ def test_llm_extraction_service_converts_household_liquid_unit_before_validation
     assert item.quantity == 250
     assert item.unit == "ml"
     assert '"unit": "ml"' in result.raw_payload
+
+
+@pytest.mark.parametrize(("quantity", "unit"), [(150.0, "g"), (150, "гр."), (150.0, "граммов")])
+def test_llm_extraction_service_preserves_weight_in_gram_aliases(quantity, unit) -> None:
+    payload = {
+        "entries": [{
+            "type": "food",
+            "items": [{"name": "каша", "quantity": quantity, "unit": unit}],
+        }],
+    }
+    client = SimpleNamespace(
+        provider_name="mistral_chat_completions",
+        model_name="mistral-small-latest",
+        extract_journal_payload=lambda _request: json.dumps(payload),
+    )
+    result = LLMExtractionService(client=client).extract(
+        JournalExtractionRequest(text="Каша, 150 граммов")
+    )
+
+    assert isinstance(result, ValidExtractionPayload)
+    item = result.payload.entries[0].items[0]
+    assert (item.quantity, item.unit) == (150, "g")
+    normalized_item = json.loads(result.raw_payload)["entries"][0]["items"][0]
+    assert type(normalized_item["quantity"]) is int
+
+
+def test_llm_extraction_recovers_user_supplied_grams_when_model_omits_them() -> None:
+    # Deliberately reorder the dishes returned by the model.
+    names = [
+        "каша из пшенной крупы",
+        "хурма",
+        "семена чиа замоченные",
+        "помидор",
+        "омлет с сыром",
+    ]
+    payload = {"entries": [{"type": "food", "items": [{"name": name} for name in names]}]}
+    client = SimpleNamespace(
+        provider_name="mistral_chat_completions",
+        model_name="mistral-small-latest",
+        extract_journal_payload=lambda _request: json.dumps(payload),
+    )
+    text = (
+        "Запиши\u00a0\n\n"
+        "220 гр каши из пшеной крупы,\u00a0\n\n"
+        "180 гр омлет с сыром, 40 Гр семена чиа (замоченных),\u00a0\n\n"
+        "помидор 100 гр,\u00a0\n\n"
+        "хурма 100 гр"
+    )
+    result = LLMExtractionService(client=client).extract(JournalExtractionRequest(text=text))
+
+    assert isinstance(result, ValidExtractionPayload)
+    assert [(item.quantity, item.unit) for item in result.payload.entries[0].items] == [
+        (220, "g"),
+        (100, "g"),
+        (40, "g"),
+        (100, "g"),
+        (180, "g"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "names"),
+    [
+        ("Запиши огурцы 200–250 г", ["огурцы"]),
+        ("Запиши йогурт на 100 г", ["йогурт"]),
+        ("Запиши 100 г риса, 200 г риса", ["рис", "рис"]),
+        ("Запиши 100 г риса, 200 г хурмы", ["рис", "помидор"]),
+    ],
+)
+def test_llm_extraction_does_not_assign_ambiguous_explicit_grams(text, names) -> None:
+    payload = {"entries": [{"type": "food", "items": [{"name": name} for name in names]}]}
+    client = SimpleNamespace(
+        provider_name="mistral_chat_completions",
+        model_name="mistral-small-latest",
+        extract_journal_payload=lambda _request: json.dumps(payload),
+    )
+    result = LLMExtractionService(client=client).extract(JournalExtractionRequest(text=text))
+
+    assert isinstance(result, ValidExtractionPayload)
+    assert all(item.quantity is None for item in result.payload.entries[0].items)
 
 
 def test_llm_extraction_service_converts_sausage_piece_to_grams_before_validation() -> None:

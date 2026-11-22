@@ -6852,7 +6852,7 @@ async def test_photo_message_creates_entries_and_food_metrics_for_allowed_user()
     )
     message = SimpleNamespace(
         text=None,
-        caption="омлет с тостом",
+        caption="  омлет с тостом\n",
         photo=[SimpleNamespace(file_id="small"), SimpleNamespace(file_id="large")],
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="photo_user"),
         bot=SimpleNamespace(download=AsyncMock(return_value=BytesIO(b"image-bytes"))),
@@ -6873,6 +6873,7 @@ async def test_photo_message_creates_entries_and_food_metrics_for_allowed_user()
         metric_count = session.query(EntryItemMetric).count()
 
     assert saved_entry.entry_type == EntryType.FOOD
+    assert saved_entry.source_text == "  омлет с тостом\n"
     assert [(item.name, item.source_type) for item in saved_items] == [
         ("омлет", "extraction_payload"),
         ("тост", "extraction_payload"),
@@ -7857,7 +7858,7 @@ async def test_handle_message_routes_clear_journal_text_to_extraction_flow() -> 
         raw_payload=build_metric_payload(["entry-1:item-0", "entry-1:item-1"])
     )
     message = SimpleNamespace(
-        text="съел гречку с курицей",
+        text="  съел гречку с курицей\n",
         from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="journal_route_user"),
         answer=AsyncMock(),
     )
@@ -7871,7 +7872,9 @@ async def test_handle_message_routes_clear_journal_text_to_extraction_flow() -> 
     )
 
     with session_factory() as session:
-        assert session.query(Entry).count() == 1
+        saved_entry = session.query(Entry).one()
+        assert saved_entry.source_text == "  съел гречку с курицей\n"
         assert session.query(EntryItem).count() == 2
 
     message.answer.assert_awaited_once()
+    assert "съел гречку с курицей" not in message.answer.await_args.args[0]
