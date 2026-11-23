@@ -22,6 +22,7 @@ from food_registry_bot.db.models import (
 from food_registry_bot.db.repositories import (
     ConversationMessageRepository,
     ConversationSessionRepository,
+    DailyGoalSnapshotRepository,
     EntryItemCreate,
     EntryItemMetricRepository,
     EntryItemMetricValue,
@@ -389,6 +390,30 @@ def test_daily_nutrition_goal_snapshot_use_case_creates_default_snapshot() -> No
     assert snapshot.fat_goal == 60
     assert snapshot.carbs_goal == 210
     assert snapshot.water_goal == 2000
+    assert session.query(DailyGoalSnapshot).count() == 1
+
+
+def test_daily_goal_snapshot_insert_keeps_existing_goals_on_conflict() -> None:
+    session = create_test_session()
+    user = UserRepository(session).create(telegram_user_id=7009, username="snapshot_conflict")
+    repository = DailyGoalSnapshotRepository(session)
+    fields = {
+        "user_id": user.id,
+        "summary_date": datetime(2026, 5, 19, tzinfo=timezone.utc).date(),
+        "timezone_name": "Europe/Moscow",
+        "nutrition_day_start_hour": 4,
+        "protein_goal": 90,
+        "fat_goal": 60,
+        "carbs_goal": 210,
+        "fiber_goal": 25,
+        "water_goal": 2000,
+    }
+
+    first = repository.create_if_absent(**fields, calorie_goal=1800)
+    later = repository.create_if_absent(**fields, calorie_goal=2200)
+
+    assert later.id == first.id
+    assert later.calorie_goal == 1800
     assert session.query(DailyGoalSnapshot).count() == 1
 
 

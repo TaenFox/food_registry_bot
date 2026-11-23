@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from io import BytesIO
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -94,7 +94,8 @@ from food_registry_bot.extraction import (
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_FULL, CSV_CONTRACT_TYPE_PARTIAL
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_WORKOUT
 from food_registry_bot.llm_access import OpenAIKeyValidationResult
-from food_registry_bot.nutrition import InvalidNutritionPayload, StaticNutritionEstimationService
+from food_registry_bot.nutrition import InvalidNutritionPayload, PeriodReportUseCase, StaticNutritionEstimationService
+from food_registry_bot.nutrition.period_report import resolve_report_cohorts
 
 
 ADMIN_ID = 999001
@@ -4053,7 +4054,7 @@ async def test_report_returns_period_averages_by_days_with_data() -> None:
     )
 
     await call_handle_report_at(
-        fixed_now=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        fixed_now=datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc),
         message=message,
         session_factory=session_factory,
     )
@@ -4061,7 +4062,7 @@ async def test_report_returns_period_averages_by_days_with_data() -> None:
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         (
-            "Отчёт: 18.05.2026-25.05.2026\n"
+            "Отчёт: 17.05.2026-24.05.2026\n"
             "Дней в периоде: 8\n"
             "Дней с данными по еде: 3\n"
             "Дней с данными по воде: 2\n"
@@ -4087,6 +4088,63 @@ async def test_report_returns_period_averages_by_days_with_data() -> None:
     )
 
 
+def test_report_cohorts_stay_fixed_after_leap_year() -> None:
+    expected = [
+        (date(2024, 12, 30), date(2024, 12, 31)),
+        (date(2025, 1, 1), date(2025, 1, 4)),
+    ]
+    assert resolve_report_cohorts(date(2025, 1, 1), cohort_count=2) == expected
+    assert resolve_report_cohorts(date(2025, 1, 4), cohort_count=2) == expected
+
+
+def test_report_views_use_same_food_day_boundaries_across_new_year() -> None:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        user = User(telegram_user_id=ALLOWED_USER_ID, timezone="UTC")
+        session.add(user)
+        session.flush()
+        food_entries = [
+            (datetime(2025, 12, 30, 23, tzinfo=timezone.utc), 900),
+            (datetime(2026, 1, 1, 3, tzinfo=timezone.utc), 100),
+            (datetime(2026, 1, 1, 4, tzinfo=timezone.utc), 200),
+            (datetime(2026, 1, 2, 4, tzinfo=timezone.utc), 800),
+        ]
+        for occurred_at, calories in food_entries:
+            entry = Entry(user_id=user.id, entry_type=EntryType.FOOD, occurred_at=occurred_at)
+            session.add(entry)
+            session.flush()
+            item = EntryItem(entry_id=entry.id, position=0, name="блюдо")
+            session.add(item)
+            session.flush()
+            session.add_all(
+                EntryItemMetric(entry_item_id=item.id, metric_id=metric_id, value=value, confidence="medium")
+                for metric_id, value in {1: calories, 2: 10, 3: 5, 4: 5, 5: 1, 8: 8}.items()
+            )
+        session.add(Entry(user_id=user.id, entry_type=EntryType.WORKOUT, occurred_at=food_entries[-1][0]))
+        session.flush()
+
+        use_case = PeriodReportUseCase(session)
+        report_args = {
+            "user_id": user.id,
+            "timezone_name": "UTC",
+            "summary_date_to": date(2026, 1, 1),
+            "cohort_count": 2,
+        }
+        report = use_case.run(**report_args, workout_logging_enabled=True)
+        dynamics = use_case.build_metric_dynamics(**report_args, metric_code="calories")
+        noticeable = use_case.build_noticeable_entries(**report_args, metric_code="calories", percentile=0)
+
+    assert report.summary_date_from == dynamics.summary_date_from == noticeable.summary_date_from == date(2025, 12, 31)
+    assert report.period_day_count == dynamics.period_day_count == noticeable.period_day_count == 2
+    assert report.food_data_day_count == 2
+    assert report.average_nutrition_totals.calories == 150
+    assert report.diet_score_summaries[0].item_count == 2
+    assert report.workout_entry_count == 0
+    assert [row.summary_date_to for row in dynamics.rows] == [date(2025, 12, 31), date(2026, 1, 4)]
+    assert [row.average_value for row in dynamics.rows] == [100, 200]
+    assert [entry.metric_value for entry in noticeable.entries] == [200, 100]
+
+
 async def test_report_uses_goal_tolerance_preference_for_goal_hits() -> None:
     session_factory = create_session_factory()
     allow_user(session_factory, ALLOWED_USER_ID, "report_goal_tolerance_user")
@@ -4099,7 +4157,7 @@ async def test_report_uses_goal_tolerance_preference_for_goal_hits() -> None:
         entry = Entry(
             user_id=user.id,
             entry_type=EntryType.FOOD,
-            occurred_at=datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc),
+            occurred_at=datetime(2026, 5, 23, 8, 0, tzinfo=timezone.utc),
         )
         session.add(entry)
         session.flush()
@@ -4123,7 +4181,7 @@ async def test_report_uses_goal_tolerance_preference_for_goal_hits() -> None:
     )
 
     await call_handle_report_at(
-        fixed_now=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        fixed_now=datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc),
         message=message,
         session_factory=session_factory,
     )
@@ -4144,12 +4202,12 @@ async def test_report_uses_goal_status_prefixes_for_average_lines() -> None:
         first_entry = Entry(
             user_id=user.id,
             entry_type=EntryType.FOOD,
-            occurred_at=datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc),
+            occurred_at=datetime(2026, 5, 23, 8, 0, tzinfo=timezone.utc),
         )
         second_entry = Entry(
             user_id=user.id,
             entry_type=EntryType.FOOD,
-            occurred_at=datetime(2026, 5, 25, 8, 0, tzinfo=timezone.utc),
+            occurred_at=datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc),
         )
         session.add_all([first_entry, second_entry])
         session.flush()
@@ -4172,13 +4230,13 @@ async def test_report_uses_goal_status_prefixes_for_average_lines() -> None:
                 Entry(
                     user_id=user.id,
                     entry_type=EntryType.WATER,
-                    occurred_at=datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc),
+                    occurred_at=datetime(2026, 5, 23, 9, 0, tzinfo=timezone.utc),
                     source_text="вода",
                 ),
                 Entry(
                     user_id=user.id,
                     entry_type=EntryType.WATER,
-                    occurred_at=datetime(2026, 5, 25, 9, 0, tzinfo=timezone.utc),
+                    occurred_at=datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc),
                     source_text="вода",
                 ),
             ]
@@ -4195,7 +4253,7 @@ async def test_report_uses_goal_status_prefixes_for_average_lines() -> None:
     )
 
     await call_handle_report_at(
-        fixed_now=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        fixed_now=datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc),
         message=message,
         session_factory=session_factory,
     )
@@ -4220,12 +4278,12 @@ async def test_report_shows_diet_block_with_item_and_day_counts() -> None:
         scored_entry = Entry(
             user_id=user.id,
             entry_type=EntryType.FOOD,
-            occurred_at=datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc),
+            occurred_at=datetime(2026, 5, 23, 8, 0, tzinfo=timezone.utc),
         )
         historical_entry = Entry(
             user_id=user.id,
             entry_type=EntryType.FOOD,
-            occurred_at=datetime(2026, 5, 25, 8, 0, tzinfo=timezone.utc),
+            occurred_at=datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc),
         )
         session.add_all([scored_entry, historical_entry])
         session.flush()
@@ -4257,7 +4315,7 @@ async def test_report_shows_diet_block_with_item_and_day_counts() -> None:
     )
 
     await call_handle_report_at(
-        fixed_now=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        fixed_now=datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc),
         message=message,
         session_factory=session_factory,
     )
@@ -4306,7 +4364,7 @@ async def test_report_callback_cycles_to_next_period() -> None:
     class FixedDateTime:
         @staticmethod
         def now(tz=None):
-            return datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+            return datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
 
     handle_period_report_callback.__globals__["datetime"] = FixedDateTime
     try:
@@ -4321,8 +4379,10 @@ async def test_report_callback_cycles_to_next_period() -> None:
 
     callback.message.edit_text.assert_awaited_once()
     assert callback.message.edit_text.await_args.args[0].startswith(
-        "Отчёт: 10.05.2026-25.05.2026\nДней в периоде: 16"
+        "Отчёт: 09.05.2026-24.05.2026\nДней в периоде: 16"
     )
+    keyboard = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    assert keyboard.inline_keyboard[0][0].text == "Следующий период: 8 блоков"
     callback.answer.assert_awaited_once_with("Период переключён.")
 
 
@@ -4400,7 +4460,7 @@ async def test_report_open_dynamics_sends_separate_message() -> None:
     class FixedDateTime:
         @staticmethod
         def now(tz=None):
-            return datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+            return datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
 
     handle_period_report_callback.__globals__["datetime"] = FixedDateTime
     try:
@@ -4415,12 +4475,12 @@ async def test_report_open_dynamics_sends_separate_message() -> None:
 
     callback_message.answer.assert_awaited_once()
     assert callback_message.answer.await_args.args == (
-        "Динамика: 18.05.2026-25.05.2026\n"
+        "Динамика: 17.05.2026-24.05.2026\n"
         "Метрика: калории\n"
         "Доступно: [калории], белки, жиры, углеводы, клетчатка\n"
         "\n"
-        "📉 18.05-21.05: 300.0 ккал (1/4 дней)\n"
-        "📉 22.05-25.05: 500.0 ккал (1/4 дней)",
+        "📉 17.05-20.05: 300.0 ккал (1/4 дней)\n"
+        "📉 21.05-24.05 (текущий блок): 500.0 ккал (1/4 дней)",
     )
     callback.answer.assert_awaited_once_with()
 
@@ -4465,7 +4525,7 @@ async def test_report_dynamics_callback_cycles_metric() -> None:
     class FixedDateTime:
         @staticmethod
         def now(tz=None):
-            return datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+            return datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
 
     handle_period_report_callback.__globals__["datetime"] = FixedDateTime
     try:
@@ -4480,12 +4540,12 @@ async def test_report_dynamics_callback_cycles_metric() -> None:
 
     callback.message.edit_text.assert_awaited_once()
     assert callback.message.edit_text.await_args.args == (
-        "Динамика: 18.05.2026-25.05.2026\n"
+        "Динамика: 17.05.2026-24.05.2026\n"
         "Метрика: белки\n"
         "Доступно: калории, [белки], жиры, углеводы, клетчатка\n"
         "\n"
-        "📉 18.05-21.05: 15.0 г (1/4 дней)\n"
-        "22.05-25.05: нет данных",
+        "📉 17.05-20.05: 15.0 г (1/4 дней)\n"
+        "21.05-24.05 (текущий блок): нет данных",
     )
     callback.answer.assert_awaited_once_with("Метрика переключена.")
 
@@ -4545,7 +4605,7 @@ async def test_report_dynamics_uses_goal_status_prefixes() -> None:
     class FixedDateTime:
         @staticmethod
         def now(tz=None):
-            return datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+            return datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
 
     handle_period_report_callback.__globals__["datetime"] = FixedDateTime
     try:
@@ -4559,8 +4619,8 @@ async def test_report_dynamics_uses_goal_status_prefixes() -> None:
         handle_period_report_callback.__globals__["datetime"] = original_datetime
 
     rendered = callback_message.answer.await_args.args[0]
-    assert "🎯 18.05-21.05: 1800.0 ккал (1/4 дней)" in rendered
-    assert "📈 22.05-25.05: 2200.0 ккал (1/4 дней)" in rendered
+    assert "🎯 17.05-20.05: 1800.0 ккал (1/4 дней)" in rendered
+    assert "📈 21.05-24.05 (текущий блок): 2200.0 ккал (1/4 дней)" in rendered
 
 
 async def test_report_open_dynamics_shows_alert_when_no_data() -> None:
@@ -4582,7 +4642,7 @@ async def test_report_open_dynamics_shows_alert_when_no_data() -> None:
     class FixedDateTime:
         @staticmethod
         def now(tz=None):
-            return datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+            return datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
 
     handle_period_report_callback.__globals__["datetime"] = FixedDateTime
     try:
@@ -4664,7 +4724,7 @@ async def test_report_open_noticeable_sends_separate_message() -> None:
     class FixedDateTime:
         @staticmethod
         def now(tz=None):
-            return datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+            return datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
 
     handle_period_report_callback.__globals__["datetime"] = FixedDateTime
     try:
@@ -4679,7 +4739,7 @@ async def test_report_open_noticeable_sends_separate_message() -> None:
 
     callback_message.answer.assert_awaited_once()
     assert callback_message.answer.await_args.args == (
-        "Заметные записи пищи: 18.05.2026-25.05.2026\n"
+        "Заметные записи пищи: 17.05.2026-24.05.2026\n"
         "Метрика: калории\n"
         "Доступно: [калории], белки, жиры, углеводы, клетчатка\n"
         "\n"
@@ -4740,7 +4800,7 @@ async def test_report_noticeable_callback_cycles_metric() -> None:
     class FixedDateTime:
         @staticmethod
         def now(tz=None):
-            return datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+            return datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
 
     handle_period_report_callback.__globals__["datetime"] = FixedDateTime
     try:
@@ -4755,7 +4815,7 @@ async def test_report_noticeable_callback_cycles_metric() -> None:
 
     callback.message.edit_text.assert_awaited_once()
     assert callback.message.edit_text.await_args.args == (
-        "Заметные записи пищи: 18.05.2026-25.05.2026\n"
+        "Заметные записи пищи: 17.05.2026-24.05.2026\n"
         "Метрика: белки\n"
         "Доступно: калории, [белки], жиры, углеводы, клетчатка\n"
         "\n"

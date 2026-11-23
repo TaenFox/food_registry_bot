@@ -14,6 +14,9 @@ const detail = document.querySelector("#metric-detail");
 const chartEmpty = document.querySelector("#plot-empty");
 const thresholdKey = document.querySelector("#threshold-key");
 const actionStatus = document.querySelector("#action-status");
+const screenNavigation = document.querySelector("#screen-navigation");
+const screenPicker = screenNavigation.querySelector(".screen-picker");
+const screenOptions = screenNavigation.querySelector("#screen-options");
 const metricLabels = {
     calories: "Калории",
     protein: "Белки",
@@ -31,6 +34,7 @@ let expiresAt;
 let expiryTimer;
 let openedDish;
 let savingDish = false;
+let activeScreen = "diary";
 
 function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -388,6 +392,7 @@ function renderControls() {
 
 function showStatus(message) {
     diary.hidden = true;
+    screenNavigation.hidden = true;
     status.hidden = false;
     status.textContent = message;
 }
@@ -396,6 +401,8 @@ function clearDiary(message) {
     model = undefined;
     openedDish = undefined;
     clearTimeout(expiryTimer);
+    reportView.close();
+    showScreenOptions(false);
     mealList.replaceChildren();
     chart.replaceChildren();
     scale.replaceChildren();
@@ -414,18 +421,22 @@ function expire() {
     return true;
 }
 
-async function diaryRequest(command) {
+async function miniAppRequest(path, { command, signal } = {}) {
     const requestedAt = Date.now();
     const headers = { Authorization: "tma " + telegram.initData };
-    const options = { headers, cache: "no-store", credentials: "omit" };
+    const options = { headers, signal, cache: "no-store", credentials: "omit" };
     if (command) {
         headers["Content-Type"] = "application/json";
         options.method = "POST";
         options.body = JSON.stringify(command);
     }
-    const response = await fetch("/api/diary", options);
+    const response = await fetch(path, options);
     const payload = await response.json().catch(() => ({}));
     return { response, payload, requestedAt };
+}
+
+function diaryRequest(command) {
+    return miniAppRequest("/api/diary", { command });
 }
 
 function handleAccessError({ response, payload }) {
@@ -456,7 +467,8 @@ function installDiary({ payload, requestedAt }) {
     selectDay(previousIndex >= 0 ? previousIndex : model.days.findIndex(day => day.current));
     if (expire()) return;
     status.hidden = true;
-    diary.hidden = false;
+    diary.hidden = activeScreen !== "diary";
+    screenNavigation.hidden = false;
 }
 
 async function saveDish(form, command, successMessage) {
@@ -511,6 +523,45 @@ async function openDiary() {
         clearDiary("Не удалось загрузить дневник. Попробуйте открыть его ещё раз.");
     }
 }
+
+function showScreenOptions(open) {
+    screenOptions.hidden = !open;
+    screenPicker.setAttribute("aria-expanded", String(open));
+}
+
+const reportView = createReportView({
+    request: (groups, signal) => miniAppRequest("/api/report?groups=" + groups, { signal }),
+    handleAccessError,
+    expire,
+});
+
+screenPicker.addEventListener("click", () => {
+    if (!expire()) showScreenOptions(screenOptions.hidden);
+});
+screenOptions.addEventListener("click", event => {
+    const option = event.target.closest("[data-screen]");
+    if (!option || expire()) return;
+    showScreenOptions(false);
+    screenPicker.focus();
+    if (activeScreen === option.dataset.screen) return;
+
+    activeScreen = option.dataset.screen;
+    screenOptions.querySelector('[aria-current="page"]').removeAttribute("aria-current");
+    option.setAttribute("aria-current", "page");
+    screenPicker.firstElementChild.textContent = option.textContent;
+    diary.hidden = activeScreen !== "diary";
+    if (diary.hidden) reportView.open();
+    else reportView.close();
+    window.scrollTo(0, 0);
+});
+document.addEventListener("click", event => {
+    if (!screenOptions.hidden && !screenNavigation.contains(event.target)) showScreenOptions(false);
+});
+document.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || screenOptions.hidden) return;
+    showScreenOptions(false);
+    screenPicker.focus();
+});
 
 document.addEventListener("visibilitychange", expire);
 window.addEventListener("pageshow", expire);

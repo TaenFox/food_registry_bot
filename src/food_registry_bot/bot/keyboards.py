@@ -23,7 +23,10 @@ SUMMARY_DISPLAY_MODE_BUTTON_LABELS = {
     "text": "текст",
     "bars": "бары",
 }
-PERIOD_REPORT_PERIOD_SEQUENCE = (8, 16, 32)
+# Existing Telegram buttons carry the nominal period in days.
+PERIOD_REPORT_COHORT_COUNTS = {8: 2, 16: 4, 32: 8}
+PERIOD_REPORT_PERIOD_SEQUENCE = tuple(PERIOD_REPORT_COHORT_COUNTS)
+DEFAULT_PERIOD_REPORT_DAYS = PERIOD_REPORT_PERIOD_SEQUENCE[0]
 
 
 def build_main_keyboard() -> ReplyKeyboardMarkup:
@@ -1015,12 +1018,14 @@ def build_data_exchange_files_keyboard(*, files: list[DataExchangeFile]) -> Inli
 
 
 def build_period_report_keyboard(*, period_days: int) -> InlineKeyboardMarkup:
-    next_period_days = _resolve_next_period_days(period_days)
+    next_period_days = resolve_next_period_days(period_days)
+    next_cohort_count = PERIOD_REPORT_COHORT_COUNTS[next_period_days]
+    block_label = "блоков" if next_cohort_count == 8 else "блока"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"Следующий период: {_format_period_days(next_period_days)}",
+                    text=f"Следующий период: {next_cohort_count} {block_label}",
                     callback_data=PeriodReportCallback(action="cycle_period", period_days=period_days).pack(),
                 )
             ],
@@ -1046,18 +1051,12 @@ def build_period_report_keyboard(*, period_days: int) -> InlineKeyboardMarkup:
     )
 
 
-def _resolve_next_period_days(period_days: int) -> int:
+def resolve_next_period_days(period_days: int) -> int:
     try:
         current_index = PERIOD_REPORT_PERIOD_SEQUENCE.index(period_days)
     except ValueError:
-        return PERIOD_REPORT_PERIOD_SEQUENCE[0]
+        return DEFAULT_PERIOD_REPORT_DAYS
     return PERIOD_REPORT_PERIOD_SEQUENCE[(current_index + 1) % len(PERIOD_REPORT_PERIOD_SEQUENCE)]
-
-
-def _format_period_days(period_days: int) -> str:
-    if period_days == 32:
-        return "32 дня"
-    return f"{period_days} дней"
 
 
 def build_period_report_dynamics_keyboard(*, period_days: int, metric_code: str, next_metric_code: str) -> InlineKeyboardMarkup:

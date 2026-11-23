@@ -6,7 +6,9 @@
   <meta name="referrer" content="no-referrer">
   <title>Дневник питания</title>
   <link rel="stylesheet" href="diary.css">
+  <link rel="stylesheet" href="report.css">
   <script defer src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script defer src="report.js"></script>
   <script defer src="diary.js"></script>
 </head>
 <body id="diary-trends">
@@ -35,6 +37,54 @@
       <p id="action-status" class="meal-note" role="status" hidden></p>
       <section class="meals" aria-label="Приёмы пищи за выбранный день"></section>
     </article>
+    <article id="report" aria-labelledby="report-title" hidden>
+      <h1 id="report-title">Отчёт за период</h1>
+      <div class="report-periods" aria-label="Длина периода" role="group">
+        <button type="button" data-groups="2" aria-pressed="true">2 группы<span></span></button>
+        <button type="button" data-groups="4" aria-pressed="false">4 группы<span></span></button>
+        <button type="button" data-groups="8" aria-pressed="false">8 групп<span></span></button>
+      </div>
+      <p class="report-dates" aria-live="polite"></p>
+      <p class="report-note">Обычно группа длится 4 пищевых дня. Текущая учитывается по сегодня.</p>
+      <div class="report-status">
+        <p role="status"></p>
+        <button type="button" class="report-retry" hidden>Повторить</button>
+      </div>
+      <div class="report-results" hidden>
+        <section aria-labelledby="report-summary-title">
+          <h2 id="report-summary-title">Сводка</h2>
+          <div class="report-metric-head" aria-hidden="true"><span>Метрика</span><span>В среднем</span><span>В цели</span></div>
+          <div class="report-metrics" role="group" aria-label="Выбрать метрику для графика"></div>
+          <p class="report-coverage report-note" aria-live="polite"></p>
+        </section>
+        <section class="report-dynamics" aria-labelledby="report-dynamics-title">
+          <h2 id="report-dynamics-title">Динамика</h2>
+          <div class="report-chart" role="group" aria-labelledby="report-dynamics-title">
+            <div class="report-axis" aria-hidden="true"></div>
+            <div class="report-plot">
+              <div class="report-gridlines" aria-hidden="true"></div>
+              <div class="report-bars"></div>
+            </div>
+          </div>
+          <p class="report-key report-note">
+            <span class="report-goal-key"><i aria-hidden="true"></i>Цель</span>
+            <span class="report-tolerance-key"><i aria-hidden="true"></i><span></span></span>
+            <span class="report-current-key"><i aria-hidden="true"></i>Текущая группа</span>
+            <span class="report-missing-key" hidden>— Нет данных</span>
+          </p>
+          <div class="report-detail" aria-live="polite"></div>
+        </section>
+      </div>
+    </article>
+    <footer id="screen-navigation" aria-label="Навигация по приложению" hidden>
+      <button type="button" class="screen-picker" aria-expanded="false" aria-controls="screen-options">
+        <span>Дневник</span><i aria-hidden="true"></i>
+      </button>
+      <nav id="screen-options" aria-label="Разделы приложения" hidden>
+        <button type="button" data-screen="diary" aria-current="page">Дневник</button>
+        <button type="button" data-screen="report">Отчёты</button>
+      </nav>
+    </footer>
   </main>
 </body>
 </html>
