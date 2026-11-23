@@ -32,7 +32,7 @@ class DailyNutritionGoalSnapshotUseCase:
             return snapshot
 
         preference, _created = self._preference_repository.get_or_create(user_id=user_id)
-        return self._snapshot_repository.create(
+        return self._snapshot_repository.create_if_absent(
             user_id=user_id,
             summary_date=summary_date,
             timezone_name=timezone_name,

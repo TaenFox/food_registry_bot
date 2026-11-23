@@ -21,6 +21,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from food_registry_bot.bot.access import can_access_bot
 from food_registry_bot.bot.admin_backfill import AdminBackfillTracker
 from food_registry_bot.bot.keyboards import (
+    DEFAULT_PERIOD_REPORT_DAYS,
+    PERIOD_REPORT_COHORT_COUNTS,
     RECENT_BUTTON_TEXT,
     REPORT_BUTTON_TEXT,
     SETTINGS_BUTTON_TEXT,
@@ -55,6 +57,7 @@ from food_registry_bot.bot.keyboards import (
     build_recent_non_food_entry_keyboard,
     build_recent_entry_confirmation_keyboard,
     build_recent_entry_selection_keyboard,
+    resolve_next_period_days,
 )
 from food_registry_bot.bot.message_routing import (
     AMBIGUOUS,
@@ -240,9 +243,6 @@ EXCHANGE_DIRECTION_LABELS = {
     DataExchangeDirection.IMPORT: "импорт",
     DataExchangeDirection.EXPORT: "экспорт",
 }
-PERIOD_REPORT_PERIOD_SEQUENCE = (8, 16, 32)
-DEFAULT_PERIOD_REPORT_DAYS = PERIOD_REPORT_PERIOD_SEQUENCE[0]
-PERIOD_REPORT_SUBPERIOD_DAYS = 4
 ADMIN_USER_PAGE_SIZE = 10
 ADMIN_LLM_ISSUE_PAGE_SIZE = 5
 LLM_MODEL_PLACEHOLDER = "<MODEL>"
@@ -2623,7 +2623,7 @@ def build_period_report(
         user_id=user_id,
         timezone_name=timezone_name,
         summary_date_to=summary_date_to,
-        period_day_count=period_days,
+        cohort_count=PERIOD_REPORT_COHORT_COUNTS[period_days],
         nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
         workout_logging_enabled=workout_logging_enabled,
         report_goal_tolerance_percent=summary_preference.report_goal_tolerance_percent,
@@ -2634,14 +2634,6 @@ def build_period_report(
         workout_logging_enabled=workout_logging_enabled,
         report_goal_tolerance_percent=summary_preference.report_goal_tolerance_percent,
     )
-
-
-def resolve_next_period_days(period_days: int) -> int:
-    try:
-        current_index = PERIOD_REPORT_PERIOD_SEQUENCE.index(period_days)
-    except ValueError:
-        return DEFAULT_PERIOD_REPORT_DAYS
-    return PERIOD_REPORT_PERIOD_SEQUENCE[(current_index + 1) % len(PERIOD_REPORT_PERIOD_SEQUENCE)]
 
 
 def resolve_available_period_report_metric_codes(
@@ -2662,10 +2654,9 @@ def resolve_available_period_report_metric_codes(
             user_id=user_id,
             timezone_name=timezone_name,
             summary_date_to=summary_date_to,
-            period_day_count=period_days,
+            cohort_count=PERIOD_REPORT_COHORT_COUNTS[period_days],
             metric_code=metric_code,
             nutrition_day_start_hour=summary_preference.nutrition_day_start_hour,
-            subperiod_day_count=PERIOD_REPORT_SUBPERIOD_DAYS,
             workout_logging_enabled=workout_logging_enabled,
         )
         if any(row.data_day_count > 0 for row in dynamics.rows):
@@ -2700,6 +2691,8 @@ def build_period_report_dynamics_response(
     unit = unit_by_metric_code[dynamics.metric_code]
     for row in dynamics.rows:
         period_label = f"{row.summary_date_from.strftime('%d.%m')}-{row.summary_date_to.strftime('%d.%m')}"
+        if row.summary_date_to >= dynamics.summary_date_to:
+            period_label += " (текущий блок)"
         if row.data_day_count == 0 or row.average_value is None:
             lines.append(f"{period_label}: нет данных")
             continue
@@ -2708,8 +2701,9 @@ def build_period_report_dynamics_response(
             goal_value=row.average_goal_value,
             tolerance_percent=report_goal_tolerance_percent,
         )
+        cohort_day_count = (row.summary_date_to - row.summary_date_from).days + 1
         lines.append(
-            f"{prefix} {period_label}: {round(row.average_value, 1)} {unit} ({row.data_day_count}/{dynamics.subperiod_day_count} дней)"
+            f"{prefix} {period_label}: {round(row.average_value, 1)} {unit} ({row.data_day_count}/{cohort_day_count} дней)"
         )
     return "\n".join(lines)
 
@@ -5610,6 +5604,11 @@ async def handle_period_report_callback(
         await callback.answer()
         return
 
+    cohort_count = PERIOD_REPORT_COHORT_COUNTS.get(callback_data.period_days)
+    if cohort_count is None:
+        await callback.answer("Неизвестный период.", show_alert=True)
+        return
+
     with session_scope(session_factory) as session:
         if not (
             is_admin_user(telegram_user.id, admin_user_ids)
@@ -5651,10 +5650,9 @@ async def handle_period_report_callback(
                 user_id=user.id,
                 timezone_name=user.timezone,
                 summary_date_to=summary_date_to,
-                period_day_count=callback_data.period_days,
+                cohort_count=cohort_count,
                 metric_code=metric_code,
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
-                subperiod_day_count=PERIOD_REPORT_SUBPERIOD_DAYS,
                 workout_logging_enabled=user.workout_logging_enabled,
             )
             next_metric_code = resolve_next_metric_code(available_metric_codes, metric_code)
@@ -5703,7 +5701,7 @@ async def handle_period_report_callback(
                 user_id=user.id,
                 timezone_name=user.timezone,
                 summary_date_to=summary_date_to,
-                period_day_count=callback_data.period_days,
+                cohort_count=cohort_count,
                 metric_code=metric_code,
                 nutrition_day_start_hour=preference.nutrition_day_start_hour,
                 percentile=preference.report_noticeable_entry_percentile,

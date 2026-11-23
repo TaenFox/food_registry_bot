@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Callable, Optional, TYPE_CHECKING
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, selectinload
 
 from food_registry_bot.db.models import (
@@ -746,6 +748,12 @@ class UserSummaryPreferenceRepository:
             raise ValueError(f"Unsupported summary preference metric code: {metric_code}") from exc
 
 
+def _insert_goal_if_absent(session: Session, model, values: dict, unique_fields: tuple[str, ...]):
+    insert = sqlite_insert if session.get_bind().dialect.name == "sqlite" else postgres_insert
+    statement = insert(model).values(**values).on_conflict_do_nothing(index_elements=unique_fields)
+    return session.scalar(statement.returning(model))
+
+
 class UserGoalPreferenceRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -759,18 +767,25 @@ class UserGoalPreferenceRepository:
         if preference is not None:
             return preference, False
 
-        preference = UserGoalPreference(
-            user_id=user_id,
-            calorie_goal=DEFAULT_DAILY_GOALS["calories"],
-            protein_goal=DEFAULT_DAILY_GOALS["protein"],
-            fat_goal=DEFAULT_DAILY_GOALS["fat"],
-            carbs_goal=DEFAULT_DAILY_GOALS["carbs"],
-            fiber_goal=DEFAULT_DAILY_GOALS["fiber"],
-            water_goal=DEFAULT_DAILY_GOALS["water"],
+        preference = _insert_goal_if_absent(
+            self._session,
+            UserGoalPreference,
+            {
+                "user_id": user_id,
+                "calorie_goal": DEFAULT_DAILY_GOALS["calories"],
+                "protein_goal": DEFAULT_DAILY_GOALS["protein"],
+                "fat_goal": DEFAULT_DAILY_GOALS["fat"],
+                "carbs_goal": DEFAULT_DAILY_GOALS["carbs"],
+                "fiber_goal": DEFAULT_DAILY_GOALS["fiber"],
+                "water_goal": DEFAULT_DAILY_GOALS["water"],
+            },
+            ("user_id",),
         )
-        self._session.add(preference)
-        self._session.flush()
-        return preference, True
+        if preference is not None:
+            return preference, True
+        return self._session.scalars(
+            select(UserGoalPreference).where(UserGoalPreference.user_id == user_id)
+        ).one(), False
 
     def set_goal(
         self,
@@ -819,7 +834,7 @@ class DailyGoalSnapshotRepository:
         )
         return self._session.scalar(statement)
 
-    def create(
+    def create_if_absent(
         self,
         *,
         user_id: int,
@@ -833,21 +848,30 @@ class DailyGoalSnapshotRepository:
         fiber_goal: int,
         water_goal: int,
     ) -> DailyGoalSnapshot:
-        snapshot = DailyGoalSnapshot(
-            user_id=user_id,
-            summary_date=summary_date,
-            timezone=timezone_name,
-            nutrition_day_start_hour=nutrition_day_start_hour,
-            calorie_goal=calorie_goal,
-            protein_goal=protein_goal,
-            fat_goal=fat_goal,
-            carbs_goal=carbs_goal,
-            fiber_goal=fiber_goal,
-            water_goal=water_goal,
+        snapshot = _insert_goal_if_absent(
+            self._session,
+            DailyGoalSnapshot,
+            {
+                "user_id": user_id,
+                "summary_date": summary_date,
+                "timezone": timezone_name,
+                "nutrition_day_start_hour": nutrition_day_start_hour,
+                "calorie_goal": calorie_goal,
+                "protein_goal": protein_goal,
+                "fat_goal": fat_goal,
+                "carbs_goal": carbs_goal,
+                "fiber_goal": fiber_goal,
+                "water_goal": water_goal,
+            },
+            ("user_id", "summary_date"),
         )
-        self._session.add(snapshot)
-        self._session.flush()
-        return snapshot
+        if snapshot is not None:
+            return snapshot
+        return self._session.scalars(
+            select(DailyGoalSnapshot).where(
+                DailyGoalSnapshot.user_id == user_id, DailyGoalSnapshot.summary_date == summary_date
+            )
+        ).one()
 
 
 def item_lacks_metrics(item: EntryItem, required_metric_codes: set[str]) -> bool:

@@ -1,0 +1,167 @@
+#diary-trends .phone {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+#screen-navigation {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+  padding: 10px 0 max(8px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--rule);
+  background: var(--page);
+}
+
+#diary, #report { padding-bottom: 14px; }
+
+#report {
+  --fiber: light-dark(#626b24, #c1ca6d);
+  --water: light-dark(#246784, #88cfe8);
+}
+
+#screen-navigation button, #report button {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+#screen-navigation .screen-picker {
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--panel);
+  font-weight: 650;
+}
+
+.screen-picker i {
+  width: 7px;
+  height: 7px;
+  margin: 4px 2px 0 0;
+  border-top: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  transform: rotate(45deg);
+}
+
+.screen-picker[aria-expanded="true"] i { margin-top: -4px; transform: rotate(225deg); }
+
+#screen-options {
+  position: absolute;
+  inset-inline: 0;
+  bottom: calc(100% + 2px);
+  padding: 4px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--page);
+  box-shadow: 0 5px 22px color-mix(in srgb, var(--ink) 20%, transparent);
+}
+
+#screen-options button {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 10px;
+  border-radius: 7px;
+  text-align: left;
+}
+
+#screen-options button:hover { background: var(--panel); }
+#screen-options button[aria-current="page"] { font-weight: 650; background: var(--selection); }
+#screen-options button[aria-current="page"]::after { content: "✓"; }
+
+#report h2 { font-size: 15px; }
+
+#report .report-periods {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px;
+  padding: 3px;
+  margin: 12px 0 9px;
+  border-radius: 9px;
+  background: var(--panel);
+}
+
+#report .report-periods button { min-height: 44px; padding: 3px; border-radius: 7px; }
+#report .report-periods button span { display: block; font-size: 12px; }
+#report .report-periods button[aria-pressed="true"] { background: var(--action); color: var(--on-action); }
+#report .report-dates { font-weight: 650; }
+#report .report-dates:empty, #report .report-status p:empty { display: none; }
+#report .report-note { color: var(--muted); font-size: 12px; }
+#report .report-dates + .report-note { margin-top: 3px; }
+#report .report-results, #report .report-status:not(:has(p:empty)) { margin-top: 14px; }
+#report .report-retry { min-height: 44px; padding: 0 10px; margin-top: 5px; border-radius: 8px; background: var(--panel); }
+
+#report .report-metric-head, #report .report-metrics button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(84px, .95fr) minmax(52px, .65fr);
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  text-align: left;
+}
+
+#report .report-metric-head { min-height: 27px; color: var(--muted); font-size: 12px; }
+#report .report-metrics button { min-height: 39px; width: 100%; border-top: 1px solid var(--rule); }
+#report .report-metric-head > :not(:first-child), #report .report-metrics button > :not(:first-child) { text-align: right; }
+#report .report-metrics button[aria-pressed="true"] { background: var(--selection); font-weight: 650; border-radius: 7px; border-color: transparent; }
+#report .report-coverage { margin-top: 6px; }
+
+#report .report-dynamics { margin-top: 16px; }
+#report .report-chart {
+  --plot-height: 128px;
+  display: grid;
+  grid-template-columns: minmax(34px, max-content) minmax(0, 1fr);
+  gap: 6px;
+  margin-top: 10px;
+}
+
+#report .report-axis { display: grid; height: var(--plot-height); }
+#report .report-axis span { position: relative; top: var(--position); grid-area: 1 / 1; align-self: start; justify-self: end; transform: translateY(-50%); font-size: 11px; color: var(--muted); }
+#report .report-plot { position: relative; min-width: 0; }
+#report .report-gridlines { position: absolute; inset: 0 0 auto; height: var(--plot-height); pointer-events: none; }
+#report .report-gridlines span { position: absolute; top: var(--position); width: 100%; border-top: 1px solid var(--rule); }
+#report .report-bars { position: relative; display: grid; grid-template-columns: repeat(var(--group-count), minmax(0, 1fr)); }
+#report .report-group {
+  display: grid;
+  grid-template-rows: var(--plot-height) 25px;
+  min-width: 0;
+  padding: 0 1px;
+  border-radius: 6px;
+  text-align: center;
+}
+#report .report-group[aria-pressed="true"] { background: color-mix(in srgb, var(--series-color) 9%, transparent); }
+#report .report-track { display: flex; position: relative; justify-content: center; align-items: end; }
+#report .report-bar { z-index: 1; width: min(56%, 42px); height: var(--fact); border-radius: 4px 4px 0 0; background: var(--series-color); }
+
+#report .report-current .report-bar { background: repeating-linear-gradient(135deg, var(--series-color) 0 2px, transparent 2px 5px), var(--selection); }
+#report .report-band, #report .report-goal { position: absolute; width: min(88%, 72px); pointer-events: none; }
+#report .report-band { bottom: var(--lower); height: var(--band-height); background: color-mix(in srgb, var(--action) 19%, transparent); }
+#report .report-goal { z-index: 1; bottom: var(--target); height: 2px; background: var(--ink); box-shadow: 0 0 0 1px var(--page); }
+#report .report-no-data { color: var(--muted); }
+#report .report-tick { align-self: center; font-size: 11px; white-space: nowrap; }
+#report .report-group[aria-pressed="true"] .report-tick { font-weight: 700; }
+
+#report .report-key { display: flex; flex-wrap: wrap; gap: 4px 9px; }
+#report .report-key > span { display: inline-flex; align-items: center; gap: 4px; }
+#report .report-key i { display: inline-block; width: 13px; height: 9px; }
+#report .report-key .report-goal-key i { height: 2px; background: var(--ink); }
+#report .report-tolerance-key i { background: color-mix(in srgb, var(--action) 23%, transparent); }
+#report .report-current-key i { background: repeating-linear-gradient(135deg, var(--series-color, var(--kcal)) 0 2px, transparent 2px 5px), var(--selection); }
+#report .report-detail { display: grid; gap: 3px; margin-top: 9px; padding: 8px 10px; border-radius: 8px; background: var(--panel); }
+
+@media (pointer: coarse) {
+  #report .report-metrics button { min-height: 44px; }
+}

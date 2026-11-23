@@ -14,6 +14,7 @@ from food_registry_bot.db.models import Entry, User
 from food_registry_bot.db.repositories import (
     DailyGoalSnapshotRepository,
     EntryRepository,
+    SUPPORTED_GOAL_METRIC_CODES,
     UserRepository,
     UserSummaryPreferenceRepository,
 )
@@ -30,6 +31,11 @@ from food_registry_bot.nutrition.contract import SUPPORTED_NUTRITION_METRIC_CODE
 from food_registry_bot.nutrition.daily_summary import (
     resolve_day_bounds_utc,
     resolve_local_summary_date,
+)
+from food_registry_bot.nutrition.period_report import (
+    REPORT_COHORT_COUNTS,
+    PeriodReportUseCase,
+    resolve_report_cohorts,
 )
 from food_registry_bot.nutrition.workout_credit import DailyWorkoutCalorieCreditUseCase
 
@@ -147,11 +153,59 @@ def read_diary(session: Session, user: User, now: datetime) -> dict:
     return {"metrics": metrics, "tolerance": tolerance, "days": days}
 
 
+def read_report(session: Session, user: User, now: datetime, group_count: int) -> dict:
+    preference = UserSummaryPreferenceRepository(session).get_by_user_id(user.id)
+    start_hour = preference.nutrition_day_start_hour if preference is not None else 4
+    tolerance = preference.report_goal_tolerance_percent if preference is not None else 10
+    codes = tuple(
+        code for code in SUPPORTED_GOAL_METRIC_CODES
+        if preference is None or getattr(preference, f"show_{code}")
+    )
+    today = resolve_local_summary_date(
+        reference_at=now, timezone_name=user.timezone, nutrition_day_start_hour=start_hour
+    )
+    cohorts = resolve_report_cohorts(today, max(REPORT_COHORT_COUNTS))
+    report = PeriodReportUseCase(session).run(
+        user_id=user.id,
+        timezone_name=user.timezone,
+        summary_date_to=today,
+        cohort_count=group_count,
+        nutrition_day_start_hour=start_hour,
+        workout_logging_enabled=user.workout_logging_enabled,
+        report_goal_tolerance_percent=tolerance,
+        dynamics_metric_codes=codes,
+    )
+    metrics = []
+    for code in codes:
+        data_days = report.water_data_day_count if code == "water" else report.food_data_day_count
+        average = report.average_water_ml if code == "water" else getattr(report.average_nutrition_totals, code)
+        metrics.append({
+            "code": code,
+            "average": average if data_days else None,
+            "data_days": data_days,
+            "incomplete_days": report.incomplete_water_day_count if code == "water" else report.incomplete_food_day_count,
+            "goal_hits": report.goal_hit_day_counts[code],
+            "goal_days": report.goal_applicable_day_counts[code],
+            "groups": [row.model_dump(mode="json") for row in report.metric_dynamics[code]],
+        })
+    return {
+        "periods": [
+            {"groups": count, "days": (today - cohorts[-count][0]).days + 1}
+            for count in REPORT_COHORT_COUNTS
+        ],
+        "date_from": report.summary_date_from.isoformat(),
+        "date_to": report.summary_date_to.isoformat(),
+        "days": report.period_day_count,
+        "tolerance": tolerance,
+        "metrics": metrics,
+    }
+
+
 def create_diary_app(
     session_factory: sessionmaker[Session], *, token: str, admin_user_ids: tuple[int, ...]
 ) -> web.Application:
     def load(
-        telegram_user_id: int, now: datetime, command: DiaryMutation | None
+        telegram_user_id: int, now: datetime, command: DiaryMutation | None, group_count: int | None
     ) -> tuple[int, dict]:
         try:
             with session_factory.begin() as session:
@@ -160,6 +214,8 @@ def create_diary_app(
                 user = UserRepository(session).get_by_telegram_user_id(telegram_user_id)
                 if user is None:
                     return 404, {"error": "profile_missing"}
+                if group_count is not None:
+                    return 200, read_report(session, user, now, group_count)
                 if command is not None:
                     apply_diary_mutation(session, user, command)
                     session.flush()
@@ -171,7 +227,7 @@ def create_diary_app(
     def response(status: int, payload: dict) -> web.Response:
         return web.json_response(payload, status=status, headers={"Cache-Control": "no-store"})
 
-    async def diary(request: web.Request) -> web.Response:
+    async def mini_app_request(request: web.Request) -> web.Response:
         scheme, _, init_data = request.headers.get("Authorization", "").partition(" ")
         now = datetime.now(timezone.utc)
         status, payload = 401, {"error": "invalid_authorization"}
@@ -184,7 +240,13 @@ def create_diary_app(
             else:
                 if authenticated.user and -INIT_DATA_CLOCK_SKEW <= age <= INIT_DATA_MAX_AGE:
                     command = None
-                    if request.method == "POST":
+                    group_count = None
+                    if request.path == "/api/report":
+                        groups = request.query.get("groups", str(REPORT_COHORT_COUNTS[0]))
+                        if groups not in {str(count) for count in REPORT_COHORT_COUNTS}:
+                            return response(400, {"error": "invalid_group_count"})
+                        group_count = int(groups)
+                    elif request.method == "POST":
                         if request.content_type != "application/json":
                             return response(415, {"error": "invalid_edit"})
                         try:
@@ -192,7 +254,7 @@ def create_diary_app(
                         except ValidationError:
                             return response(400, {"error": "invalid_edit"})
                     status, payload = await asyncio.to_thread(
-                        load, authenticated.user.id, now, command
+                        load, authenticated.user.id, now, command, group_count
                     )
                     if status == 200:
                         payload["expires_in_ms"] = int(
@@ -202,6 +264,7 @@ def create_diary_app(
         return response(status, payload)
 
     app = web.Application(client_max_size=4096)
-    app.router.add_get("/api/diary", diary, allow_head=False)
-    app.router.add_post("/api/diary", diary)
+    app.router.add_get("/api/diary", mini_app_request, allow_head=False)
+    app.router.add_post("/api/diary", mini_app_request)
+    app.router.add_get("/api/report", mini_app_request, allow_head=False)
     return app

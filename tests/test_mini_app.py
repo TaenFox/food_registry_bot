@@ -53,9 +53,10 @@ def diary_db(tmp_path):
     engine.dispose()
 
 
-def telegram_init_data(user_id, *, age=timedelta(0)):
+def telegram_init_data(user_id, *, age=timedelta(0), now=None):
+    now = now or datetime.now(timezone.utc)
     fields = {
-        "auth_date": str(int((datetime.now(timezone.utc) - age).timestamp())),
+        "auth_date": str(int((now - age).timestamp())),
         "user": json.dumps({"id": user_id, "first_name": "Test"}),
     }
     check_string = "\n".join(f"{name}={value}" for name, value in sorted(fields.items()))
@@ -64,11 +65,11 @@ def telegram_init_data(user_id, *, age=timedelta(0)):
     return urlencode(fields)
 
 
-async def request_diary(app, *, init_data=None, query="", method="GET", command=None):
+async def request_diary(app, *, init_data=None, query="", method="GET", command=None, path="/api/diary"):
     headers = {"Authorization": f"tma {init_data}"} if init_data is not None else {}
     if method == "POST":
         headers["Content-Type"] = "application/json"
-    request = make_mocked_request(method, "/api/diary" + query, headers=headers, app=app)
+    request = make_mocked_request(method, path + query, headers=headers, app=app)
     read_body = AsyncMock(return_value=json.dumps(command).encode())
     request.read = read_body
     route = await app.router.resolve(request)
@@ -80,7 +81,8 @@ async def request_diary(app, *, init_data=None, query="", method="GET", command=
 
 
 @pytest.mark.parametrize("case", ["missing", "forged", "old", "future", "malformed"])
-async def test_diary_rejects_untrusted_init_data_before_reading_db(case):
+@pytest.mark.parametrize("path", ["/api/diary", "/api/report"])
+async def test_mini_app_rejects_untrusted_init_data_before_reading_db(case, path):
     def inaccessible_db():
         pytest.fail("Authorization must be checked before accessing the database")
 
@@ -93,26 +95,106 @@ async def test_diary_rejects_untrusted_init_data_before_reading_db(case):
         "malformed": "hash=★",
     }[case]
 
-    assert await request_diary(app, init_data=init_data) == (
+    assert await request_diary(app, init_data=init_data, path=path) == (
         401,
         {"error": "invalid_authorization"},
     )
 
 
-async def test_diary_requires_bot_access_even_for_signed_users(diary_db):
+@pytest.mark.parametrize("path", ["/api/diary", "/api/report"])
+async def test_mini_app_requires_bot_access_even_for_signed_users(diary_db, path):
     factory = diary_db
     with factory.begin() as session:
         session.add(User(telegram_user_id=1))
         session.add(UserAccess(telegram_user_id=2, is_allowed=True))
     app = create_diary_app(factory, token=TOKEN, admin_user_ids=())
 
-    assert await request_diary(app, init_data=telegram_init_data(1)) == (
+    assert await request_diary(app, init_data=telegram_init_data(1), path=path) == (
         403,
         {"error": "access_denied"},
     )
-    assert await request_diary(app, init_data=telegram_init_data(2)) == (
+    assert await request_diary(app, init_data=telegram_init_data(2), path=path) == (
         404,
         {"error": "profile_missing"},
+    )
+
+
+async def test_report_uses_annual_groups_and_saved_goals(diary_db, monkeypatch):
+    now = datetime(2026, 1, 3, 5, tzinfo=timezone.utc)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz)
+
+    monkeypatch.setattr("food_registry_bot.mini_app.datetime", FrozenDateTime)
+    with diary_db.begin() as session:
+        owner = User(telegram_user_id=1, timezone="Europe/Moscow")
+        other = User(telegram_user_id=2, timezone="Europe/Moscow")
+        session.add_all([owner, other, UserAccess(telegram_user_id=1, is_allowed=True)])
+        session.flush()
+        session.add(UserSummaryPreference(user_id=owner.id, nutrition_day_start_hour=6,
+                                          show_fat=False, report_goal_tolerance_percent=5))
+        metrics = {metric.code: metric for metric in session.query(SupportedMetric).all()}
+        for user, day, calories in ((owner, 1, 2100), (owner, 2, 2400), (owner, 3, None),
+                                    (owner, 4, 6000), (other, 2, 12000)):
+            session.add(Entry(
+                user_id=user.id, entry_type=EntryType.FOOD,
+                occurred_at=datetime(2026, 1, day, 3, tzinfo=timezone.utc),
+                items=[EntryItem(name="Еда", position=0, metrics=[
+                    EntryItemMetric(metric=metric, value=calories if code == "calories" else 10)
+                    for code, metric in metrics.items() if calories is not None
+                ])],
+            ))
+        session.add(Entry(
+            user_id=owner.id, entry_type=EntryType.WATER,
+            occurred_at=datetime(2026, 1, 2, 3, tzinfo=timezone.utc),
+            items=[EntryItem(name="water", position=0, unit="ml", quantity=1000)],
+        ))
+        for day, goal in ((1, 2000), (2, 2400), (3, 2100)):
+            session.add(DailyGoalSnapshot(
+                user_id=owner.id, summary_date=now.date().replace(day=day), timezone="Europe/Moscow",
+                nutrition_day_start_hour=6, calorie_goal=goal, protein_goal=120,
+                fat_goal=70, carbs_goal=210, fiber_goal=30, water_goal=2000,
+            ))
+        user_id = owner.id
+
+    app = create_diary_app(diary_db, token=TOKEN, admin_user_ids=())
+    init_data = telegram_init_data(1, now=now)
+    status, payload = await request_diary(app, path="/api/report", init_data=init_data, query="?user_id=2")
+    assert status == 200
+    assert payload["date_from"] == "2025-12-31"
+    assert payload["date_to"] == "2026-01-03"
+    assert payload["days"] == 4
+    assert payload["tolerance"] == 5
+    assert payload["periods"] == [{"groups": 2, "days": 4}, {"groups": 4, "days": 12}, {"groups": 8, "days": 28}]
+    by_code = {metric["code"]: metric for metric in payload["metrics"]}
+    assert list(by_code) == ["calories", "protein", "carbs", "fiber", "water"]
+    calories = by_code["calories"]
+    assert (calories["average"], calories["data_days"], calories["incomplete_days"]) == (1500, 3, 1)
+    assert (calories["goal_hits"], calories["goal_days"]) == (2, 2)
+    previous, current = calories["groups"]
+    assert previous["summary_date_to"] == "2025-12-31"
+    assert previous["average_value"] is None
+    assert current == {
+        "summary_date_from": "2026-01-01", "summary_date_to": "2026-01-04", "data_day_count": 3,
+        "average_value": 1500, "average_goal_value": pytest.approx(6500 / 3),
+        "min_goal_value": 2000, "max_goal_value": 2400,
+    }
+    assert by_code["water"]["average"] == 1000
+    assert by_code["water"]["goal_days"] == 1
+
+    status, refreshed = await request_diary(app, path="/api/report", init_data=init_data, query="?groups=4")
+    assert status == 200
+    assert refreshed["days"] == 12
+    assert refreshed["metrics"][0]["groups"][-1] == current
+    with diary_db() as session:
+        snapshots = session.query(DailyGoalSnapshot).filter_by(user_id=user_id).all()
+        assert len(snapshots) == 12
+        assert max(snapshot.summary_date for snapshot in snapshots) == now.date()
+
+    assert await request_diary(app, path="/api/report", init_data=init_data, query="?groups=10000") == (
+        400, {"error": "invalid_group_count"},
     )
 
 
