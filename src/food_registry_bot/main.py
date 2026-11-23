@@ -110,7 +110,9 @@ async def run() -> None:
             await web.TCPSite(diary_runner, host="0.0.0.0", port=MINI_APP_PORT).start()
         await setup_bot_commands(bot, admin_user_ids=settings.admin_user_ids)
         await setup_diary_menu_button(
-            bot, mini_app_url=str(settings.mini_app_url) if settings.mini_app_url else None
+            bot,
+            mini_app_url=str(settings.mini_app_url) if settings.mini_app_url else None,
+            app_version=settings.app_version,
         )
         dispatcher = create_dispatcher(
             session_factory,

@@ -57,12 +57,18 @@ def test_build_user_bot_commands_excludes_button_replaced_commands() -> None:
 
 async def test_diary_menu_button_follows_mini_app_configuration() -> None:
     bot = AsyncMock()
-    url = "https://diary.example.com/"
+    url = "https://diary.example.com/?layout=compact&app_version=v9.4#today"
 
-    await setup_diary_menu_button(bot, mini_app_url=url)
-    await setup_diary_menu_button(bot, mini_app_url=None)
+    await setup_diary_menu_button(bot, mini_app_url=url, app_version="v9.5")
+    await setup_diary_menu_button(bot, mini_app_url=url, app_version="v9.6")
+    await setup_diary_menu_button(bot, mini_app_url=None, app_version="v9.6")
 
     assert bot.set_chat_menu_button.await_args_list == [
-        call(menu_button=MenuButtonWebApp(text="Дневник", web_app=WebAppInfo(url=url))),
+        call(menu_button=MenuButtonWebApp(text="Дневник", web_app=WebAppInfo(
+            url="https://diary.example.com/?layout=compact&app_version=v9.5#today"
+        ))),
+        call(menu_button=MenuButtonWebApp(text="Дневник", web_app=WebAppInfo(
+            url="https://diary.example.com/?layout=compact&app_version=v9.6#today"
+        ))),
         call(menu_button=MenuButtonCommands()),
     ]
