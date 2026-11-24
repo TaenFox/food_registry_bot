@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 from datetime import datetime, time, timedelta, timezone
-from unittest.mock import AsyncMock
+from threading import Barrier
+from unittest.mock import AsyncMock, Mock
 from urllib.parse import urlencode
+from uuid import uuid4
 
 import pytest
 from aiohttp.test_utils import make_mocked_request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from food_registry_bot.config import Settings
+from food_registry_bot.conversation import DisabledConversationService
 from food_registry_bot.db.base import Base
 from food_registry_bot.db.models import (
     DailyGoalSnapshot,
@@ -19,12 +24,17 @@ from food_registry_bot.db.models import (
     EntryItem,
     EntryItemMetric,
     EntryType,
+    MiniAppEntrySubmission,
+    SupportedDiet,
     SupportedMetric,
     User,
     UserAccess,
+    UserGoalPreference,
     UserSummaryPreference,
 )
+from food_registry_bot.extraction import ExtractedJournalPayload, ValidExtractionPayload
 from food_registry_bot.mini_app import create_diary_app
+from food_registry_bot.mini_app_entries import MiniAppEntryWriter
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
     StaticNutritionEstimationService,
@@ -81,7 +91,7 @@ async def request_diary(app, *, init_data=None, query="", method="GET", command=
 
 
 @pytest.mark.parametrize("case", ["missing", "forged", "old", "future", "malformed"])
-@pytest.mark.parametrize("path", ["/api/diary", "/api/report"])
+@pytest.mark.parametrize("path", ["/api/diary", "/api/report", "/api/settings"])
 async def test_mini_app_rejects_untrusted_init_data_before_reading_db(case, path):
     def inaccessible_db():
         pytest.fail("Authorization must be checked before accessing the database")
@@ -101,7 +111,7 @@ async def test_mini_app_rejects_untrusted_init_data_before_reading_db(case, path
     )
 
 
-@pytest.mark.parametrize("path", ["/api/diary", "/api/report"])
+@pytest.mark.parametrize("path", ["/api/diary", "/api/report", "/api/settings"])
 async def test_mini_app_requires_bot_access_even_for_signed_users(diary_db, path):
     factory = diary_db
     with factory.begin() as session:
@@ -198,6 +208,223 @@ async def test_report_uses_annual_groups_and_saved_goals(diary_db, monkeypatch):
     )
 
 
+async def test_mini_app_settings_share_preferences_and_preserve_goal_snapshots(diary_db):
+    today = (datetime.now(timezone.utc) - timedelta(hours=4)).date()
+    with diary_db.begin() as session:
+        user = User(telegram_user_id=1, timezone="UTC")
+        session.add_all([
+            user, UserAccess(telegram_user_id=1, is_allowed=True),
+            User(telegram_user_id=2, timezone="UTC"), UserAccess(telegram_user_id=2, is_allowed=True),
+            SupportedDiet(code="gastritis", name="При гастрите", is_enabled=True),
+        ])
+        session.flush()
+        session.add(DailyGoalSnapshot(
+            user_id=user.id, summary_date=today, timezone="UTC", nutrition_day_start_hour=4,
+            calorie_goal=1800, protein_goal=90, fat_goal=60, carbs_goal=210, fiber_goal=25, water_goal=2000,
+        ))
+        user_id = user.id
+    app = create_diary_app(diary_db, token=TOKEN, admin_user_ids=())
+    init_data = telegram_init_data(1)
+
+    async def settings(command=None, *, authorization=init_data):
+        return await request_diary(
+            app, path="/api/settings", init_data=authorization,
+            method="POST" if command is not None else "GET", command=command,
+        )
+
+    status, defaults = await settings()
+    assert status == 200
+    assert defaults["goals"]["protein"] == 90
+    assert defaults["goal_steps"] == {
+        "calories": 100, "protein": 5, "fat": 5, "carbs": 5, "fiber": 5, "water": 100,
+    }
+    assert defaults["diets"] == [{"code": "gastritis", "name": "При гастрите", "selected": False}]
+    with diary_db() as session:
+        assert session.query(UserGoalPreference).count() == 0
+        assert session.query(UserSummaryPreference).count() == 0
+
+    command = {
+        "goals": {"protein": 95, "fiber": 30},
+        "metrics": {"calories": False, "water": False},
+        "workout_logging_enabled": True,
+        "show_day_progress_bar": True,
+        "show_post_entry_delta_suffix": False,
+        "summary_display_mode": "bars",
+        "nutrition_day_start_hour": 6,
+        "report_goal_tolerance_percent": 15,
+        "report_noticeable_entry_percentile": 85,
+        "diets": {"gastritis": True},
+    }
+    assert await settings(command, authorization=None) == (401, {"error": "invalid_authorization"})
+    assert await settings({**command, "goals": {"protein": "95"}}) == (400, {"error": "invalid_settings"})
+    assert await settings({**command, "report_goal_tolerance_percent": 99}) == (
+        400, {"error": "invalid_settings"},
+    )
+    assert await settings({**command, "diets": {"unknown": True}}) == (422, {"error": "unknown_diet"})
+    assert (await settings())[1]["goals"] == defaults["goals"]
+
+    status, updated = await settings(command)
+    assert status == 200
+    assert updated["goals"] == {**defaults["goals"], **command["goals"]}
+    assert updated["metrics"] == {**defaults["metrics"], **command["metrics"]}
+    assert updated["diets"] == [{**defaults["diets"][0], "selected": True}]
+    assert all(updated[key] == value for key, value in command.items()
+        if key not in {"goals", "metrics", "diets"})
+    assert (await settings({"metrics": {"fat": False}}))[1]["goals"] == updated["goals"]
+    assert (await settings(authorization=telegram_init_data(2)))[1]["goals"] == defaults["goals"]
+    _, diary = await request_diary(app, init_data=init_data)
+    assert diary["metrics"] == ["protein", "carbs", "fiber"]
+    _, report = await request_diary(app, init_data=init_data, path="/api/report")
+    assert [metric["code"] for metric in report["metrics"]] == ["protein", "carbs", "fiber"]
+
+    with diary_db() as session:
+        assert session.query(UserGoalPreference).filter_by(user_id=user_id).one().fiber_goal == 30
+        assert session.query(UserSummaryPreference).filter_by(user_id=user_id).one().show_fat is False
+        assert session.get(User, user_id).workout_logging_enabled
+        snapshot = session.query(DailyGoalSnapshot).filter_by(summary_date=today).one()
+        assert (snapshot.protein_goal, snapshot.fiber_goal, snapshot.nutrition_day_start_hour) == (90, 25, 4)
+
+
+async def test_create_entry_sets_local_time_and_does_not_duplicate_a_retry(diary_db):
+    _, app, extract, estimate = entry_writer(diary_db, [
+        {"type": "food", "items": [{"name": "Гречка", "quantity": 150, "unit": "g"}]},
+        {"type": "water", "items": [{"name": "water", "quantity": 250, "unit": "ml"}]},
+    ])
+    local_date = (datetime.now(timezone.utc) + timedelta(hours=4)).date()
+    food_day = local_date - timedelta(days=1)
+    command = {
+        "request_id": str(uuid4()),
+        "text": "Гречка 150 г и вода 250 мл",
+        "local_date": local_date.isoformat(),
+        "local_time": "02:15",
+    }
+    assert await submit_entry(app, command, user_id=None) == (401, {"error": "invalid_authorization"})
+    assert await submit_entry(app, command, user_id=2) == (403, {"error": "access_denied"})
+    assert await submit_entry(app, {**command, "text": "Как добрать белки?"}) == (
+        422, {"error": "not_a_food_record"},
+    )
+    extract.assert_not_called()
+
+    result = (200, {"summary_date": food_day.isoformat()})
+    assert await submit_entry(app, command) == result
+    assert await submit_entry(app, command) == result
+    assert await submit_entry(app, {**command, "local_time": "02:30"}) == (
+        409, {"error": "entry_request_conflict"},
+    )
+    assert extract.call_count == estimate.call_count == 1
+
+    with diary_db() as session:
+        food, water = session.query(Entry).order_by(Entry.id).all()
+        assert (food.entry_type, water.entry_type) == (EntryType.FOOD, EntryType.WATER)
+        assert food.occurred_at == water.occurred_at == datetime.combine(food_day, time(22, 15))
+        assert food.source_text == command["text"]
+        assert water.items[0].quantity == 250
+        assert session.query(MiniAppEntrySubmission).count() == 1
+        assert session.query(DailyGoalSnapshot).one().summary_date == food_day
+
+    status, payload = await request_diary(app, init_data=telegram_init_data(1))
+    assert status == 200
+    assert payload["timezone"] == "Asia/Tbilisi"
+    day = next(day for day in payload["days"] if day["date"] == food_day.isoformat())
+    assert day["meals"][0]["time"] == "02:15"
+    assert day["metrics"]["fiber"]["value"] == 4
+    assert day["metrics"]["calories"]["goal"] == 1800
+
+    with diary_db.begin() as session:
+        for entry in session.query(Entry).all():
+            session.delete(entry)
+    assert await submit_entry(app, command) == result
+    with diary_db() as session:
+        assert session.query(Entry).count() == 0
+
+
+async def test_create_entry_rolls_back_all_rows_and_allows_retry_after_failed_nutrition(diary_db):
+    writer, app, _, estimate = entry_writer(diary_db, [
+        {"type": "water", "items": [{"name": "water", "quantity": 250, "unit": "ml"}]},
+        {"type": "food", "items": [{"name": "Рис", "quantity": 100, "unit": "g"}]},
+    ])
+    command = {
+        "request_id": str(uuid4()), "text": "Рис и вода",
+        "local_date": datetime.now(timezone.utc).date().isoformat(), "local_time": "13:15",
+    }
+    writer.nutrition_service = StaticNutritionEstimationService(raw_payload="")
+
+    assert await submit_entry(app, command) == (422, {"error": "entry_nutrition_failed"})
+    with diary_db() as session:
+        assert session.query(Entry).count() == 0
+        assert session.query(MiniAppEntrySubmission).count() == 0
+        assert session.query(DailyGoalSnapshot).count() == 0
+
+    writer.nutrition_service = Mock(estimate=estimate)
+    assert (await submit_entry(app, command))[0] == 200
+
+
+async def test_simultaneous_entry_retries_commit_only_once(diary_db):
+    _, app, extract, estimate = entry_writer(diary_db, [
+        {"type": "food", "items": [{"name": "Овсянка", "quantity": 180, "unit": "g"}]},
+    ])
+    both_requests = Barrier(2)
+
+    def extract_together(_request):
+        both_requests.wait(timeout=5)
+        return extract.return_value
+
+    extract.side_effect = extract_together
+    command = {
+        "request_id": str(uuid4()), "text": "Овсянка 180 г",
+        "local_date": datetime.now(timezone.utc).date().isoformat(), "local_time": "13:15",
+    }
+    first, second = await asyncio.gather(submit_entry(app, command), submit_entry(app, command))
+    assert first == second
+    assert first[0] == 200
+    assert estimate.call_count == 1
+    with diary_db() as session:
+        assert session.query(Entry).count() == 1
+        assert session.query(MiniAppEntrySubmission).count() == 1
+
+
+def entry_writer(factory, entries):
+    with factory.begin() as session:
+        session.add_all([
+            User(telegram_user_id=1, timezone="Asia/Tbilisi"),
+            User(telegram_user_id=2, timezone="UTC"),
+            UserAccess(telegram_user_id=1, is_allowed=True),
+        ])
+    extracted = ValidExtractionPayload(
+        payload=ExtractedJournalPayload.model_validate({"entries": entries}),
+        extraction_provider="fixture", extraction_model=None, raw_payload="{}",
+    )
+    extract = Mock(return_value=extracted)
+
+    def estimate_request(request):
+        values = {"calories": 170, "protein": 5, "fat": 2, "carbs": 33, "fiber": 4}
+        raw = json.dumps({"items": [
+            {"client_item_id": item.client_item_id, "metrics": [
+                {"code": code, "value": value, "confidence": "high"}
+                for code, value in values.items()
+            ]}
+            for item in request.items
+        ]})
+        return StaticNutritionEstimationService(raw_payload=raw).estimate(request)
+
+    estimate = Mock(side_effect=estimate_request)
+    writer = MiniAppEntryWriter(
+        factory,
+        Settings(_env_file=None, EXTRACTION_PROVIDER="structured_payload",
+                 NUTRITION_PROVIDER="static", ENABLE_OPENAI_PROVIDER=False),
+        Mock(extract=extract), Mock(estimate=estimate), DisabledConversationService(),
+    )
+    app = create_diary_app(factory, token=TOKEN, admin_user_ids=(), write_entry=writer.write)
+    return writer, app, extract, estimate
+
+
+async def submit_entry(app, command, *, user_id=1):
+    return await request_diary(
+        app, path="/api/entries", method="POST", command=command,
+        init_data=telegram_init_data(user_id) if user_id is not None else None,
+    )
+
+
 async def test_diary_preserves_daily_goals_and_meal_groups_with_partial_data(diary_db):
     factory = diary_db
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
@@ -260,7 +487,7 @@ async def test_diary_preserves_daily_goals_and_meal_groups_with_partial_data(dia
 
     assert status == 200
     assert 0 < payload["expires_in_ms"] <= 3_600_000
-    assert payload["metrics"] == ["calories", "protein", "carbs"]
+    assert payload["metrics"] == ["calories", "protein", "carbs", "fiber"]
     assert len(payload["days"]) == 5
     assert "Чужая запись" not in str(payload)
     assert "Приватный исходный текст сообщения" not in str(payload)
@@ -276,11 +503,17 @@ async def test_diary_preserves_daily_goals_and_meal_groups_with_partial_data(dia
         "complete": True,
     }
     assert by_date[yesterday.isoformat()]["metrics"]["calories"]["percent"] == 40
+    assert today_data["metrics"]["fiber"] == {
+        "value": 12, "goal": 30, "percent": 40,
+        "lower": 27, "upper": pytest.approx(33), "complete": True,
+    }
     (meal,) = today_data["meals"]
     assert meal["time"] == now.strftime("%H:%M")
     assert meal["complete"]
     assert meal["calories"] == 1000
     assert meal["totals"]["protein"] == {"value": 50, "complete": True}
+    assert meal["totals"]["fiber"] == {"value": 12, "complete": True}
+    assert meal["dishes"][0]["metrics"]["fiber"] == 6
     assert [(dish["name"], dish["calories"]) for dish in meal["dishes"]] == [
         ("Рис", 500),
         ("Тунец", 500),
@@ -450,14 +683,14 @@ async def test_edit_unknown_weight_requires_four_values_and_rejects_stale_edit(e
     assert status == 200
     (updated,) = find_meal(after, ids["source"])["dishes"]
     assert (updated["quantity"], updated["unit"]) == (150, "g")
-    assert updated["metrics"] == {"calories": 270, "protein": 7.5, "fat": 3, "carbs": 46.5}
+    assert updated["metrics"] == {"calories": 270, "protein": 7.5, "fat": 3, "carbs": 46.5, "fiber": None}
     assert await mutate_diary(app, command) == (409, {"error": "dish_changed"})
     status, scaled = await mutate_diary(
         app, {**base, "revision": updated["revision"], "weight": 200}
     )
     assert status == 200
     (updated,) = find_meal(scaled, ids["source"])["dishes"]
-    assert updated["metrics"] == {"calories": 360, "protein": 10, "fat": 4, "carbs": 62}
+    assert updated["metrics"] == {"calories": 360, "protein": 10, "fat": 4, "carbs": 62, "fiber": None}
     with factory() as session:
         item = session.get(EntryItem, ids["dish"])
         assert item.source_facts["manual_metrics"] == ["calories", "carbs", "fat", "protein"]
@@ -505,10 +738,95 @@ async def test_edit_known_weight_scales_existing_fiber(editable_diary):
 
     assert status == 200
     (updated,) = find_meal(after, ids["target"])["dishes"]
-    assert updated["metrics"] == {"calories": 300, "protein": 48, "fat": 7.5, "carbs": 30}
+    assert updated["metrics"] == {"calories": 300, "protein": 48, "fat": 7.5, "carbs": 30, "fiber": 6}
     with factory() as session:
         item = session.get(EntryItem, ids["target_dish"])
         assert next(metric.value for metric in item.metrics if metric.metric.code == "fiber") == 6
+
+
+async def test_edit_drink_preserves_saved_volume_and_scales_metrics(editable_diary):
+    factory, ids = editable_diary
+    with factory.begin() as session:
+        item = session.get(EntryItem, ids["target_dish"])
+        item.name = "кефир"
+        item.quantity = 250
+        item.unit = "мл"
+
+    app = create_diary_app(factory, token=TOKEN, admin_user_ids=())
+    _, before = await request_diary(app, init_data=telegram_init_data(1))
+    (dish,) = find_meal(before, ids["target"])["dishes"]
+    assert (dish["quantity"], dish["unit"]) == (250, "мл")
+    command = {
+        "action": "edit",
+        "entry_id": ids["target"],
+        "item_id": dish["id"],
+        "revision": dish["revision"],
+        "quantity": 500,
+        "unit": "ml",
+        "per_100": {"calories": 35},
+    }
+    assert await mutate_diary(app, {**command, "unit": "g"}) == (422, {"error": "missing_per_100g"})
+    status, after = await mutate_diary(app, command)
+
+    assert status == 200
+    (updated,) = find_meal(after, ids["target"])["dishes"]
+    assert (updated["quantity"], updated["unit"]) == (500, "ml")
+    assert updated["metrics"] == {"calories": 175, "protein": 20, "fat": 10, "carbs": 40, "fiber": 8}
+    with factory() as session:
+        item = session.get(EntryItem, dish["id"])
+        assert next(metric.value for metric in item.metrics if metric.metric.code == "fiber") == 8
+
+    status, converted = await mutate_diary(
+        app,
+        {
+            **command,
+            "revision": updated["revision"],
+            "quantity": 100,
+            "unit": "g",
+            "per_100": {"calories": 50, "protein": 2, "fat": 1, "carbs": 8},
+        },
+    )
+    assert status == 200
+    (updated,) = find_meal(converted, ids["target"])["dishes"]
+    assert (updated["quantity"], updated["unit"]) == (100, "g")
+    assert updated["metrics"] == {"calories": 50, "protein": 2, "fat": 1, "carbs": 8, "fiber": 8}
+
+
+async def test_delete_dish_removes_metrics_and_requires_confirmation_for_last_dish(editable_diary):
+    factory, ids = editable_diary
+    with factory.begin() as session:
+        session.add(EntryItem(entry_id=ids["target"], position=6, name="овощи"))
+    app = create_diary_app(factory, token=TOKEN, admin_user_ids=())
+    _, before = await request_diary(app, init_data=telegram_init_data(1))
+    dish, remaining = find_meal(before, ids["target"])["dishes"]
+    command = {
+        "action": "delete",
+        "entry_id": ids["target"],
+        "item_id": dish["id"],
+        "revision": dish["revision"],
+    }
+    assert await mutate_diary(app, {**command, "entry_id": ids["foreign"]}) == (
+        404,
+        {"error": "entry_missing"},
+    )
+    assert await mutate_diary(app, {**command, "revision": "0" * 32}) == (409, {"error": "dish_changed"})
+    status, after = await mutate_diary(app, command)
+
+    assert status == 200
+    assert find_meal(after, ids["target"])["dishes"] == [remaining]
+    assert find_meal(after, ids["target"])["totals"]["calories"]["value"] is None
+    with factory() as session:
+        assert session.get(EntryItem, dish["id"]) is None
+        assert not session.query(EntryItemMetric).filter_by(entry_item_id=dish["id"]).count()
+
+    last_dish = {**command, "item_id": remaining["id"], "revision": remaining["revision"]}
+    assert await mutate_diary(app, last_dish) == (409, {"error": "confirm_empty_entry"})
+    status, after = await mutate_diary(app, {**last_dish, "confirm_delete": True})
+    assert status == 200
+    assert all(meal["id"] != ids["target"] for day in after["days"] for meal in day["meals"])
+    with factory() as session:
+        assert session.get(Entry, ids["target"]) is None
+        assert session.get(EntryItem, remaining["id"]) is None
 
 
 async def test_move_from_multiple_dishes_keeps_the_source_entry(editable_diary):

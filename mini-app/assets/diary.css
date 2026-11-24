@@ -15,6 +15,7 @@
   --protein: light-dark(#6745b3, #bcadff);
   --fat: light-dark(#a4491e, #ffad7d);
   --carbs: light-dark(#225bb0, #86b8ff);
+  --fiber: light-dark(#626b24, #c1ca6d);
   --selection: light-dark(#e2eaf2, #2c3c50);
   --panel: light-dark(#eef2f6, #222c3a);
   --action: light-dark(#233e63, #adc9ef);
@@ -40,6 +41,7 @@
 #diary-trends .range { fill: var(--band); fill-opacity: .78; }
 #diary-trends .weekend-zone { fill: var(--selection); opacity: .44; }
 #diary-trends .limit-line { stroke: var(--threshold); stroke-width: 1; stroke-dasharray: 3 3; }
+#diary-trends .goal-mark { stroke: var(--ink); stroke-width: 2; stroke-linecap: round; }
 #diary-trends .focus-column {
   position: absolute; z-index: 1; left: var(--selected, 90%); top: 0; bottom: 1px; width: 20px;
   transform: translateX(-50%); border-radius: 8px; background: var(--selection);
@@ -50,6 +52,7 @@
 #diary-trends .protein { --series: var(--protein); }
 #diary-trends .fat { --series: var(--fat); }
 #diary-trends .carbs { --series: var(--carbs); }
+#diary-trends .fiber { --series: var(--fiber); }
 #diary-trends .series.kcal { stroke-width: 2.8; }
 #diary-trends .series.highlighted { stroke-width: 3.5; }
 #diary-trends :is(.series,.point).subdued { opacity: .25; }
@@ -69,21 +72,23 @@
 #diary-trends .legend i { width: 13px; height: 3px; border-radius: 2px; background: var(--series); }
 #diary-trends .notes { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: var(--muted); }
 #diary-trends .band-key { width: 13px; height: 7px; background: var(--band); border-block: 1px dashed var(--threshold); }
+#diary-trends .goal-key { width: 13px; border-top: 2px solid var(--ink); }
 #diary-trends .dash-key { width: 13px; border-top: 2px dotted var(--muted); }
-#diary-trends .meals { margin-top: 13px; }
-#diary-trends .meals ul { padding: 4px 0 0; list-style: none; }
-#diary-trends .meal { border-top: 1px solid var(--rule); padding: 10px 0 8px; }
+#diary-trends .meals { margin-top: 10px; }
+#diary-trends .meals ul { padding: 2px 0 0; list-style: none; }
+#diary-trends .meal { border-top: 1px solid var(--rule); padding: 6px 0 4px; }
 #diary-trends .meal h2, #diary-trends .dish {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px;
   align-items: baseline;
 }
 #diary-trends .meal h2 { font-size: 13px; font-weight: 650; }
 #diary-trends .dish {
-  width: 100%; border: 0; padding: 6px 0 6px 10px; min-height: 34px;
+  width: 100%; border: 0; padding: 4px 0 4px 8px; min-height: 30px;
   border-radius: 6px; background: transparent; color: var(--ink);
   font: inherit; text-align: left; cursor: pointer;
 }
-#diary-trends .dish span:first-child { overflow-wrap: anywhere; }
+#diary-trends .dish-name { overflow-wrap: anywhere; }
+#diary-trends .portion { color: var(--muted); font-size: 12px; white-space: nowrap; }
 #diary-trends .dish[aria-expanded="true"] { background: var(--panel); }
 #diary-trends .dish .amount::after { content: "›"; margin-left: 7px; }
 #diary-trends .amount { font-size: 12px; color: var(--muted); white-space: nowrap; }
@@ -110,6 +115,8 @@
   padding: 4px 8px; background: var(--page); color: var(--ink); font: inherit;
 }
 #diary-trends .dish-panel button.primary { border-color: transparent; background: var(--action); color: var(--on-action); }
+#diary-trends .dish-panel button.danger { color: var(--warning); }
+#diary-trends .dish-panel button.danger[type="submit"] { border-color: currentColor; }
 #diary-trends .dish-panel button:not(:disabled) { cursor: pointer; }
 #diary-trends .dish-panel :disabled { opacity: .55; }
 #diary-trends .dish-panel label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
@@ -123,5 +130,6 @@
 #diary-trends .dish-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 8px; }
 #diary-trends .dish-warning { margin-top: 6px; color: var(--warning); font-size: 12px; }
 @media (pointer: coarse) {
-  #diary-trends :is(.dish,.legend button,.dish-panel button) { min-height: 44px; }
+  #diary-trends .dish { min-height: 36px; }
+  #diary-trends :is(.legend button,.dish-panel button) { min-height: 44px; }
 }

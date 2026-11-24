@@ -12,6 +12,7 @@ from food_registry_bot.config import get_settings
 from food_registry_bot.db.session import create_session_factory
 from food_registry_bot.extraction.factory import create_extraction_service
 from food_registry_bot.mini_app import MINI_APP_PORT, create_diary_app
+from food_registry_bot.mini_app_entries import MiniAppEntryWriter
 from food_registry_bot.nutrition.factory import create_nutrition_service
 from food_registry_bot.runtime_state import (
     RestartMarker,
@@ -99,10 +100,17 @@ async def run() -> None:
     diary_runner = None
     try:
         session_factory = create_session_factory()
+        extraction_service = create_extraction_service(settings)
+        nutrition_service = create_nutrition_service(settings)
+        conversation_service = create_conversation_service(settings)
         if settings.mini_app_url:
             diary_runner = web.AppRunner(
                 create_diary_app(
-                    session_factory, token=settings.bot_token, admin_user_ids=settings.admin_user_ids
+                    session_factory, token=settings.bot_token, admin_user_ids=settings.admin_user_ids,
+                    write_entry=MiniAppEntryWriter(
+                        session_factory, settings, extraction_service, nutrition_service,
+                        conversation_service,
+                    ).write,
                 ),
                 access_log=None,
             )
@@ -116,9 +124,9 @@ async def run() -> None:
         )
         dispatcher = create_dispatcher(
             session_factory,
-            extraction_service=create_extraction_service(settings),
-            nutrition_service=create_nutrition_service(settings),
-            conversation_service=create_conversation_service(settings),
+            extraction_service=extraction_service,
+            nutrition_service=nutrition_service,
+            conversation_service=conversation_service,
             admin_user_ids=settings.admin_user_ids,
             settings=settings,
             app_version=settings.app_version,

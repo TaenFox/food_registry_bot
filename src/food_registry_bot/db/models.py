@@ -356,6 +356,14 @@ class EntryItem(Base):
     )
 
 
+class MiniAppEntrySubmission(Base):
+    __tablename__ = "mini_app_entry_submissions"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+
+
 class SupportedDiet(Base):
     __tablename__ = "supported_diets"
 

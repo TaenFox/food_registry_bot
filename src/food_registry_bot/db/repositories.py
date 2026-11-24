@@ -50,6 +50,14 @@ SUPPORTED_SUMMARY_DISPLAY_MODES = ("text", "bars")
 SUPPORTED_REPORT_GOAL_TOLERANCE_PERCENTS = (5, 10, 15, 20)
 SUPPORTED_REPORT_NOTICEABLE_ENTRY_PERCENTILES = (70, 75, 80, 85, 90, 95)
 SUPPORTED_GOAL_METRIC_CODES = ("calories", "protein", "fat", "carbs", "fiber", "water")
+GOAL_FIELDS = {
+    "calories": "calorie_goal",
+    "protein": "protein_goal",
+    "fat": "fat_goal",
+    "carbs": "carbs_goal",
+    "fiber": "fiber_goal",
+    "water": "water_goal",
+}
 DEFAULT_DAILY_GOALS = {
     "calories": 1800,
     "protein": 90,
@@ -57,6 +65,15 @@ DEFAULT_DAILY_GOALS = {
     "carbs": 210,
     "fiber": 25,
     "water": 2000,
+}
+DEFAULT_SUMMARY_PREFERENCES = {
+    **{f"show_{code}": True for code in SUPPORTED_GOAL_METRIC_CODES},
+    "show_day_progress_bar": False,
+    "show_post_entry_delta_suffix": True,
+    "summary_display_mode": "text",
+    "nutrition_day_start_hour": 4,
+    "report_goal_tolerance_percent": 10,
+    "report_noticeable_entry_percentile": 80,
 }
 USER_CONTEXT_COMMENT_ENCRYPTED_PREFIX = "enc:"
 
@@ -645,24 +662,13 @@ class UserSummaryPreferenceRepository:
         if preference is not None:
             return preference, False
 
-        preference = UserSummaryPreference(
-            user_id=user_id,
-            show_calories=True,
-            show_protein=True,
-            show_fat=True,
-            show_carbs=True,
-            show_fiber=True,
-            show_water=True,
-            show_day_progress_bar=False,
-            show_post_entry_delta_suffix=True,
-            summary_display_mode="text",
-            nutrition_day_start_hour=4,
-            report_goal_tolerance_percent=10,
-            report_noticeable_entry_percentile=80,
+        preference = insert_if_absent(
+            self._session, UserSummaryPreference,
+            {"user_id": user_id, **DEFAULT_SUMMARY_PREFERENCES}, ("user_id",),
         )
-        self._session.add(preference)
-        self._session.flush()
-        return preference, True
+        if preference is not None:
+            return preference, True
+        return self.get_by_user_id(user_id), False
 
     def set_metric_visibility(
         self,
@@ -748,7 +754,7 @@ class UserSummaryPreferenceRepository:
             raise ValueError(f"Unsupported summary preference metric code: {metric_code}") from exc
 
 
-def _insert_goal_if_absent(session: Session, model, values: dict, unique_fields: tuple[str, ...]):
+def insert_if_absent(session: Session, model, values: dict, unique_fields: tuple[str, ...]):
     insert = sqlite_insert if session.get_bind().dialect.name == "sqlite" else postgres_insert
     statement = insert(model).values(**values).on_conflict_do_nothing(index_elements=unique_fields)
     return session.scalar(statement.returning(model))
@@ -767,18 +773,12 @@ class UserGoalPreferenceRepository:
         if preference is not None:
             return preference, False
 
-        preference = _insert_goal_if_absent(
+        preference = insert_if_absent(
             self._session,
             UserGoalPreference,
-            {
-                "user_id": user_id,
-                "calorie_goal": DEFAULT_DAILY_GOALS["calories"],
-                "protein_goal": DEFAULT_DAILY_GOALS["protein"],
-                "fat_goal": DEFAULT_DAILY_GOALS["fat"],
-                "carbs_goal": DEFAULT_DAILY_GOALS["carbs"],
-                "fiber_goal": DEFAULT_DAILY_GOALS["fiber"],
-                "water_goal": DEFAULT_DAILY_GOALS["water"],
-            },
+            {"user_id": user_id, **{
+                field: DEFAULT_DAILY_GOALS[code] for code, field in GOAL_FIELDS.items()
+            }},
             ("user_id",),
         )
         if preference is not None:
@@ -804,16 +804,8 @@ class UserGoalPreferenceRepository:
 
     @staticmethod
     def _resolve_goal_attribute(metric_code: str) -> str:
-        attribute_names = {
-            "calories": "calorie_goal",
-            "protein": "protein_goal",
-            "fat": "fat_goal",
-            "carbs": "carbs_goal",
-            "fiber": "fiber_goal",
-            "water": "water_goal",
-        }
         try:
-            return attribute_names[metric_code]
+            return GOAL_FIELDS[metric_code]
         except KeyError as exc:
             raise ValueError(f"Unsupported goal metric code: {metric_code}") from exc
 
@@ -848,7 +840,7 @@ class DailyGoalSnapshotRepository:
         fiber_goal: int,
         water_goal: int,
     ) -> DailyGoalSnapshot:
-        snapshot = _insert_goal_if_absent(
+        snapshot = insert_if_absent(
             self._session,
             DailyGoalSnapshot,
             {
@@ -1347,14 +1339,14 @@ class UserDietPreferenceRepository:
         if preference is not None:
             return preference, False
 
-        preference = UserDietPreference(
-            user_id=user_id,
-            diet_id=diet_id,
-            is_enabled=False,
+        preference = insert_if_absent(
+            self._session, UserDietPreference,
+            {"user_id": user_id, "diet_id": diet_id, "is_enabled": False},
+            ("user_id", "diet_id"),
         )
-        self._session.add(preference)
-        self._session.flush()
-        return preference, True
+        if preference is not None:
+            return preference, True
+        return self.get_by_user_and_diet(user_id=user_id, diet_id=diet_id), False
 
     def set_enabled(
         self,

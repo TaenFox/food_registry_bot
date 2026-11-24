@@ -13,6 +13,7 @@ def test_core_tables_registered() -> None:
         "daily_goal_snapshots",
         "entries",
         "entry_items",
+        "mini_app_entry_submissions",
         "supported_diets",
         "user_diet_preferences",
         "supported_metrics",

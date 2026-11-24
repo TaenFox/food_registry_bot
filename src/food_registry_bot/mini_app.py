@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 from aiogram.utils.web_app import safe_parse_webapp_init_data
@@ -14,12 +15,12 @@ from food_registry_bot.db.models import Entry, User
 from food_registry_bot.db.repositories import (
     DailyGoalSnapshotRepository,
     EntryRepository,
+    GOAL_FIELDS,
     SUPPORTED_GOAL_METRIC_CODES,
     UserRepository,
     UserSummaryPreferenceRepository,
 )
 from food_registry_bot.diary_editing import (
-    DIARY_METRICS,
     DIARY_MUTATION,
     DiaryEditError,
     DiaryMutation,
@@ -27,6 +28,8 @@ from food_registry_bot.diary_editing import (
     dish_metric_values,
     dish_revision,
 )
+from food_registry_bot.mini_app_entries import CreateMiniAppEntry, MiniAppEntryError
+from food_registry_bot.mini_app_settings import SettingsPatch, apply_settings, read_settings
 from food_registry_bot.nutrition.contract import SUPPORTED_NUTRITION_METRIC_CODES
 from food_registry_bot.nutrition.daily_summary import (
     resolve_day_bounds_utc,
@@ -42,12 +45,6 @@ from food_registry_bot.nutrition.workout_credit import DailyWorkoutCalorieCredit
 MINI_APP_PORT = 8081
 INIT_DATA_MAX_AGE = timedelta(hours=1)
 INIT_DATA_CLOCK_SKEW = timedelta(seconds=30)
-GOAL_FIELDS = {
-    "calories": "calorie_goal",
-    "protein": "protein_goal",
-    "fat": "fat_goal",
-    "carbs": "carbs_goal",
-}
 
 
 def metric_total(dishes: list[dict], code: str) -> dict:
@@ -70,11 +67,11 @@ def meal_data(entry: Entry, user_timezone: ZoneInfo) -> dict:
                 "unit": item.unit,
                 "revision": dish_revision(item, values),
                 "calories": values.get("calories"),
-                "metrics": {code: values.get(code) for code in DIARY_METRICS},
+                "metrics": {code: values.get(code) for code in SUPPORTED_NUTRITION_METRIC_CODES},
                 "complete": all(code in values for code in SUPPORTED_NUTRITION_METRIC_CODES),
             }
         )
-    totals = {code: metric_total(dishes, code) for code in DIARY_METRICS}
+    totals = {code: metric_total(dishes, code) for code in SUPPORTED_NUTRITION_METRIC_CODES}
     occurred_at = entry.occurred_at
     if occurred_at.tzinfo is None:
         occurred_at = occurred_at.replace(tzinfo=timezone.utc)
@@ -93,7 +90,8 @@ def read_diary(session: Session, user: User, now: datetime) -> dict:
     start_hour = preference.nutrition_day_start_hour if preference is not None else 4
     tolerance = preference.report_goal_tolerance_percent if preference is not None else 10
     metrics = [
-        code for code in GOAL_FIELDS if preference is None or getattr(preference, f"show_{code}")
+        code for code in SUPPORTED_NUTRITION_METRIC_CODES
+        if preference is None or getattr(preference, f"show_{code}")
     ]
     today = resolve_local_summary_date(
         reference_at=now, timezone_name=user.timezone, nutrition_day_start_hour=start_hour
@@ -143,14 +141,16 @@ def read_diary(session: Session, user: User, now: datetime) -> dict:
             {
                 "date": day.isoformat(),
                 "current": day == today,
-                "complete": all(meal["dishes"] for meal in meals)
-                and all(dish["complete"] for dish in dishes),
+                "complete": not metrics or (
+                    all(meal["dishes"] for meal in meals)
+                    and all(dish["metrics"][code] is not None for dish in dishes for code in metrics)
+                ),
                 "metrics": observations,
                 "meals": meals,
             }
         )
 
-    return {"metrics": metrics, "tolerance": tolerance, "days": days}
+    return {"metrics": metrics, "tolerance": tolerance, "days": days, "timezone": user.timezone}
 
 
 def read_report(session: Session, user: User, now: datetime, group_count: int) -> dict:
@@ -202,10 +202,12 @@ def read_report(session: Session, user: User, now: datetime, group_count: int) -
 
 
 def create_diary_app(
-    session_factory: sessionmaker[Session], *, token: str, admin_user_ids: tuple[int, ...]
+    session_factory: sessionmaker[Session], *, token: str, admin_user_ids: tuple[int, ...],
+    write_entry: Callable[[int, tuple[int, ...], CreateMiniAppEntry], date] | None = None,
 ) -> web.Application:
     def load(
-        telegram_user_id: int, now: datetime, command: DiaryMutation | None, group_count: int | None
+        telegram_user_id: int, now: datetime, path: str,
+        command: DiaryMutation | SettingsPatch | None, group_count: int | None,
     ) -> tuple[int, dict]:
         try:
             with session_factory.begin() as session:
@@ -214,6 +216,10 @@ def create_diary_app(
                 user = UserRepository(session).get_by_telegram_user_id(telegram_user_id)
                 if user is None:
                     return 404, {"error": "profile_missing"}
+                if path == "/api/settings":
+                    if isinstance(command, SettingsPatch) and not apply_settings(session, user, command):
+                        return 422, {"error": "unknown_diet"}
+                    return 200, read_settings(session, user)
                 if group_count is not None:
                     return 200, read_report(session, user, now, group_count)
                 if command is not None:
@@ -227,6 +233,22 @@ def create_diary_app(
     def response(status: int, payload: dict) -> web.Response:
         return web.json_response(payload, status=status, headers={"Cache-Control": "no-store"})
 
+    async def create_entry(request: web.Request, telegram_user_id: int) -> web.Response:
+        invalid = {"error": "invalid_entry"}
+        if request.content_type != "application/json":
+            return response(415, invalid)
+        try:
+            command = CreateMiniAppEntry.model_validate_json(await request.read())
+        except ValidationError:
+            return response(400, invalid)
+        if write_entry is None:
+            return response(503, {"error": "entry_provider_unavailable"})
+        try:
+            summary_date = await asyncio.to_thread(write_entry, telegram_user_id, admin_user_ids, command)
+        except MiniAppEntryError as exc:
+            return response(exc.status, {"error": exc.code})
+        return response(200, {"summary_date": summary_date.isoformat()})
+
     async def mini_app_request(request: web.Request) -> web.Response:
         scheme, _, init_data = request.headers.get("Authorization", "").partition(" ")
         now = datetime.now(timezone.utc)
@@ -239,6 +261,8 @@ def create_diary_app(
                 pass
             else:
                 if authenticated.user and -INIT_DATA_CLOCK_SKEW <= age <= INIT_DATA_MAX_AGE:
+                    if request.path == "/api/entries":
+                        return await create_entry(request, authenticated.user.id)
                     command = None
                     group_count = None
                     if request.path == "/api/report":
@@ -247,14 +271,20 @@ def create_diary_app(
                             return response(400, {"error": "invalid_group_count"})
                         group_count = int(groups)
                     elif request.method == "POST":
+                        is_settings = request.path == "/api/settings"
+                        error = {"error": "invalid_settings" if is_settings else "invalid_edit"}
                         if request.content_type != "application/json":
-                            return response(415, {"error": "invalid_edit"})
+                            return response(415, error)
                         try:
-                            command = DIARY_MUTATION.validate_json(await request.read())
+                            body = await request.read()
+                            command = (
+                                SettingsPatch.model_validate_json(body)
+                                if is_settings else DIARY_MUTATION.validate_json(body)
+                            )
                         except ValidationError:
-                            return response(400, {"error": "invalid_edit"})
+                            return response(400, error)
                     status, payload = await asyncio.to_thread(
-                        load, authenticated.user.id, now, command, group_count
+                        load, authenticated.user.id, now, request.path, command, group_count
                     )
                     if status == 200:
                         payload["expires_in_ms"] = int(
@@ -267,4 +297,7 @@ def create_diary_app(
     app.router.add_get("/api/diary", mini_app_request, allow_head=False)
     app.router.add_post("/api/diary", mini_app_request)
     app.router.add_get("/api/report", mini_app_request, allow_head=False)
+    app.router.add_get("/api/settings", mini_app_request, allow_head=False)
+    app.router.add_post("/api/settings", mini_app_request)
+    app.router.add_post("/api/entries", mini_app_request)
     return app
