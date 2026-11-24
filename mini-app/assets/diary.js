@@ -18,12 +18,15 @@ const actionStatus = document.querySelector("#action-status");
 const screenNavigation = document.querySelector("#screen-navigation");
 const screenPicker = screenNavigation.querySelector(".screen-picker");
 const screenOptions = screenNavigation.querySelector("#screen-options");
-const metricLabels = {
+const entryButton = screenNavigation.querySelector(".entry-open");
+const entryFeedback = document.querySelector("#entry-feedback");
+const editableMetricLabels = {
     calories: "Калории",
     protein: "Белки",
     fat: "Жиры",
     carbs: "Углеводы",
 };
+const metricLabels = { ...editableMetricLabels, fiber: "Клетчатка" };
 const portionUnits = { g: "г", ml: "мл" };
 const formatter = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
 const fullDate = new Intl.DateTimeFormat("ru", { day: "numeric", month: "long", timeZone: "UTC" });
@@ -37,6 +40,7 @@ let expiryTimer;
 let openedDish;
 let savingDish = false;
 let activeScreen = "diary";
+let diaryStale = false;
 
 function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -138,7 +142,7 @@ function renderChart() {
     chartEmpty.hidden = values.length > 0;
     chartEmpty.textContent = model.metrics.length
         ? "Пока нет данных для сравнения с целями."
-        : "Включите показатели КБЖУ в настройках бота.";
+        : "Включите показатели питания в настройках.";
     thresholdKey.hidden = !model.metrics.length;
     thresholdKey.lastElementChild.textContent = `Допуск ${thresholdLow}–${thresholdHigh}%`;
     goalKey.hidden = !hasGoals;
@@ -243,9 +247,9 @@ function editDishForm(meal, dish) {
     const basis = element("legend");
     const fields = element("div", undefined, "dish-fields");
     const initial = {};
-    for (const code of Object.keys(metricLabels)) {
+    for (const code of Object.keys(editableMetricLabels)) {
         const unit = code === "calories" ? "ккал" : "г";
-        fields.append(numberField(`${metricLabels[code]}, ${unit}`, code));
+        fields.append(numberField(`${editableMetricLabels[code]}, ${unit}`, code));
     }
     fieldset.append(basis, fields);
     form.append(fieldset, formActions(dish.id, "Сохранить"));
@@ -256,7 +260,7 @@ function editDishForm(meal, dish) {
         quantityLabel.textContent = `${isVolume ? "Объём" : "Вес"}, ${unit}`;
         quantity.value = savedQuantity ?? "";
         basis.textContent = `КБЖУ на 100 ${unit}`;
-        for (const code of Object.keys(metricLabels)) {
+        for (const code of Object.keys(editableMetricLabels)) {
             const value = savedQuantity && dish.metrics[code] !== null
                 ? Number((dish.metrics[code] * 100 / savedQuantity).toFixed(4))
                 : undefined;
@@ -270,7 +274,7 @@ function editDishForm(meal, dish) {
         event.preventDefault();
         const data = new FormData(form);
         const per100 = {};
-        for (const code of Object.keys(metricLabels)) {
+        for (const code of Object.keys(editableMetricLabels)) {
             const value = Number(data.get(code));
             if (initial[code] !== value) per100[code] = value;
         }
@@ -355,7 +359,7 @@ function dishPanel(day, meal, dish) {
 }
 
 function renderMeals(day) {
-    const code = selectedMetric || "calories";
+    const code = selectedMetric || model.metrics[0];
     mealList.replaceChildren();
     if (!day.complete) {
         mealList.append(element("p", "У части записей неполные данные о питании.", "meal-note"));
@@ -369,10 +373,13 @@ function renderMeals(day) {
         const heading = element("h2");
         const time = element("time", meal.time);
         time.dateTime = meal.time;
-        const summary = meal.totals[code];
-        const total = formatAmount(summary.value, code);
-        heading.append(time, element("span", summary.complete || summary.value === null
-            ? total : total + " · неполные данные"));
+        heading.append(time);
+        if (code) {
+            const summary = meal.totals[code];
+            const total = formatAmount(summary.value, code);
+            heading.append(element("span", summary.complete || summary.value === null
+                ? total : total + " · неполные данные"));
+        }
         header.append(heading);
         const list = element("ul");
         for (const dish of meal.dishes) {
@@ -392,7 +399,9 @@ function renderMeals(day) {
             if (unit && dish.quantity > 0) {
                 name.append(element("span", ` · ${formatter.format(dish.quantity)} ${portionUnits[unit]}`, "portion"));
             }
-            control.append(name, element("span", formatAmount(dish.metrics[code], code), "amount"));
+            control.append(name, element(
+                "span", code ? formatAmount(dish.metrics[code], code) : "", "amount"
+            ));
             row.append(control);
             if (expanded) row.append(dishPanel(day, meal, dish));
             list.append(row);
@@ -466,6 +475,10 @@ function clearDiary(message) {
     openedDish = undefined;
     clearTimeout(expiryTimer);
     reportView.close();
+    settingsView.clear();
+    entryView.clear();
+    entryFeedback.hidden = true;
+    entryFeedback.textContent = "";
     showScreenOptions(false);
     mealList.replaceChildren();
     chart.replaceChildren();
@@ -516,16 +529,15 @@ function handleAccessError({ response, payload }) {
     return true;
 }
 
-function installDiary({ payload, requestedAt }) {
+function installDiary({ payload, requestedAt }, preferredDate = model?.days[selectedDay]?.date) {
     if (!Number.isFinite(payload.expires_in_ms)) throw new Error("Missing authorization expiry");
-    const previousDate = model?.days[selectedDay]?.date;
     model = payload;
     expiresAt = requestedAt + model.expires_in_ms;
     if (expire()) return;
     clearTimeout(expiryTimer);
     expiryTimer = setTimeout(expire, expiresAt - Date.now());
     if (!model.metrics.includes(selectedMetric)) selectedMetric = undefined;
-    const previousIndex = model.days.findIndex(day => day.date === previousDate);
+    const previousIndex = model.days.findIndex(day => day.date === preferredDate);
     renderChart();
     renderControls();
     selectDay(previousIndex >= 0 ? previousIndex : model.days.findIndex(day => day.current));
@@ -538,6 +550,7 @@ function installDiary({ payload, requestedAt }) {
 async function saveDish(form, command, successMessage) {
     if (savingDish || expire()) return;
     savingDish = true;
+    setNavigationBusy(true);
     setActionStatus("Сохраняю…");
     const controls = [...form.elements];
     controls.forEach(control => { control.disabled = true; });
@@ -570,7 +583,22 @@ async function saveDish(form, command, successMessage) {
         if (model) setActionStatus("Не удалось подтвердить сохранение. Попробуйте ещё раз.");
     } finally {
         savingDish = false;
+        setNavigationBusy(false);
         controls.forEach(control => { control.disabled = false; });
+    }
+}
+
+async function refreshDiary(preferredDate) {
+    diaryStale = true;
+    try {
+        const result = await diaryRequest();
+        if (expire() || handleAccessError(result)) return;
+        if (!result.response.ok) throw new Error("Diary refresh failed");
+        installDiary(result, preferredDate);
+        diaryStale = false;
+        setActionStatus("");
+    } catch {
+        if (model) setActionStatus("Не удалось обновить дневник. Откройте раздел ещё раз.");
     }
 }
 
@@ -597,10 +625,54 @@ function showScreenOptions(open) {
     screenPicker.setAttribute("aria-expanded", String(open));
 }
 
+function setNavigationBusy(busy) {
+    screenPicker.disabled = busy;
+    entryButton.disabled = busy;
+    if (busy) showScreenOptions(false);
+}
+
+function entryDefaults() {
+    const day = model.days[selectedDay];
+    if (activeScreen === "diary" && day && !day.current) {
+        return { date: day.date, time: "12:00" };
+    }
+    const now = new Intl.DateTimeFormat("en-CA", {
+        timeZone: model.timezone, year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    }).formatToParts(new Date());
+    const parts = Object.fromEntries(now.map(({ type, value }) => [type, value]));
+    return { date: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}` };
+}
+
 const reportView = createReportView({
     request: (groups, signal) => miniAppRequest("/api/report?groups=" + groups, { signal }),
     handleAccessError,
     expire,
+});
+const settingsView = createSettingsView({
+    request: options => miniAppRequest("/api/settings", options),
+    handleAccessError,
+    expire,
+    setBusy: setNavigationBusy,
+    refreshDiary,
+});
+const entryView = createEntryView({
+    request: command => miniAppRequest("/api/entries", { command }),
+    handleAccessError,
+    expire,
+    defaults: entryDefaults,
+    async onSaved(summaryDate) {
+        entryFeedback.textContent = "Запись добавлена · " + fullDate.format(new Date(summaryDate));
+        entryFeedback.hidden = false;
+        await refreshDiary(summaryDate);
+        if (activeScreen === "report" && model) reportView.open();
+    },
+});
+
+entryButton.addEventListener("click", () => {
+    if (!model || entryButton.disabled || expire()) return;
+    showScreenOptions(false);
+    entryView.open();
 });
 
 screenPicker.addEventListener("click", () => {
@@ -608,7 +680,7 @@ screenPicker.addEventListener("click", () => {
 });
 screenOptions.addEventListener("click", event => {
     const option = event.target.closest("[data-screen]");
-    if (!option || expire()) return;
+    if (!option || screenPicker.disabled || expire()) return;
     showScreenOptions(false);
     screenPicker.focus();
     if (activeScreen === option.dataset.screen) return;
@@ -618,8 +690,11 @@ screenOptions.addEventListener("click", event => {
     option.setAttribute("aria-current", "page");
     screenPicker.firstElementChild.textContent = option.textContent;
     diary.hidden = activeScreen !== "diary";
-    if (diary.hidden) reportView.open();
+    if (activeScreen === "report") reportView.open();
     else reportView.close();
+    if (activeScreen === "settings") settingsView.open();
+    else settingsView.close();
+    if (activeScreen === "diary" && diaryStale) refreshDiary();
     window.scrollTo(0, 0);
 });
 document.addEventListener("click", event => {

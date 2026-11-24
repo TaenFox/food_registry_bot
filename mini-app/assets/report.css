@@ -20,7 +20,6 @@
 #diary, #report { padding-bottom: 14px; }
 
 #report {
-  --fiber: light-dark(#626b24, #c1ca6d);
   --water: light-dark(#246784, #88cfe8);
 }
 
@@ -31,6 +30,7 @@
   border: 0;
   cursor: pointer;
 }
+#screen-navigation button:disabled { opacity: .55; cursor: default; }
 
 #screen-navigation .screen-picker {
   flex: 1;

@@ -15,6 +15,7 @@
   --protein: light-dark(#6745b3, #bcadff);
   --fat: light-dark(#a4491e, #ffad7d);
   --carbs: light-dark(#225bb0, #86b8ff);
+  --fiber: light-dark(#626b24, #c1ca6d);
   --selection: light-dark(#e2eaf2, #2c3c50);
   --panel: light-dark(#eef2f6, #222c3a);
   --action: light-dark(#233e63, #adc9ef);
@@ -51,6 +52,7 @@
 #diary-trends .protein { --series: var(--protein); }
 #diary-trends .fat { --series: var(--fat); }
 #diary-trends .carbs { --series: var(--carbs); }
+#diary-trends .fiber { --series: var(--fiber); }
 #diary-trends .series.kcal { stroke-width: 2.8; }
 #diary-trends .series.highlighted { stroke-width: 3.5; }
 #diary-trends :is(.series,.point).subdued { opacity: .25; }

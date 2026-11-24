@@ -7,8 +7,12 @@
   <title>Дневник питания</title>
   <link rel="stylesheet" href="assets/diary.css">
   <link rel="stylesheet" href="assets/report.css">
+  <link rel="stylesheet" href="assets/settings.css">
+  <link rel="stylesheet" href="assets/entry.css">
   <script defer src="https://telegram.org/js/telegram-web-app.js"></script>
   <script defer src="assets/report.js"></script>
+  <script defer src="assets/settings.js"></script>
+  <script defer src="assets/entry.js"></script>
   <script defer src="assets/diary.js"></script>
 </head>
 <body id="diary-trends">
@@ -16,13 +20,13 @@
     <p id="status" role="status">Загрузка…</p>
     <article id="diary" aria-labelledby="diary-date" hidden>
       <h1 id="diary-date"><time></time></h1>
-      <figure aria-label="Калории, белки, жиры и углеводы в процентах от целей выбранных дней">
+      <figure aria-label="Показатели питания в процентах от целей выбранных дней">
         <p class="unit">% от цели дня</p>
         <div class="graph">
           <div class="scale" aria-hidden="true"></div>
           <div class="plot">
             <div class="focus-column" aria-hidden="true"></div>
-            <svg viewBox="0 0 400 200" preserveAspectRatio="none" role="img" aria-label="Динамика КБЖУ. Точные значения доступны по датам и метрикам под графиком."></svg>
+            <svg viewBox="0 0 400 200" preserveAspectRatio="none" role="img" aria-label="Динамика показателей питания. Точные значения доступны по датам и метрикам под графиком."></svg>
           </div>
         </div>
         <div class="dates" role="group" aria-label="Выбрать пищевой день"></div>
@@ -77,15 +81,75 @@
         </section>
       </div>
     </article>
+    <article id="settings" aria-labelledby="settings-title" hidden>
+      <h1 id="settings-title">Настройки</h1>
+      <div class="settings-load">
+        <p role="status"></p>
+        <button type="button" class="settings-retry" hidden>Повторить</button>
+      </div>
+      <form hidden>
+        <fieldset class="settings-sections">
+          <legend class="settings-visually-hidden">Разделы настроек</legend>
+          <details name="settings-section" data-section="goals" open>
+            <summary><span class="settings-icon" aria-hidden="true">◎</span><span><strong>Дневные цели</strong><small>Калории, БЖУ, клетчатка и вода</small></span></summary>
+            <div class="settings-rows"></div>
+            <p class="settings-note">Цели, уже зафиксированные в дневнике, сохранятся.</p>
+          </details>
+          <details name="settings-section" data-section="metrics">
+            <summary><span class="settings-icon settings-icon-metrics" aria-hidden="true"></span><span><strong>Метрики</strong><small>Какие показатели отслеживать</small></span></summary>
+            <div class="settings-rows"></div>
+          </details>
+          <details name="settings-section" data-section="reports">
+            <summary><span class="settings-icon settings-icon-reports" aria-hidden="true"></span><span><strong>Отчёты</strong><small>Начало дня и допуск к цели</small></span></summary>
+            <div class="settings-rows"></div>
+          </details>
+          <details name="settings-section" data-section="display">
+            <summary><span class="settings-icon settings-icon-display" aria-hidden="true"></span><span><strong>Отображение в боте</strong><small>Формат итогов и ответы после записи</small></span></summary>
+            <div class="settings-rows"></div>
+          </details>
+          <details name="settings-section" data-section="diets">
+            <summary><span class="settings-icon settings-icon-diets" aria-hidden="true"></span><span><strong>Диеты</strong><small>Какие диетические оценки учитывать</small></span></summary>
+            <div class="settings-rows"></div>
+          </details>
+        </fieldset>
+        <div class="settings-actions">
+          <p class="settings-status" role="status"></p>
+          <button type="submit" class="settings-save" disabled>Сохранить изменения</button>
+        </div>
+      </form>
+    </article>
+    <p id="entry-feedback" role="status" hidden></p>
     <footer id="screen-navigation" aria-label="Навигация по приложению" hidden>
       <button type="button" class="screen-picker" aria-expanded="false" aria-controls="screen-options">
         <span>Дневник</span><i aria-hidden="true"></i>
       </button>
+      <button type="button" class="entry-open" aria-haspopup="dialog" aria-controls="entry-composer">
+        <span aria-hidden="true">+</span> Запись
+      </button>
       <nav id="screen-options" aria-label="Разделы приложения" hidden>
         <button type="button" data-screen="diary" aria-current="page">Дневник</button>
         <button type="button" data-screen="report">Отчёты</button>
+        <button type="button" data-screen="settings">Настройки</button>
       </nav>
     </footer>
+    <dialog id="entry-composer" aria-labelledby="entry-title">
+      <header>
+        <h2 id="entry-title">Новая запись</h2>
+        <button type="button" class="entry-close" aria-label="Закрыть форму">×</button>
+      </header>
+      <form>
+        <label>Что съели или выпили?
+          <textarea name="meal" rows="3" maxlength="800" required autofocus
+            placeholder="Гречка 150 г, курица 120 г, кофе 200 мл"></textarea>
+        </label>
+        <div class="entry-date-time">
+          <label>Дата<input type="date" name="local_date" required></label>
+          <label>Время<input type="time" name="local_time" required></label>
+        </div>
+        <p class="entry-status" role="status"></p>
+        <button type="submit" class="entry-submit">Записать</button>
+      </form>
+    </dialog>
   </main>
 </body>
 </html>
