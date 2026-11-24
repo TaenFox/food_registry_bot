@@ -511,6 +511,91 @@ async def test_edit_known_weight_scales_existing_fiber(editable_diary):
         assert next(metric.value for metric in item.metrics if metric.metric.code == "fiber") == 6
 
 
+async def test_edit_drink_preserves_saved_volume_and_scales_metrics(editable_diary):
+    factory, ids = editable_diary
+    with factory.begin() as session:
+        item = session.get(EntryItem, ids["target_dish"])
+        item.name = "кефир"
+        item.quantity = 250
+        item.unit = "мл"
+
+    app = create_diary_app(factory, token=TOKEN, admin_user_ids=())
+    _, before = await request_diary(app, init_data=telegram_init_data(1))
+    (dish,) = find_meal(before, ids["target"])["dishes"]
+    assert (dish["quantity"], dish["unit"]) == (250, "мл")
+    command = {
+        "action": "edit",
+        "entry_id": ids["target"],
+        "item_id": dish["id"],
+        "revision": dish["revision"],
+        "quantity": 500,
+        "unit": "ml",
+        "per_100": {"calories": 35},
+    }
+    assert await mutate_diary(app, {**command, "unit": "g"}) == (422, {"error": "missing_per_100g"})
+    status, after = await mutate_diary(app, command)
+
+    assert status == 200
+    (updated,) = find_meal(after, ids["target"])["dishes"]
+    assert (updated["quantity"], updated["unit"]) == (500, "ml")
+    assert updated["metrics"] == {"calories": 175, "protein": 20, "fat": 10, "carbs": 40}
+    with factory() as session:
+        item = session.get(EntryItem, dish["id"])
+        assert next(metric.value for metric in item.metrics if metric.metric.code == "fiber") == 8
+
+    status, converted = await mutate_diary(
+        app,
+        {
+            **command,
+            "revision": updated["revision"],
+            "quantity": 100,
+            "unit": "g",
+            "per_100": {"calories": 50, "protein": 2, "fat": 1, "carbs": 8},
+        },
+    )
+    assert status == 200
+    (updated,) = find_meal(converted, ids["target"])["dishes"]
+    assert (updated["quantity"], updated["unit"]) == (100, "g")
+    assert updated["metrics"] == {"calories": 50, "protein": 2, "fat": 1, "carbs": 8}
+
+
+async def test_delete_dish_removes_metrics_and_requires_confirmation_for_last_dish(editable_diary):
+    factory, ids = editable_diary
+    with factory.begin() as session:
+        session.add(EntryItem(entry_id=ids["target"], position=6, name="овощи"))
+    app = create_diary_app(factory, token=TOKEN, admin_user_ids=())
+    _, before = await request_diary(app, init_data=telegram_init_data(1))
+    dish, remaining = find_meal(before, ids["target"])["dishes"]
+    command = {
+        "action": "delete",
+        "entry_id": ids["target"],
+        "item_id": dish["id"],
+        "revision": dish["revision"],
+    }
+    assert await mutate_diary(app, {**command, "entry_id": ids["foreign"]}) == (
+        404,
+        {"error": "entry_missing"},
+    )
+    assert await mutate_diary(app, {**command, "revision": "0" * 32}) == (409, {"error": "dish_changed"})
+    status, after = await mutate_diary(app, command)
+
+    assert status == 200
+    assert find_meal(after, ids["target"])["dishes"] == [remaining]
+    assert find_meal(after, ids["target"])["totals"]["calories"]["value"] is None
+    with factory() as session:
+        assert session.get(EntryItem, dish["id"]) is None
+        assert not session.query(EntryItemMetric).filter_by(entry_item_id=dish["id"]).count()
+
+    last_dish = {**command, "item_id": remaining["id"], "revision": remaining["revision"]}
+    assert await mutate_diary(app, last_dish) == (409, {"error": "confirm_empty_entry"})
+    status, after = await mutate_diary(app, {**last_dish, "confirm_delete": True})
+    assert status == 200
+    assert all(meal["id"] != ids["target"] for day in after["days"] for meal in day["meals"])
+    with factory() as session:
+        assert session.get(Entry, ids["target"]) is None
+        assert session.get(EntryItem, remaining["id"]) is None
+
+
 async def test_move_from_multiple_dishes_keeps_the_source_entry(editable_diary):
     factory, ids = editable_diary
     with factory.begin() as session:

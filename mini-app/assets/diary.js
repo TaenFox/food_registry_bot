@@ -13,6 +13,7 @@ const mealList = document.querySelector(".meals");
 const detail = document.querySelector("#metric-detail");
 const chartEmpty = document.querySelector("#plot-empty");
 const thresholdKey = document.querySelector("#threshold-key");
+const goalKey = document.querySelector("#goal-key");
 const actionStatus = document.querySelector("#action-status");
 const screenNavigation = document.querySelector("#screen-navigation");
 const screenPicker = screenNavigation.querySelector(".screen-picker");
@@ -23,6 +24,7 @@ const metricLabels = {
     fat: "Жиры",
     carbs: "Углеводы",
 };
+const portionUnits = { g: "г", ml: "мл" };
 const formatter = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
 const fullDate = new Intl.DateTimeFormat("ru", { day: "numeric", month: "long", timeZone: "UTC" });
 const shortWeekday = new Intl.DateTimeFormat("ru", { weekday: "short", timeZone: "UTC" });
@@ -71,15 +73,16 @@ function renderChart() {
     const values = model.days.flatMap(day =>
         model.metrics.map(code => day.metrics[code].percent)
     ).filter(Number.isFinite);
-    const minimum = Math.max(0, Math.floor(Math.min(thresholdLow - 10, ...values) / 10) * 10);
     const maximum = Math.ceil(Math.max(thresholdHigh + 10, ...values) / 10) * 10;
-    const y = value => 12 + (maximum - value) / (maximum - minimum) * 176;
+    const y = value => 188 - value / maximum * 176;
+    let hasGoals = false;
 
     for (const [index, day] of model.days.entries()) {
         if (isWeekend(day)) {
             draw("rect", { x: x(index) - 40, y: 0, width: 80, height: 200 }, "weekend-zone");
         }
         if (model.metrics.some(code => day.metrics[code].goal !== null)) {
+            hasGoals = true;
             const left = x(index) - 34;
             draw("rect", {
                 x: left, y: y(thresholdHigh), width: 68, height: y(thresholdLow) - y(thresholdHigh),
@@ -87,10 +90,11 @@ function renderChart() {
             for (const threshold of [thresholdLow, thresholdHigh]) {
                 draw("line", { x1: left, x2: left + 68, y1: y(threshold), y2: y(threshold) }, "limit-line");
             }
+            draw("line", { x1: x(index) - 12, x2: x(index) + 12, y1: y(100), y2: y(100) }, "goal-mark");
         }
     }
 
-    const ticks = [maximum, thresholdHigh, thresholdLow, minimum];
+    const ticks = [maximum, thresholdHigh, thresholdLow, 0];
     let previousLabelY = -Infinity;
     for (const tick of ticks) {
         const isLimit = tick === thresholdHigh || tick === thresholdLow;
@@ -98,7 +102,7 @@ function renderChart() {
         if (!isLimit) {
             draw("line", { x1: 0, x2: 400, y1: position, y2: position }, "axis");
         }
-        if (position - previousLabelY >= 18) {
+        if (position - previousLabelY >= 18 && (!isLimit || y(0) - position >= 18)) {
             const label = element("span", tick + "%", isLimit ? "limit" : "");
             label.style.setProperty("--y", position / 2 + "%");
             scale.append(label);
@@ -137,6 +141,7 @@ function renderChart() {
         : "Включите показатели КБЖУ в настройках бота.";
     thresholdKey.hidden = !model.metrics.length;
     thresholdKey.lastElementChild.textContent = `Допуск ${thresholdLow}–${thresholdHigh}%`;
+    goalKey.hidden = !hasGoals;
 }
 
 function renderMetric() {
@@ -163,6 +168,12 @@ function formatAmount(value, code) {
     return value === null ? "—" : formatter.format(value) + " " + unit;
 }
 
+function portionUnit(unit) {
+    const normalized = unit?.trim().toLowerCase();
+    if (["g", "г", "гр"].includes(normalized)) return "g";
+    if (["ml", "мл"].includes(normalized)) return "ml";
+}
+
 function actionButton(label, handler, className) {
     const button = element("button", label, className);
     button.type = "button";
@@ -185,23 +196,22 @@ function closeDish(itemId) {
     focusDish(itemId);
 }
 
-function numberField(labelText, name, value) {
+function numberField(labelText, name) {
     const label = element("label", labelText);
     const input = element("input");
     input.type = "number";
     input.name = name;
-    input.min = name === "weight" ? "1" : "0";
-    input.step = name === "weight" ? "1" : "any";
+    input.min = name === "quantity" ? "1" : "0";
+    input.step = name === "quantity" ? "1" : "any";
     input.required = true;
-    if (value !== undefined) input.value = value;
     label.append(input);
     return label;
 }
 
-function formActions(itemId, label) {
+function formActions(itemId, label, className = "primary") {
     const actions = element("div", undefined, "dish-actions");
     const cancel = actionButton("Отмена", () => closeDish(itemId));
-    const submit = element("button", label, "primary");
+    const submit = element("button", label, className);
     submit.type = "submit";
     actions.append(cancel, submit);
     return actions;
@@ -209,37 +219,65 @@ function formActions(itemId, label) {
 
 function editDishForm(meal, dish) {
     const form = element("form");
-    const grams = ["g", "г", "гр"].includes(dish.unit?.trim().toLowerCase()) && dish.quantity > 0
-        ? dish.quantity : undefined;
-    form.append(numberField("Вес, г", "weight", grams));
-    if (!grams && dish.quantity != null && dish.unit) {
-        form.append(element("p", `Сохранено: ${dish.quantity} ${dish.unit === "ml" ? "мл" : dish.unit}`, "meal-note"));
+    const savedUnit = portionUnit(dish.unit);
+    const portion = element("div", undefined, "dish-fields");
+    const quantityField = numberField("", "quantity");
+    const quantityLabel = element("span");
+    const quantity = quantityField.querySelector("input");
+    quantityField.prepend(quantityLabel);
+    const unitField = element("label", "Единица");
+    const unitSelect = element("select");
+    for (const [unit, label] of Object.entries(portionUnits)) {
+        const option = element("option", label);
+        option.value = unit;
+        unitSelect.append(option);
+    }
+    unitSelect.value = savedUnit || "g";
+    unitField.append(unitSelect);
+    portion.append(quantityField, unitField);
+    form.append(portion);
+    if (!savedUnit && dish.quantity != null && dish.unit) {
+        form.append(element("p", `Сохранено: ${dish.quantity} ${dish.unit}`, "meal-note"));
     }
     const fieldset = element("fieldset");
-    fieldset.append(element("legend", "КБЖУ на 100 г"));
+    const basis = element("legend");
     const fields = element("div", undefined, "dish-fields");
     const initial = {};
     for (const code of Object.keys(metricLabels)) {
-        const value = grams && dish.metrics[code] !== null
-            ? Number((dish.metrics[code] * 100 / grams).toFixed(4))
-            : undefined;
-        initial[code] = value;
         const unit = code === "calories" ? "ккал" : "г";
-        fields.append(numberField(`${metricLabels[code]}, ${unit}`, code, value));
+        fields.append(numberField(`${metricLabels[code]}, ${unit}`, code));
     }
-    fieldset.append(fields);
+    fieldset.append(basis, fields);
     form.append(fieldset, formActions(dish.id, "Сохранить"));
+    const updatePortionFields = () => {
+        const isVolume = unitSelect.value === "ml";
+        const savedQuantity = unitSelect.value === savedUnit && dish.quantity > 0 ? dish.quantity : null;
+        const unit = portionUnits[unitSelect.value];
+        quantityLabel.textContent = `${isVolume ? "Объём" : "Вес"}, ${unit}`;
+        quantity.value = savedQuantity ?? "";
+        basis.textContent = `КБЖУ на 100 ${unit}`;
+        for (const code of Object.keys(metricLabels)) {
+            const value = savedQuantity && dish.metrics[code] !== null
+                ? Number((dish.metrics[code] * 100 / savedQuantity).toFixed(4))
+                : undefined;
+            initial[code] = value;
+            form.elements.namedItem(code).value = value ?? "";
+        }
+    };
+    unitSelect.addEventListener("change", updatePortionFields);
+    updatePortionFields();
     form.addEventListener("submit", event => {
         event.preventDefault();
         const data = new FormData(form);
-        const per100g = {};
+        const per100 = {};
         for (const code of Object.keys(metricLabels)) {
             const value = Number(data.get(code));
-            if (initial[code] !== value) per100g[code] = value;
+            if (initial[code] !== value) per100[code] = value;
         }
         saveDish(form, {
             action: "edit", entry_id: meal.id, item_id: dish.id,
-            revision: dish.revision, weight: Number(data.get("weight")), per_100g: per100g,
+            revision: dish.revision, quantity: Number(data.get("quantity")), unit: unitSelect.value,
+            per_100: per100,
         }, "Блюдо обновлено.");
     });
     return form;
@@ -273,12 +311,32 @@ function moveDishForm(day, meal, dish) {
     return form;
 }
 
+function deleteDishForm(meal, dish) {
+    const form = element("form");
+    const lastDish = meal.dishes.length === 1;
+    const warning = lastDish
+        ? `Удалить «${dish.name}» и запись в ${meal.time}? Восстановить их будет нельзя.`
+        : `Удалить «${dish.name}»? Восстановить блюдо будет нельзя.`;
+    form.append(element("p", warning, "dish-warning"));
+    form.append(formActions(dish.id, lastDish ? "Удалить запись" : "Удалить блюдо", "danger"));
+    form.addEventListener("submit", event => {
+        event.preventDefault();
+        saveDish(form, {
+            action: "delete", entry_id: meal.id, item_id: dish.id,
+            revision: dish.revision, confirm_delete: lastDish,
+        }, "Блюдо удалено.");
+    });
+    return form;
+}
+
 function dishPanel(day, meal, dish) {
     const panel = element("div", undefined, "dish-panel");
     if (openedDish.mode === "edit") {
         panel.append(editDishForm(meal, dish));
     } else if (openedDish.mode === "move") {
         panel.append(moveDishForm(day, meal, dish));
+    } else if (openedDish.mode === "delete") {
+        panel.append(deleteDishForm(meal, dish));
     } else {
         const actions = element("div", undefined, "dish-actions");
         const open = (mode, selector) => {
@@ -289,7 +347,8 @@ function dishPanel(day, meal, dish) {
         const edit = actionButton("Изменить", () => open("edit", "input"));
         const move = actionButton("Перенести", () => open("move", "select"));
         move.disabled = day.meals.length < 2;
-        actions.append(edit, move);
+        const remove = actionButton("Удалить", () => open("delete", ".dish-actions button"), "danger");
+        actions.append(edit, move, remove);
         panel.append(actions);
     }
     return panel;
@@ -328,7 +387,12 @@ function renderMeals(day) {
                 focusDish(dish.id, expanded ? ".dish" : ".dish-actions button");
             }, "dish");
             control.setAttribute("aria-expanded", String(expanded));
-            control.append(element("span", dish.name), element("span", formatAmount(dish.metrics[code], code), "amount"));
+            const name = element("span", dish.name, "dish-name");
+            const unit = portionUnit(dish.unit);
+            if (unit && dish.quantity > 0) {
+                name.append(element("span", ` · ${formatter.format(dish.quantity)} ${portionUnits[unit]}`, "portion"));
+            }
+            control.append(name, element("span", formatAmount(dish.metrics[code], code), "amount"));
             row.append(control);
             if (expanded) row.append(dishPanel(day, meal, dish));
             list.append(row);
@@ -484,15 +548,19 @@ async function saveDish(form, command, successMessage) {
             installDiary(result);
             if (!model) return;
             setActionStatus(successMessage);
-            focusDish(command.item_id);
+            if (command.action === "delete") {
+                dates.querySelector('[aria-pressed="true"]')?.focus({ preventScroll: true });
+            } else {
+                focusDish(command.item_id);
+            }
         } else if (result.response.status === 409 || result.response.status === 404) {
             const latest = await diaryRequest();
             if (handleAccessError(latest)) return;
             if (!latest.response.ok) throw new Error("Diary refresh failed");
             installDiary(latest);
             if (model) setActionStatus("Запись изменилась. Дневник обновлён, повторите действие.");
-        } else if (result.payload.error === "missing_per_100g") {
-            setActionStatus("Укажите все значения КБЖУ на 100 г.");
+        } else if (["missing_per_100g", "missing_per_100ml"].includes(result.payload.error)) {
+            setActionStatus(`Укажите все значения КБЖУ на 100 ${portionUnits[command.unit]}.`);
         } else if (result.payload.error === "different_food_day") {
             setActionStatus("Перенос доступен только внутри одного пищевого дня.");
         } else {

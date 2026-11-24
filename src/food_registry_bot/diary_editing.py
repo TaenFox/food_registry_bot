@@ -5,7 +5,7 @@ import json
 import math
 from typing import Annotated, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, TypeAdapter
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, FiniteFloat, TypeAdapter
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -15,7 +15,10 @@ from food_registry_bot.db.repositories import (
     EntryItemMetricValue,
     UserSummaryPreferenceRepository,
 )
-from food_registry_bot.nutrition.contract import SUPPORTED_NUTRITION_METRIC_CODES
+from food_registry_bot.nutrition.contract import (
+    SUPPORTED_NUTRITION_METRIC_CODES,
+    NutritionEstimationItemInput,
+)
 from food_registry_bot.nutrition.daily_summary import resolve_local_summary_date
 from food_registry_bot.nutrition.journal_adapter import preserve_entry_item_source_facts
 
@@ -37,7 +40,7 @@ class MoveDish(DiaryAction):
     confirm_delete: bool = False
 
 
-class Per100gValues(BaseModel):
+class Per100Values(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     calories: Optional[MetricValue] = None
@@ -46,14 +49,25 @@ class Per100gValues(BaseModel):
     carbs: Optional[MetricValue] = None
 
 
-class EditDish(DiaryAction):
-    action: Literal["edit"]
+class VersionedDishAction(DiaryAction):
     revision: str = Field(pattern=r"^[a-f0-9]{32}$")
-    weight: PositiveInteger
-    per_100g: Per100gValues = Field(default_factory=Per100gValues)
 
 
-DiaryMutation = Union[MoveDish, EditDish]
+class EditDish(VersionedDishAction):
+    action: Literal["edit"]
+    unit: Literal["g", "ml"] = "g"
+    quantity: PositiveInteger = Field(validation_alias=AliasChoices("quantity", "weight"))
+    per_100: Per100Values = Field(
+        default_factory=Per100Values, validation_alias=AliasChoices("per_100", "per_100g")
+    )
+
+
+class DeleteDish(VersionedDishAction):
+    action: Literal["delete"]
+    confirm_delete: bool = False
+
+
+DiaryMutation = Union[MoveDish, EditDish, DeleteDish]
 DIARY_MUTATION = TypeAdapter(Annotated[DiaryMutation, Field(discriminator="action")])
 
 
@@ -113,7 +127,9 @@ def apply_diary_mutation(session: Session, user: User, command: DiaryMutation) -
         if command.target_entry_id == command.entry_id:
             raise DiaryEditError(400, "same_entry")
         entry_ids.add(command.target_entry_id)
-    entries = _lock_entries(session, user.id, entry_ids, lock_metrics=isinstance(command, EditDish))
+    entries = _lock_entries(
+        session, user.id, entry_ids, lock_metrics=isinstance(command, VersionedDishAction)
+    )
     source = entries[command.entry_id]
     item = next((dish for dish in source.items if dish.id == command.item_id), None)
     if item is None:
@@ -121,8 +137,20 @@ def apply_diary_mutation(session: Session, user: User, command: DiaryMutation) -
 
     if isinstance(command, MoveDish):
         _move_dish(session, user, source, entries[command.target_entry_id], item, command)
+        return
+
+    values = dish_metric_values(item)
+    if dish_revision(item, values) != command.revision:
+        raise DiaryEditError(409, "dish_changed")
+    if isinstance(command, EditDish):
+        _edit_dish(session, source, item, values, command)
+    elif len(source.items) > 1:
+        preserve_entry_item_source_facts(source)
+        session.delete(item)
+    elif command.confirm_delete:
+        session.delete(source)
     else:
-        _edit_dish(session, source, item, command)
+        raise DiaryEditError(409, "confirm_empty_entry")
 
 
 def _move_dish(
@@ -156,20 +184,21 @@ def _move_dish(
         session.delete(source)
 
 
-def _edit_dish(session: Session, entry: Entry, item: EntryItem, command: EditDish) -> None:
-    values = dish_metric_values(item)
-    if dish_revision(item, values) != command.revision:
-        raise DiaryEditError(409, "dish_changed")
-
-    old_weight = item.quantity if (item.unit or "").strip().lower() in {"g", "г", "гр"} else None
-    if old_weight is not None and old_weight <= 0:
-        old_weight = None
-    overrides = command.per_100g.model_dump(exclude_none=True)
+def _edit_dish(
+    session: Session, entry: Entry, item: EntryItem, values: dict[str, float], command: EditDish
+) -> None:
+    old_unit = NutritionEstimationItemInput.normalize_unit(item.unit)
+    old_quantity = (
+        item.quantity
+        if old_unit == command.unit and item.quantity is not None and item.quantity > 0
+        else None
+    )
+    overrides = command.per_100.model_dump(exclude_none=True)
     if any(
-        code not in overrides and (old_weight is None or code not in values)
+        code not in overrides and (old_quantity is None or code not in values)
         for code in DIARY_METRICS
     ):
-        raise DiaryEditError(422, "missing_per_100g")
+        raise DiaryEditError(422, f"missing_per_100{command.unit}")
 
     current_metrics = {
         metric.metric.code: metric for metric in item.metrics if metric.metric is not None
@@ -177,9 +206,9 @@ def _edit_dish(session: Session, entry: Entry, item: EntryItem, command: EditDis
     updates = []
     for code in SUPPORTED_NUTRITION_METRIC_CODES:
         if code in overrides:
-            value, confidence = overrides[code] * (command.weight / 100), "high"
-        elif old_weight is not None and old_weight != command.weight and code in values:
-            value = values[code] * (command.weight / old_weight)
+            value, confidence = overrides[code] * (command.quantity / 100), "high"
+        elif old_quantity is not None and old_quantity != command.quantity and code in values:
+            value = values[code] * (command.quantity / old_quantity)
             confidence = current_metrics[code].confidence
         else:
             continue
@@ -194,8 +223,8 @@ def _edit_dish(session: Session, entry: Entry, item: EntryItem, command: EditDis
         facts = item.source_facts or {}
         manual = set(facts.get("manual_metrics", ())) | overrides.keys()
         item.source_facts = {**facts, "manual_metrics": sorted(manual)}
-    item.quantity = command.weight
-    item.unit = "g"
+    item.quantity = command.quantity
+    item.unit = command.unit
     if updates:
         EntryItemMetricRepository(session).upsert_metrics(
             entry_item_id=item.id, metric_values=updates
