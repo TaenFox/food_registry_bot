@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import date, datetime, time, timezone
+from typing import Optional, Union
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -14,12 +15,20 @@ from food_registry_bot.bot.access import can_access_bot
 from food_registry_bot.bot.message_routing import CONVERSATION, RuleBasedMessageRoutingService
 from food_registry_bot.config import Settings
 from food_registry_bot.conversation import ConversationService
-from food_registry_bot.db.models import Entry, EntryType, LLMIssueStage, MiniAppEntrySubmission, User
+from food_registry_bot.db.models import Entry, EntryItem, EntryType, LLMIssueStage, MiniAppEntrySubmission, User
 from food_registry_bot.db.repositories import (
     UserDietPreferenceRepository,
     UserRepository,
     UserSummaryPreferenceRepository,
     insert_if_absent,
+)
+from food_registry_bot.diary_editing import (
+    DiaryEditError,
+    PositiveInteger,
+    VersionedDishAction,
+    dish_metric_values,
+    dish_revision,
+    lock_diary_entries,
 )
 from food_registry_bot.diet import DisabledDietEvaluationService
 from food_registry_bot.extraction import InvalidExtractionPayload, JournalExtractionRequest
@@ -33,6 +42,8 @@ from food_registry_bot.journal_write import (
     resolve_diet_service,
 )
 from food_registry_bot.llm_access.resolver import UserLLMRuntimeBundle, build_user_llm_runtime_bundle
+from food_registry_bot.meal_repeat import copy_food_items
+from food_registry_bot.nutrition.contract import NutritionEstimationItemInput
 from food_registry_bot.nutrition.daily_summary import resolve_local_summary_date
 from food_registry_bot.nutrition.goals import DailyNutritionGoalSnapshotUseCase
 from food_registry_bot.nutrition.service import InvalidNutritionPayload, NutritionEstimationService
@@ -54,6 +65,28 @@ class CreateMiniAppEntry(BaseModel):
     local_time: time
 
 
+class RepeatDish(VersionedDishAction):
+    quantity: Optional[PositiveInteger] = None
+
+
+class RepeatMiniAppEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    request_id: UUID
+    local_date: date
+    local_time: time
+    items: list[RepeatDish] = Field(min_length=1, max_length=24)
+
+    @model_validator(mode="after")
+    def unique_items(self) -> RepeatMiniAppEntry:
+        if len({item.item_id for item in self.items}) != len(self.items):
+            raise ValueError("Each source dish can appear only once")
+        return self
+
+
+MINI_APP_ENTRY_COMMAND = TypeAdapter(Union[CreateMiniAppEntry, RepeatMiniAppEntry])
+
+
 class MiniAppEntryError(Exception):
     def __init__(self, status: int, code: str) -> None:
         super().__init__(code)
@@ -61,7 +94,7 @@ class MiniAppEntryError(Exception):
         self.code = code
 
 
-def resolve_occurred_at(command: CreateMiniAppEntry, timezone_name: str) -> datetime:
+def resolve_occurred_at(command: CreateMiniAppEntry | RepeatMiniAppEntry, timezone_name: str) -> datetime:
     if command.local_time.tzinfo is not None:
         raise MiniAppEntryError(422, "invalid_entry_time")
     local = datetime.combine(command.local_date, command.local_time)
@@ -73,6 +106,83 @@ def resolve_occurred_at(command: CreateMiniAppEntry, timezone_name: str) -> date
     except (OverflowError, ValueError):
         pass
     raise MiniAppEntryError(422, "invalid_entry_time")
+
+
+def entry_user(session: Session, telegram_user_id: int, admin_user_ids: tuple[int, ...]) -> User:
+    if not can_access_bot(session, telegram_user_id, admin_user_ids):
+        raise MiniAppEntryError(403, "access_denied")
+    user = UserRepository(session).get_by_telegram_user_id(telegram_user_id)
+    if user is None:
+        raise MiniAppEntryError(404, "profile_missing")
+    return user
+
+
+def entry_food_day(session: Session, user: User, occurred_at: datetime) -> tuple[date, int]:
+    preference = UserSummaryPreferenceRepository(session).get_by_user_id(user.id)
+    start_hour = preference.nutrition_day_start_hour if preference else 4
+    try:
+        summary_date = resolve_local_summary_date(
+            reference_at=occurred_at, timezone_name=user.timezone,
+            nutrition_day_start_hour=start_hour,
+        )
+    except OverflowError as exc:
+        raise MiniAppEntryError(422, "invalid_entry_time") from exc
+    return summary_date, start_hour
+
+
+def claim_entry_submission(session: Session, user_id: int, request_id: str, fingerprint: str) -> bool:
+    claimed = insert_if_absent(
+        session, MiniAppEntrySubmission,
+        {"user_id": user_id, "request_id": request_id, "fingerprint": fingerprint},
+        ("user_id", "request_id"),
+    )
+    if claimed is not None:
+        return True
+    existing = session.scalars(select(MiniAppEntrySubmission).filter_by(
+        user_id=user_id, request_id=request_id,
+    )).one()
+    if existing.fingerprint != fingerprint:
+        raise MiniAppEntryError(409, "entry_request_conflict")
+    return False
+
+
+def write_repeated_entry(
+    session_factory: sessionmaker[Session], telegram_user_id: int, admin_user_ids: tuple[int, ...],
+    command: RepeatMiniAppEntry,
+) -> date:
+    request_id = command.request_id.hex
+    fingerprint = hashlib.sha256(command.model_dump_json(exclude={"request_id"}).encode()).hexdigest()
+    with session_factory.begin() as session:
+        user = entry_user(session, telegram_user_id, admin_user_ids)
+        occurred_at = resolve_occurred_at(command, user.timezone)
+        summary_date, start_hour = entry_food_day(session, user, occurred_at)
+        if not claim_entry_submission(session, user.id, request_id, fingerprint):
+            return summary_date
+
+        try:
+            entries = lock_diary_entries(
+                session, user.id, {item.entry_id for item in command.items}, lock_metrics=True,
+            )
+        except DiaryEditError as exc:
+            raise MiniAppEntryError(exc.status, exc.code) from exc
+        sources = {item.id: item for entry in entries.values() for item in entry.items}
+        portions: list[tuple[EntryItem, int | None]] = []
+        for requested in command.items:
+            item = sources.get(requested.item_id)
+            if (item is None or item.entry_id != requested.entry_id
+                    or dish_revision(item, dish_metric_values(item)) != requested.revision):
+                raise MiniAppEntryError(409, "dish_changed")
+            if requested.quantity is not None and requested.quantity != item.quantity:
+                if (not item.quantity or item.quantity < 0
+                        or NutritionEstimationItemInput.normalize_unit(item.unit) not in ("g", "ml")):
+                    raise MiniAppEntryError(422, "portion_not_scalable")
+            portions.append((item, requested.quantity))
+        copy_food_items(session, user_id=user.id, occurred_at=occurred_at, portions=portions)
+        DailyNutritionGoalSnapshotUseCase(session).get_or_create(
+            user_id=user.id, summary_date=summary_date, timezone_name=user.timezone,
+            nutrition_day_start_hour=start_hour,
+        )
+        return summary_date
 
 
 class MiniAppEntryWriter:
@@ -90,28 +200,6 @@ class MiniAppEntryWriter:
         self.nutrition_service = nutrition_service
         self.conversation_service = conversation_service
 
-    @staticmethod
-    def _user(session: Session, telegram_user_id: int, admin_user_ids: tuple[int, ...]) -> User:
-        if not can_access_bot(session, telegram_user_id, admin_user_ids):
-            raise MiniAppEntryError(403, "access_denied")
-        user = UserRepository(session).get_by_telegram_user_id(telegram_user_id)
-        if user is None:
-            raise MiniAppEntryError(404, "profile_missing")
-        return user
-
-    @staticmethod
-    def _food_day(session: Session, user: User, occurred_at: datetime) -> tuple[date, int]:
-        preference = UserSummaryPreferenceRepository(session).get_by_user_id(user.id)
-        start_hour = preference.nutrition_day_start_hour if preference else 4
-        try:
-            summary_date = resolve_local_summary_date(
-                reference_at=occurred_at, timezone_name=user.timezone,
-                nutrition_day_start_hour=start_hour,
-            )
-        except OverflowError as exc:
-            raise MiniAppEntryError(422, "invalid_entry_time") from exc
-        return summary_date, start_hour
-
     def write(
         self, telegram_user_id: int, admin_user_ids: tuple[int, ...], command: CreateMiniAppEntry,
     ) -> date:
@@ -121,9 +209,9 @@ class MiniAppEntryWriter:
         ).hexdigest()
 
         with self.session_factory.begin() as session:
-            user = self._user(session, telegram_user_id, admin_user_ids)
+            user = entry_user(session, telegram_user_id, admin_user_ids)
             occurred_at = resolve_occurred_at(command, user.timezone)
-            summary_date, _ = self._food_day(session, user, occurred_at)
+            summary_date, _ = entry_food_day(session, user, occurred_at)
             existing = session.get(MiniAppEntrySubmission, (user.id, request_id))
             if existing is not None:
                 if existing.fingerprint != fingerprint:
@@ -157,20 +245,10 @@ class MiniAppEntryWriter:
         nutrition_issue = None
         try:
             with self.session_factory.begin() as session:
-                user = self._user(session, telegram_user_id, admin_user_ids)
+                user = entry_user(session, telegram_user_id, admin_user_ids)
                 occurred_at = resolve_occurred_at(command, user.timezone)
-                summary_date, start_hour = self._food_day(session, user, occurred_at)
-                claimed = insert_if_absent(
-                    session, MiniAppEntrySubmission,
-                    {"user_id": user.id, "request_id": request_id, "fingerprint": fingerprint},
-                    ("user_id", "request_id"),
-                )
-                if claimed is None:
-                    existing = session.scalars(select(MiniAppEntrySubmission).filter_by(
-                        user_id=user.id, request_id=request_id,
-                    )).one()
-                    if existing.fingerprint != fingerprint:
-                        raise MiniAppEntryError(409, "entry_request_conflict")
+                summary_date, start_hour = entry_food_day(session, user, occurred_at)
+                if not claim_entry_submission(session, user.id, request_id, fingerprint):
                     return summary_date
 
                 entries = [

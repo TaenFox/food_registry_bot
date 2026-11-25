@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.bot.access import can_access_bot
-from food_registry_bot.db.models import Entry, User
+from food_registry_bot.db.models import Entry, EntryItem, User
 from food_registry_bot.db.repositories import (
     DailyGoalSnapshotRepository,
     EntryRepository,
@@ -29,7 +29,14 @@ from food_registry_bot.diary_editing import (
     dish_metric_values,
     dish_revision,
 )
-from food_registry_bot.mini_app_entries import CreateMiniAppEntry, MiniAppEntryError
+from food_registry_bot.mini_app_entries import (
+    MINI_APP_ENTRY_COMMAND,
+    CreateMiniAppEntry,
+    MiniAppEntryError,
+    RepeatMiniAppEntry,
+    entry_user,
+    write_repeated_entry,
+)
 from food_registry_bot.mini_app_files import (
     MAX_UPLOAD_BYTES,
     CsvDownload,
@@ -63,29 +70,32 @@ def metric_total(dishes: list[dict], code: str) -> dict:
     }
 
 
-def meal_data(entry: Entry, user_timezone: ZoneInfo) -> dict:
-    dishes = []
-    for item in sorted(entry.items, key=lambda item: item.position):
-        values = dish_metric_values(item)
-        dishes.append(
-            {
-                "id": item.id,
-                "name": item.name,
-                "quantity": item.quantity,
-                "unit": item.unit,
-                "revision": dish_revision(item, values),
-                "calories": values.get("calories"),
-                "metrics": {code: values.get(code) for code in SUPPORTED_NUTRITION_METRIC_CODES},
-                "complete": all(code in values for code in SUPPORTED_NUTRITION_METRIC_CODES),
-            }
-        )
-    totals = {code: metric_total(dishes, code) for code in SUPPORTED_NUTRITION_METRIC_CODES}
-    occurred_at = entry.occurred_at
+def diary_dish_data(item: EntryItem) -> dict:
+    values = dish_metric_values(item)
+    return {
+        "id": item.id,
+        "name": item.name,
+        "quantity": item.quantity,
+        "unit": item.unit,
+        "revision": dish_revision(item, values),
+        "calories": values.get("calories"),
+        "metrics": {code: values.get(code) for code in SUPPORTED_NUTRITION_METRIC_CODES},
+        "complete": all(code in values for code in SUPPORTED_NUTRITION_METRIC_CODES),
+    }
+
+
+def diary_local_time(occurred_at: datetime, user_timezone: ZoneInfo) -> datetime:
     if occurred_at.tzinfo is None:
         occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+    return occurred_at.astimezone(user_timezone)
+
+
+def meal_data(entry: Entry, user_timezone: ZoneInfo) -> dict:
+    dishes = [diary_dish_data(item) for item in sorted(entry.items, key=lambda item: item.position)]
+    totals = {code: metric_total(dishes, code) for code in SUPPORTED_NUTRITION_METRIC_CODES}
     return {
         "id": entry.id,
-        "time": occurred_at.astimezone(user_timezone).strftime("%H:%M"),
+        "time": diary_local_time(entry.occurred_at, user_timezone).strftime("%H:%M"),
         "dishes": dishes,
         "totals": totals,
         "calories": totals["calories"]["value"],
@@ -241,18 +251,46 @@ def create_diary_app(
     def response(status: int, payload: dict) -> web.Response:
         return web.json_response(payload, status=status, headers={"Cache-Control": "no-store"})
 
+    def load_history(telegram_user_id: int, query: str) -> dict:
+        with session_factory.begin() as session:
+            user = entry_user(session, telegram_user_id, admin_user_ids)
+            user_timezone = ZoneInfo(user.timezone)
+            results = EntryRepository(session).list_food_items_for_user(
+                user_id=user.id, name_query=query, limit=25,
+            )
+            return {"items": [
+                {
+                    **diary_dish_data(item), "entry_id": item.entry_id,
+                    "occurred_at": diary_local_time(occurred_at, user_timezone).isoformat(),
+                }
+                for item, occurred_at in results
+            ]}
+
     async def create_entry(request: web.Request, telegram_user_id: int) -> web.Response:
+        if request.method == "GET":
+            query = request.query.get("q", "").strip()
+            if len(query) > 100:
+                return response(400, {"error": "invalid_history_query"})
+            try:
+                return response(200, await asyncio.to_thread(load_history, telegram_user_id, query))
+            except MiniAppEntryError as exc:
+                return response(exc.status, {"error": exc.code})
         invalid = {"error": "invalid_entry"}
         if request.content_type != "application/json":
             return response(415, invalid)
         try:
-            command = CreateMiniAppEntry.model_validate_json(await request.read())
+            command = MINI_APP_ENTRY_COMMAND.validate_json(await request.read())
         except ValidationError:
             return response(400, invalid)
-        if write_entry is None:
-            return response(503, {"error": "entry_provider_unavailable"})
         try:
-            summary_date = await asyncio.to_thread(write_entry, telegram_user_id, admin_user_ids, command)
+            if isinstance(command, RepeatMiniAppEntry):
+                summary_date = await asyncio.to_thread(
+                    write_repeated_entry, session_factory, telegram_user_id, admin_user_ids, command,
+                )
+            elif write_entry is not None:
+                summary_date = await asyncio.to_thread(write_entry, telegram_user_id, admin_user_ids, command)
+            else:
+                return response(503, {"error": "entry_provider_unavailable"})
         except MiniAppEntryError as exc:
             return response(exc.status, {"error": exc.code})
         return response(200, {"summary_date": summary_date.isoformat()})
@@ -340,6 +378,7 @@ def create_diary_app(
     app.router.add_get("/api/report", mini_app_request, allow_head=False)
     app.router.add_get("/api/settings", mini_app_request, allow_head=False)
     app.router.add_post("/api/settings", mini_app_request)
+    app.router.add_get("/api/entries", mini_app_request, allow_head=False)
     app.router.add_post("/api/entries", mini_app_request)
     app.router.add_get("/api/files", mini_app_request, allow_head=False)
     app.router.add_post("/api/files", mini_app_request)

@@ -693,6 +693,66 @@ def find_meal(payload, entry_id):
     return next(meal for day in payload["days"] for meal in day["meals"] if meal["id"] == entry_id)
 
 
+async def test_repeat_meal_searches_own_history_and_copies_one_entry(editable_diary):
+    factory, ids = editable_diary
+    app = create_diary_app(factory, token=TOKEN, admin_user_ids=())
+    with factory.begin() as session:
+        session.get(Entry, ids["previous"]).occurred_at -= timedelta(days=20)
+
+    async def history(query):
+        return await request_diary(app, path="/api/entries", init_data=telegram_init_data(1),
+                                   query="?" + urlencode({"q": query}))
+
+    status, recent = await history("")
+    assert status == 200
+    by_entry = {item["entry_id"]: item for item in recent["items"]}
+    assert set(by_entry) == {ids["source"], ids["target"], ids["previous"]}
+    assert [item["name"] for item in (await history("груш"))[1]["items"]] == ["груша"]
+    assert (await history("%"))[1]["items"] == []
+    chicken = by_entry[ids["target"]]
+    rice = by_entry[ids["source"]]
+    command = {
+        "request_id": str(uuid4()), "local_date": "2026-11-25", "local_time": "02:30",
+        "items": [
+            {"item_id": chicken["id"], "entry_id": chicken["entry_id"],
+             "revision": chicken["revision"], "quantity": 40},
+            {"item_id": rice["id"], "entry_id": rice["entry_id"], "revision": rice["revision"]},
+        ],
+    }
+    assert await submit_entry(app, command) == (200, {"summary_date": "2026-11-24"})
+    assert await submit_entry(app, command) == (200, {"summary_date": "2026-11-24"})
+    assert (await submit_entry(app, {**command, "local_time": "03:00"}))[0] == 409
+    with factory.begin() as session:
+        fresh = session.query(Entry).filter_by(occurred_at=datetime(2026, 11, 25, 2, 30)).one()
+        copied = sorted(fresh.items, key=lambda item: item.position)
+        assert [(item.name, item.quantity) for item in copied] == [("курица", 40), ("рис", None)]
+        assert {m.metric.code: m.value for m in copied[0].metrics} == {
+            "calories": 100, "protein": 5, "fat": 2.5, "carbs": 10, "fiber": 2,
+        }
+        assert "fiber" not in {m.metric.code for m in copied[1].metrics}
+        assert session.get(EntryItem, chicken["id"]).quantity == 80
+        assert session.query(MiniAppEntrySubmission).count() == 1
+        assert session.query(DailyGoalSnapshot).filter_by(summary_date=datetime(2026, 11, 24).date()).one()
+
+
+async def test_repeat_meal_rejects_foreign_stale_or_unscalable_items(editable_diary):
+    factory, ids = editable_diary
+    app = create_diary_app(factory, token=TOKEN, admin_user_ids=())
+    _, result = await request_diary(app, path="/api/entries", init_data=telegram_init_data(1))
+    rice = next(item for item in result["items"] if item["entry_id"] == ids["source"])
+    item = {"item_id": rice["id"], "entry_id": rice["entry_id"], "revision": rice["revision"]}
+    command = {"request_id": str(uuid4()), "local_date": "2026-11-25", "local_time": "12:00"}
+    for candidate, expected in [
+        ({**item, "entry_id": ids["foreign"]}, (404, {"error": "entry_missing"})),
+        ({**item, "revision": "0" * 32}, (409, {"error": "dish_changed"})),
+        ({**item, "quantity": 50}, (422, {"error": "portion_not_scalable"})),
+    ]:
+        assert await submit_entry(app, {**command, "items": [candidate]}) == expected
+    assert (await submit_entry(app, {**command, "items": [item, item]}))[0] == 400
+    with factory.begin() as session:
+        assert session.query(MiniAppEntrySubmission).count() == 0
+
+
 async def test_move_last_dish_checks_confirmation_and_preserves_facts(editable_diary):
     factory, ids = editable_diary
     app = create_diary_app(factory, token=TOKEN, admin_user_ids=())

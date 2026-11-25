@@ -1,6 +1,6 @@
 "use strict";
 
-function createEntryView({ request, handleAccessError, expire, defaults, onSaved }) {
+function createEntryView({ request, handleAccessError, expire, defaults, onSaved, onHistory }) {
     const dialog = document.querySelector("#entry-composer");
     const form = dialog.querySelector("form");
     const close = dialog.querySelector(".entry-close");
@@ -40,6 +40,11 @@ function createEntryView({ request, handleAccessError, expire, defaults, onSaved
 
     close.addEventListener("click", () => {
         if (!submitting) dialog.close();
+    });
+    form.querySelector(".entry-history").addEventListener("click", () => {
+        if (submitting || expire()) return;
+        dialog.close();
+        onHistory({ date: date.value, time: time.value });
     });
     dialog.addEventListener("cancel", event => {
         if (submitting) event.preventDefault();
