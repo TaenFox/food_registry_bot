@@ -14,6 +14,7 @@
   <script defer src="assets/settings.js"></script>
   <script defer src="assets/files.js"></script>
   <script defer src="assets/entry.js"></script>
+  <script defer src="assets/repeat-entry.js"></script>
   <script defer src="assets/diary.js"></script>
 </head>
 <body id="diary-trends">
@@ -147,7 +148,7 @@
         <button type="button" data-screen="settings">Настройки</button>
       </nav>
     </footer>
-    <dialog id="entry-composer" aria-labelledby="entry-title">
+    <dialog id="entry-composer" class="entry-composer" aria-labelledby="entry-title">
       <header>
         <h2 id="entry-title">Новая запись</h2>
         <button type="button" class="entry-close" aria-label="Закрыть форму">×</button>
@@ -157,6 +158,7 @@
           <textarea name="meal" rows="3" maxlength="800" required autofocus
             placeholder="Гречка 150 г, курица 120 г, кофе 200 мл"></textarea>
         </label>
+        <button type="button" class="entry-history">Из истории</button>
         <div class="entry-date-time">
           <label>Дата<input type="date" name="local_date" required></label>
           <label>Время<input type="time" name="local_time" required></label>
@@ -164,6 +166,32 @@
         <p class="entry-status" role="status"></p>
         <button type="submit" class="entry-submit">Записать</button>
       </form>
+    </dialog>
+    <dialog id="repeat-composer" class="entry-composer" aria-labelledby="repeat-title">
+      <header>
+        <h2 id="repeat-title">Новая запись</h2>
+        <button type="button" class="entry-close" aria-label="Закрыть форму">×</button>
+      </header>
+      <form>
+        <div class="entry-date-time">
+          <label>Дата<input type="date" name="local_date" required></label>
+          <label>Время<input type="time" name="local_time" required></label>
+        </div>
+        <div class="repeat-items"></div>
+        <button type="button" class="entry-history">+ Из истории</button>
+        <div class="repeat-total" aria-live="polite">
+          <div><strong>Итого</strong><strong class="repeat-calories"></strong></div>
+          <p class="repeat-macros"></p>
+        </div>
+        <p class="entry-status" role="status"></p>
+        <button type="submit" class="entry-submit">Сохранить запись</button>
+      </form>
+      <section class="repeat-history" aria-label="История блюд" hidden>
+        <input type="search" maxlength="100" aria-label="Поиск блюда" placeholder="Поиск блюда">
+        <p class="history-status" role="status"></p>
+        <ul class="history-items"></ul>
+        <button type="button" class="entry-submit history-apply" disabled>Добавить выбранные</button>
+      </section>
     </dialog>
   </main>
 </body>

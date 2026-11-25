@@ -948,6 +948,21 @@ class EntryRepository:
         )
         return list(self._session.scalars(statement))
 
+    def list_food_items_for_user(
+        self, *, user_id: int, name_query: str, limit: int,
+    ) -> list[tuple[EntryItem, datetime]]:
+        statement = (
+            select(EntryItem, Entry.occurred_at)
+            .join(EntryItem.entry)
+            .where(Entry.user_id == user_id, Entry.entry_type == EntryType.FOOD)
+            .options(selectinload(EntryItem.metrics).selectinload(EntryItemMetric.metric))
+            .order_by(Entry.occurred_at.desc(), Entry.id.desc(), EntryItem.position)
+            .limit(limit)
+        )
+        if name_query:
+            statement = statement.where(EntryItem.name.icontains(name_query, autoescape=True))
+        return [(item, occurred_at) for item, occurred_at in self._session.execute(statement)]
+
 
     def get_by_id_for_user(self, *, entry_id: int, user_id: int) -> Optional[Entry]:
         statement = (

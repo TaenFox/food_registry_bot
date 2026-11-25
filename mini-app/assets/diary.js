@@ -452,6 +452,11 @@ function renderMeals(day) {
             list.append(row);
         }
         group.append(header, list);
+        if (meal.dishes.length) {
+            group.append(actionButton("Повторить приём пищи", () => {
+                if (!entryButton.disabled && !expire()) repeatEntryView.openMeal(meal);
+            }, "meal-repeat"));
+        }
         mealList.append(group);
     }
 }
@@ -523,6 +528,7 @@ function clearDiary(message) {
     settingsView.clear();
     filesView.clear();
     entryView.clear();
+    repeatEntryView.clear();
     entryFeedback.hidden = true;
     entryFeedback.textContent = "";
     showScreenOptions(false);
@@ -682,9 +688,9 @@ function setNavigationBusy(busy) {
     if (busy) showScreenOptions(false);
 }
 
-function entryDefaults() {
+function entryDefaults(useCurrentTime = false) {
     const day = model.days[selectedDay];
-    if (activeScreen === "diary" && day && !day.current) {
+    if (!useCurrentTime && activeScreen === "diary" && day && !day.current) {
         return { date: day.date, time: "12:00" };
     }
     const now = new Intl.DateTimeFormat("en-CA", {
@@ -693,6 +699,13 @@ function entryDefaults() {
     }).formatToParts(new Date());
     const parts = Object.fromEntries(now.map(({ type, value }) => [type, value]));
     return { date: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}` };
+}
+
+async function entrySaved(summaryDate) {
+    entryFeedback.textContent = "Запись добавлена · " + fullDate.format(new Date(summaryDate));
+    entryFeedback.hidden = false;
+    await refreshDiary(summaryDate);
+    if (activeScreen === "report" && model) reportView.open();
 }
 
 const reportView = createReportView({
@@ -719,12 +732,16 @@ const entryView = createEntryView({
     handleAccessError,
     expire,
     defaults: entryDefaults,
-    async onSaved(summaryDate) {
-        entryFeedback.textContent = "Запись добавлена · " + fullDate.format(new Date(summaryDate));
-        entryFeedback.hidden = false;
-        await refreshDiary(summaryDate);
-        if (activeScreen === "report" && model) reportView.open();
-    },
+    onSaved: entrySaved,
+    onHistory: initial => repeatEntryView.openHistory(initial, entryView.open),
+});
+const repeatEntryView = createRepeatEntryView({
+    request: command => miniAppRequest("/api/entries", { command }),
+    findHistory: (query, signal) => miniAppRequest("/api/entries?q=" + encodeURIComponent(query), { signal }),
+    handleAccessError,
+    expire,
+    defaults: entryDefaults,
+    onSaved: entrySaved,
 });
 
 entryButton.addEventListener("click", () => {

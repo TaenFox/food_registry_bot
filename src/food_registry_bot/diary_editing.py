@@ -91,7 +91,7 @@ def dish_revision(item: EntryItem, metrics: dict[str, float]) -> str:
     return hashlib.sha256(state.encode()).hexdigest()[:32]
 
 
-def _lock_entries(
+def lock_diary_entries(
     session: Session, user_id: int, entry_ids: set[int], *, lock_metrics: bool
 ) -> dict[int, Entry]:
     entries = session.scalars(
@@ -127,7 +127,7 @@ def apply_diary_mutation(session: Session, user: User, command: DiaryMutation) -
         if command.target_entry_id == command.entry_id:
             raise DiaryEditError(400, "same_entry")
         entry_ids.add(command.target_entry_id)
-    entries = _lock_entries(
+    entries = lock_diary_entries(
         session, user.id, entry_ids, lock_metrics=isinstance(command, VersionedDishAction)
     )
     source = entries[command.entry_id]

@@ -149,6 +149,7 @@ from food_registry_bot.llm_access.resolver import (
     build_provider_unavailable_message,
     build_user_llm_runtime_bundle,
 )
+from food_registry_bot.meal_repeat import copy_food_items
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
     calculate_default_workout_calorie_credit,
@@ -3217,36 +3218,9 @@ def repeat_recent_entry_item(
     user_id: int,
     item,
 ) -> object:
-    saved_entry = EntryRepository(session).create(
-        user_id=user_id,
-        entry_type=EntryType.FOOD,
-        occurred_at=datetime.now(timezone.utc),
-        items=[
-            EntryItemCreate(
-                name=item.name,
-                quantity=item.quantity,
-                unit=item.unit,
-                confidence=item.confidence,
-                source_type=item.source_type,
-            )
-        ],
+    return copy_food_items(
+        session, user_id=user_id, occurred_at=datetime.now(timezone.utc), portions=[(item, None)],
     )
-    if not item.metrics:
-        return saved_entry
-    persisted_item = sorted(saved_entry.items, key=lambda current: current.position)[0]
-    EntryItemMetricRepository(session).upsert_metrics(
-        entry_item_id=persisted_item.id,
-        metric_values=[
-            EntryItemMetricValue(
-                code=metric.metric.code,
-                value=metric.value,
-                confidence=metric.confidence,
-            )
-            for metric in item.metrics
-            if metric.metric is not None
-        ],
-    )
-    return saved_entry
 
 
 def repeat_recent_entry(
@@ -3255,40 +3229,11 @@ def repeat_recent_entry(
     user_id: int,
     entry,
 ) -> object:
-    saved_entry = EntryRepository(session).create(
-        user_id=user_id,
-        entry_type=EntryType.FOOD,
-        occurred_at=datetime.now(timezone.utc),
-        items=[
-            EntryItemCreate(
-                name=item.name,
-                quantity=item.quantity,
-                unit=item.unit,
-                confidence=item.confidence,
-                source_type=item.source_type,
-            )
-            for item in sorted(entry.items, key=lambda current: current.position)
-        ],
+    items = sorted(entry.items, key=lambda item: item.position)
+    return copy_food_items(
+        session, user_id=user_id, occurred_at=datetime.now(timezone.utc),
+        portions=[(item, None) for item in items],
     )
-    persisted_items = sorted(saved_entry.items, key=lambda current: current.position)
-    metric_repository = EntryItemMetricRepository(session)
-    source_items = sorted(entry.items, key=lambda current: current.position)
-    for persisted_item, source_item in zip(persisted_items, source_items):
-        if not source_item.metrics:
-            continue
-        metric_repository.upsert_metrics(
-            entry_item_id=persisted_item.id,
-            metric_values=[
-                EntryItemMetricValue(
-                    code=metric.metric.code,
-                    value=metric.value,
-                    confidence=metric.confidence,
-                )
-                for metric in source_item.metrics
-                if metric.metric is not None
-            ],
-        )
-    return saved_entry
 
 
 def load_recent_entries_page(
