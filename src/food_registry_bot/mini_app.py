@@ -6,7 +6,8 @@ from typing import Callable
 from zoneinfo import ZoneInfo
 
 from aiogram.utils.web_app import safe_parse_webapp_init_data
-from aiohttp import web
+from aiohttp import hdrs, web
+from aiohttp.helpers import content_disposition_header
 from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -29,6 +30,13 @@ from food_registry_bot.diary_editing import (
     dish_revision,
 )
 from food_registry_bot.mini_app_entries import CreateMiniAppEntry, MiniAppEntryError
+from food_registry_bot.mini_app_files import (
+    MAX_UPLOAD_BYTES,
+    CsvDownload,
+    CsvUpload,
+    FileCommand,
+    run_file_exchange,
+)
 from food_registry_bot.mini_app_settings import SettingsPatch, apply_settings, read_settings
 from food_registry_bot.nutrition.contract import SUPPORTED_NUTRITION_METRIC_CODES
 from food_registry_bot.nutrition.daily_summary import (
@@ -249,6 +257,37 @@ def create_diary_app(
             return response(exc.status, {"error": exc.code})
         return response(200, {"summary_date": summary_date.isoformat()})
 
+    async def exchange_files(request: web.Request, telegram_user_id: int) -> web.Response:
+        command: FileCommand | CsvUpload | None = None
+        if request.method == "POST":
+            if request.content_type == "application/octet-stream":
+                filename = request.query.get("name", "")
+                if (not filename.lower().endswith(".csv") or len(filename) > 255
+                        or any(char in "/\\" or ord(char) < 32 for char in filename)):
+                    return response(400, {"error": "invalid_filename"})
+                content = bytearray()
+                async for chunk in request.content.iter_chunked(64 * 1024):
+                    if len(content) + len(chunk) > MAX_UPLOAD_BYTES:
+                        return response(413, {"error": "file_too_large"})
+                    content.extend(chunk)
+                command = CsvUpload(filename, bytes(content))
+            elif request.content_type == "application/json":
+                try:
+                    command = FileCommand.model_validate_json(await request.read())
+                except ValidationError:
+                    return response(400, {"error": "invalid_file_action"})
+            else:
+                return response(415, {"error": "invalid_file_action"})
+        result = await asyncio.to_thread(
+            run_file_exchange, session_factory, telegram_user_id, admin_user_ids, command,
+        )
+        if isinstance(result, CsvDownload):
+            return web.Response(body=result.content, content_type="text/csv", headers={
+                "Cache-Control": "no-store",
+                hdrs.CONTENT_DISPOSITION: content_disposition_header("attachment", filename=result.filename),
+            })
+        return response(*result)
+
     async def mini_app_request(request: web.Request) -> web.Response:
         scheme, _, init_data = request.headers.get("Authorization", "").partition(" ")
         now = datetime.now(timezone.utc)
@@ -261,6 +300,8 @@ def create_diary_app(
                 pass
             else:
                 if authenticated.user and -INIT_DATA_CLOCK_SKEW <= age <= INIT_DATA_MAX_AGE:
+                    if request.path == "/api/files":
+                        return await exchange_files(request, authenticated.user.id)
                     if request.path == "/api/entries":
                         return await create_entry(request, authenticated.user.id)
                     command = None
@@ -300,4 +341,6 @@ def create_diary_app(
     app.router.add_get("/api/settings", mini_app_request, allow_head=False)
     app.router.add_post("/api/settings", mini_app_request)
     app.router.add_post("/api/entries", mini_app_request)
+    app.router.add_get("/api/files", mini_app_request, allow_head=False)
+    app.router.add_post("/api/files", mini_app_request)
     return app
