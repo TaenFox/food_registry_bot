@@ -5682,7 +5682,9 @@ async def handle_data_exchange_file_callback(
             await callback.answer("Нет доступа к боту. Попроси администратора его выдать.", show_alert=True)
             return
 
-        user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
+        user = UserRepository(session).get_by_telegram_user_id(
+            telegram_user.id, for_update=callback_data.action != "refresh",
+        )
         if user is None:
             user, _created = UserRepository(session).get_or_create(
                 telegram_user_id=telegram_user.id,
@@ -5815,7 +5817,7 @@ async def handle_document_upload(
         temp_path, original_filename = await download_message_document_to_temp_file(message)
         with session_scope(session_factory) as session:
             _, _user_id = ensure_user_registered(message, session)
-            user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
+            user = UserRepository(session).get_by_telegram_user_id(message.from_user.id, for_update=True)
             if user is None:
                 raise RuntimeError("User profile was not found after registration")
             exchange_service = DataExchangeService(session)

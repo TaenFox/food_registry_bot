@@ -154,8 +154,10 @@ class UserRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def get_by_telegram_user_id(self, telegram_user_id: int) -> Optional[User]:
+    def get_by_telegram_user_id(self, telegram_user_id: int, *, for_update: bool = False) -> Optional[User]:
         statement = select(User).where(User.telegram_user_id == telegram_user_id)
+        if for_update:
+            statement = statement.with_for_update()
         return self._session.scalar(statement)
 
     def create(
@@ -1542,6 +1544,19 @@ class DataExchangeFileRepository:
         self._session.flush()
         return exchange_file
 
+    def mark_error(self, *, file_id: int, processing_message: str) -> DataExchangeFile:
+        exchange_file = self._session.get(DataExchangeFile, file_id)
+        if exchange_file is None:
+            raise ValueError(f"Data exchange file {file_id} was not found")
+        exchange_file.status = DataExchangeStatus.ERROR
+        exchange_file.processing_message = processing_message
+        self._session.flush()
+        return exchange_file
+
+    def delete(self, exchange_file: DataExchangeFile) -> None:
+        self._session.delete(exchange_file)
+        self._session.flush()
+
 
 class LLMIssueLogRepository:
     def __init__(self, session: Session) -> None:
@@ -1578,25 +1593,6 @@ class LLMIssueLogRepository:
             .limit(limit)
         )
         return list(self._session.scalars(statement))
-
-    def mark_error(
-        self,
-        *,
-        file_id: int,
-        processing_message: str,
-    ) -> DataExchangeFile:
-        exchange_file = self._session.get(DataExchangeFile, file_id)
-        if exchange_file is None:
-            raise ValueError(f"Data exchange file {file_id} was not found")
-        exchange_file.status = DataExchangeStatus.ERROR
-        exchange_file.processing_message = processing_message
-        self._session.flush()
-        return exchange_file
-
-    def delete(self, exchange_file: DataExchangeFile) -> None:
-        self._session.delete(exchange_file)
-        self._session.flush()
-
 
 class NutritionEstimatePersistenceService:
     def __init__(self, session: Session) -> None:

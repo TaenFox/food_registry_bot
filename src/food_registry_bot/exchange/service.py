@@ -410,15 +410,25 @@ class DataExchangeService:
             user_id=user.id,
             direction=DataExchangeDirection.EXPORT,
         )
-        if existing_export_count + len(export_specs) > EXPORT_FILE_LIMIT:
+        files: list[DataExchangeFile] = []
+        pending: list[tuple[str, str, bytes, str]] = []
+        for contract_type, filename, rows, headers in export_specs:
+            content = self._render_csv(rows, fieldnames=headers)
+            sha256 = hashlib.sha256(content).hexdigest()
+            existing = self._file_repository.get_by_sha256(
+                user_id=user.id, direction=DataExchangeDirection.EXPORT, sha256=sha256,
+            )
+            if existing is None:
+                pending.append((contract_type, filename, content, sha256))
+            else:
+                files.append(existing)
+
+        if existing_export_count + len(pending) > EXPORT_FILE_LIMIT:
             raise FileLimitExceededError(
                 "Лимит экспортных файлов достигнут. Удали лишний файл через /files и попробуй снова."
             )
 
-        created_files: list[DataExchangeFile] = []
-        for contract_type, filename, rows, headers in export_specs:
-            content = self._render_csv(rows, fieldnames=headers)
-            sha256 = hashlib.sha256(content).hexdigest()
+        for contract_type, filename, content, sha256 in pending:
             relative_path = self._storage.build_relative_path(
                 user_id=user.id,
                 direction=DataExchangeDirection.EXPORT,
@@ -426,7 +436,7 @@ class DataExchangeService:
                 sha256=sha256,
             )
             self._storage.write_bytes(payload=content, relative_path=relative_path)
-            created_files.append(
+            files.append(
                 self._create_export_file_record(
                     user=user,
                     contract_type=contract_type,
@@ -436,12 +446,14 @@ class DataExchangeService:
                 )
             )
 
-        return ExportBuildResult(files=created_files)
+        return ExportBuildResult(files=files)
 
-    def mark_export_downloaded(self, *, exchange_file: DataExchangeFile) -> None:
+    def mark_export_downloaded(
+        self, *, exchange_file: DataExchangeFile, processing_message: str = "Файл отправлен в Telegram."
+    ) -> None:
         self._file_repository.mark_processed(
             file_id=exchange_file.id,
-            processing_message="Файл отправлен в Telegram.",
+            processing_message=processing_message,
             processed_at=datetime.now(timezone.utc),
         )
 

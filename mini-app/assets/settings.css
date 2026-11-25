@@ -70,6 +70,17 @@
 #settings .settings-status { color: var(--muted); }
 #settings .settings-status:empty { display: none; }
 #settings .settings-load:not([hidden]) { display: grid; justify-items: start; gap: 8px; }
+#settings .file-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-block: 4px; }
+#settings .file-actions button {
+  min-height: 38px; padding: 5px 8px; border: 1px solid var(--rule); border-radius: 7px;
+  background: var(--panel);
+}
+#settings .file-actions button:disabled { opacity: .55; }
+#settings .file-list { list-style: none; padding: 0; }
+#settings .file-item { border-top: 1px solid var(--rule); padding: 7px 0; overflow-wrap: anywhere; }
+#settings .file-item p { margin: 3px 0; }
+#settings .file-status { margin-block: 5px; color: var(--muted); }
+#settings .file-status:empty { display: none; }
 @media (pointer: coarse) {
   #settings .settings-row { min-height: 48px; }
   #settings .settings-stepper { grid-template-columns: 44px minmax(70px, auto) 44px; }

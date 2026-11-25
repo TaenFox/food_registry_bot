@@ -521,6 +521,7 @@ function clearDiary(message) {
     clearTimeout(expiryTimer);
     reportView.close();
     settingsView.clear();
+    filesView.clear();
     entryView.clear();
     entryFeedback.hidden = true;
     entryFeedback.textContent = "";
@@ -543,7 +544,7 @@ function expire() {
     return true;
 }
 
-async function miniAppRequest(path, { command, signal } = {}) {
+async function miniAppRequest(path, { command, signal, file, download } = {}) {
     const requestedAt = Date.now();
     const headers = { Authorization: "tma " + telegram.initData };
     const options = { headers, signal, cache: "no-store", credentials: "omit" };
@@ -551,9 +552,14 @@ async function miniAppRequest(path, { command, signal } = {}) {
         headers["Content-Type"] = "application/json";
         options.method = "POST";
         options.body = JSON.stringify(command);
+    } else if (file) {
+        headers["Content-Type"] = "application/octet-stream";
+        options.method = "POST";
+        options.body = file;
     }
     const response = await fetch(path, options);
-    const payload = await response.json().catch(() => ({}));
+    const csv = download && response.ok && response.headers.get("Content-Type")?.startsWith("text/csv");
+    const payload = csv ? await response.blob() : await response.json().catch(() => ({}));
     return { response, payload, requestedAt };
 }
 
@@ -699,6 +705,13 @@ const settingsView = createSettingsView({
     handleAccessError,
     expire,
     setBusy: setNavigationBusy,
+    refreshDiary,
+});
+const filesView = createFilesView({
+    request: options => miniAppRequest("/api/files" + (options?.file
+        ? "?name=" + encodeURIComponent(options.file.name) : ""), options),
+    handleAccessError,
+    expire,
     refreshDiary,
 });
 const entryView = createEntryView({

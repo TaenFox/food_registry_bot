@@ -12,6 +12,7 @@
   <script defer src="https://telegram.org/js/telegram-web-app.js"></script>
   <script defer src="assets/report.js"></script>
   <script defer src="assets/settings.js"></script>
+  <script defer src="assets/files.js"></script>
   <script defer src="assets/entry.js"></script>
   <script defer src="assets/diary.js"></script>
 </head>
@@ -113,6 +114,17 @@
           <details name="settings-section" data-section="diets">
             <summary><span class="settings-icon settings-icon-diets" aria-hidden="true"></span><span><strong>Диеты</strong><small>Какие диетические оценки учитывать</small></span></summary>
             <div class="settings-rows"></div>
+          </details>
+          <details name="settings-section" data-section="files">
+            <summary><span class="settings-icon" aria-hidden="true">⇅</span><span><strong>Импорт и экспорт</strong><small>Файлы CSV</small></span></summary>
+            <div class="file-actions">
+              <button type="button" class="file-upload">Загрузить CSV</button>
+              <input type="file" accept=".csv,text/csv" hidden>
+              <button type="button" class="file-export">Создать экспорт</button>
+              <button type="button" class="files-refresh">Обновить</button>
+            </div>
+            <p class="file-status" role="status"></p>
+            <ul class="file-list" aria-label="Файлы импорта и экспорта"></ul>
           </details>
         </fieldset>
         <div class="settings-actions">
