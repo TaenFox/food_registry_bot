@@ -12,8 +12,8 @@ function createSettingsView({ request, handleAccessError, expire, setBusy, refre
     const goalMetrics = { ...metricLabels, water: "Вода" };
     const dietSection = form.querySelector('[data-section="diets"]');
     const rows = Object.fromEntries(
-        [...sections.querySelectorAll("details")].map(section =>
-            [section.dataset.section, section.querySelector(".settings-rows")])
+        [...sections.querySelectorAll(".settings-rows")].map(container =>
+            [container.closest("details").dataset.section, container])
     );
     let current;
     let draft;

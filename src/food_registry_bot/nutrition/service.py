@@ -1,13 +1,30 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import math
+import re
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from pydantic import ValidationError
 
-from food_registry_bot.nutrition.contract import NutritionEstimationPayload, NutritionEstimationRequest
+from food_registry_bot.nutrition.contract import (
+    NutritionEstimationItemResult,
+    NutritionEstimationPayload,
+    NutritionEstimationRequest,
+)
 from food_registry_bot.nutrition.llm_client import LLMNutritionClientError
+
+
+ENERGY_MISMATCH_TOLERANCE = 0.07
+_ALCOHOL_NAME = re.compile(
+    r"\b(?:пив(?:о|а|у|ом|е)|вин(?:о|а|у|ом|е)|виски|водк\w*|коньяк\w*|ром(?:а|ом|е)?|"
+    r"текил\w*|джин(?:а|ом|е)?|лик[её]р\w*|шампанск\w*|просекко|сидр\w*|вермут\w*|"
+    r"бренди|настойк\w*|наливк\w*|эль|портвейн\w*|мартини|абсент\w*|саке|"
+    r"beer|wine|whiske?y|vodka|brandy|rum|tequila|gin|liqueur|champagne|prosecco|cider|"
+    r"vermouth|ale|martini|absinthe|sake)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -65,6 +82,15 @@ def _parse_payload(
     return payload
 
 
+def _energy_mismatch(item: NutritionEstimationItemResult) -> float | None:
+    values = {metric.code: metric.value for metric in item.metrics}
+    calories = values["calories"]
+    from_macros = 4 * values["protein"] + 9 * values["fat"] + 4 * values["carbs"]
+    if not (0 < calories < math.inf and 0 < from_macros < math.inf):
+        return None
+    return abs(from_macros - calories) / calories
+
+
 class StaticNutritionEstimationService:
     def __init__(
         self,
@@ -118,6 +144,49 @@ class LLMNutritionEstimationService:
         self._client = client
 
     def estimate(
+        self, request: NutritionEstimationRequest
+    ) -> ValidNutritionPayload | InvalidNutritionPayload:
+        first = self._estimate_once(request)
+        if isinstance(first, InvalidNutritionPayload):
+            return first
+
+        eligible_ids = {
+            item.client_item_id for item in request.items
+            if item.nutrition_label is None and not _ALCOHOL_NAME.search(item.name)
+        }
+        mismatches = {}
+        for item in first.payload.items:
+            if item.client_item_id not in eligible_ids:
+                continue
+            mismatch = _energy_mismatch(item)
+            if mismatch is not None and mismatch > ENERGY_MISMATCH_TOLERANCE:
+                mismatches[item.client_item_id] = mismatch
+        if not mismatches:
+            return first
+
+        retry_request = NutritionEstimationRequest(
+            items=[item for item in request.items if item.client_item_id in mismatches]
+        )
+        retry = self._estimate_once(retry_request)
+        if isinstance(retry, InvalidNutritionPayload):
+            return first
+
+        improved = {}
+        for item in retry.payload.items:
+            mismatch = _energy_mismatch(item)
+            if mismatch is not None and mismatch < mismatches[item.client_item_id]:
+                improved[item.client_item_id] = item
+        if not improved:
+            return first
+
+        if len(improved) == len(first.payload.items):
+            return retry
+        payload = NutritionEstimationPayload(
+            items=[improved.get(item.client_item_id, item) for item in first.payload.items]
+        )
+        return replace(first, payload=payload)
+
+    def _estimate_once(
         self, request: NutritionEstimationRequest
     ) -> ValidNutritionPayload | InvalidNutritionPayload:
         try:

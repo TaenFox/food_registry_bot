@@ -5,7 +5,9 @@ import hashlib
 import hmac
 import json
 from datetime import datetime, time, timedelta, timezone
+from pathlib import Path
 from threading import Barrier
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -33,8 +35,10 @@ from food_registry_bot.db.models import (
     UserSummaryPreference,
 )
 from food_registry_bot.extraction import ExtractedJournalPayload, ValidExtractionPayload
+from food_registry_bot.exchange.service import DataExchangeService
 from food_registry_bot.mini_app import create_diary_app
 from food_registry_bot.mini_app_entries import MiniAppEntryWriter
+from food_registry_bot.mini_app_files import MAX_UPLOAD_BYTES
 from food_registry_bot.nutrition import (
     BackfillNutritionEstimationUseCase,
     StaticNutritionEstimationService,
@@ -91,7 +95,7 @@ async def request_diary(app, *, init_data=None, query="", method="GET", command=
 
 
 @pytest.mark.parametrize("case", ["missing", "forged", "old", "future", "malformed"])
-@pytest.mark.parametrize("path", ["/api/diary", "/api/report", "/api/settings"])
+@pytest.mark.parametrize("path", ["/api/diary", "/api/report", "/api/settings", "/api/files"])
 async def test_mini_app_rejects_untrusted_init_data_before_reading_db(case, path):
     def inaccessible_db():
         pytest.fail("Authorization must be checked before accessing the database")
@@ -111,7 +115,7 @@ async def test_mini_app_rejects_untrusted_init_data_before_reading_db(case, path
     )
 
 
-@pytest.mark.parametrize("path", ["/api/diary", "/api/report", "/api/settings"])
+@pytest.mark.parametrize("path", ["/api/diary", "/api/report", "/api/settings", "/api/files"])
 async def test_mini_app_requires_bot_access_even_for_signed_users(diary_db, path):
     factory = diary_db
     with factory.begin() as session:
@@ -127,6 +131,84 @@ async def test_mini_app_requires_bot_access_even_for_signed_users(diary_db, path
         404,
         {"error": "profile_missing"},
     )
+
+
+async def request_file_upload(app, content, *, user_id=1, name="journal.csv"):
+    async def chunks(_size):
+        for index in range(0, len(content), 64 * 1024):
+            yield content[index:index + 64 * 1024]
+
+    request = make_mocked_request(
+        "POST", "/api/files?" + urlencode({"name": name}), app=app,
+        headers={"Authorization": f"tma {telegram_init_data(user_id)}",
+                 "Content-Type": "application/octet-stream"},
+        payload=SimpleNamespace(iter_chunked=chunks),
+    )
+    route = await app.router.resolve(request)
+    result = await route.handler(request)
+    return result.status, json.loads(result.body)
+
+
+async def test_mini_app_files_share_storage_and_require_explicit_import(diary_db, tmp_path, monkeypatch):
+    monkeypatch.setattr("food_registry_bot.exchange.service.get_data_exchange_dir", lambda: tmp_path)
+    with diary_db.begin() as session:
+        session.add_all([User(telegram_user_id=1), User(telegram_user_id=2)])
+        session.add_all(UserAccess(telegram_user_id=value, is_allowed=True) for value in (1, 2))
+    app = create_diary_app(diary_db, token=TOKEN, admin_user_ids=())
+    content = (Path(__file__).parent / "fixtures" / "import_full.csv").read_bytes()
+    status, data = await request_file_upload(app, content)
+    assert status == 200
+    [file] = data["files"]
+    assert (file["filename"], file["direction"], file["status"]) == ("journal.csv", "import", "ready")
+    with diary_db.begin() as session:
+        assert session.query(Entry).count() == 0
+        owner = session.query(User).filter_by(telegram_user_id=1).one()
+        assert [item.id for item in DataExchangeService(session).list_files(user_id=owner.id)] == [file["id"]]
+
+    async def command(action, *, file_id=None, user_id=1):
+        body = {"action": action}
+        if file_id is not None:
+            body["file_id"] = file_id
+        return await request_diary(app, path="/api/files", init_data=telegram_init_data(user_id),
+                                   method="POST", command=body)
+
+    assert (await request_file_upload(app, content))[0] == 409
+    assert (await request_file_upload(app, b"x" * (MAX_UPLOAD_BYTES + 1)))[0] == 413
+    assert (await request_file_upload(app, content, name="../journal.csv"))[0] == 400
+    status, data = await request_file_upload(app, content + b"\n", name="copy.csv")
+    assert status == 200
+    [copy] = [item for item in data["files"] if item["filename"] == "copy.csv"]
+    assert (await command("import", file_id=file["id"], user_id=2))[0] == 404
+    assert (await command("download", file_id=file["id"]))[0] == 400
+    status, data = await command("import", file_id=file["id"])
+    assert status == 200
+    assert next(item for item in data["files"] if item["id"] == file["id"])["status"] == "processed"
+    assert (await command("import", file_id=file["id"]))[0] == 422
+    status, data = await command("import", file_id=copy["id"])
+    assert status == 409
+    assert next(item for item in data["files"] if item["id"] == copy["id"])["status"] == "error"
+    assert (await command("delete", file_id=copy["id"]))[0] == 200
+
+    status, data = await command("export")
+    assert status == 200
+    [export] = [item for item in data["files"] if item["direction"] == "export"]
+    assert (await command("export"))[1]["files"] == data["files"]
+    assert (await command("download", file_id=export["id"], user_id=2))[0] == 404
+    request = make_mocked_request(
+        "POST", "/api/files", app=app,
+        headers={"Authorization": f"tma {telegram_init_data(1)}", "Content-Type": "application/json"},
+    )
+    request.read = AsyncMock(return_value=json.dumps({"action": "download", "file_id": export["id"]}).encode())
+    route = await app.router.resolve(request)
+    result = await route.handler(request)
+    assert result.status == 200 and result.content_type == "text/csv"
+    assert result.headers["Cache-Control"] == "no-store"
+    assert export["filename"] in result.headers["Content-Disposition"]
+    assert "Блюдо / продукт" in result.body.decode("utf-8-sig")
+    status, data = await command("delete", file_id=file["id"])
+    assert status == 200 and [item["status"] for item in data["files"]] == ["processed"]
+    with diary_db.begin() as session:
+        assert session.query(Entry).count() == file["rows"]
 
 
 async def test_report_uses_annual_groups_and_saved_goals(diary_db, monkeypatch):

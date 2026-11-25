@@ -57,6 +57,8 @@ services:
   mini-app:
     image: nginx:stable-alpine
     restart: unless-stopped
+    labels:
+      io.food-registry.release: "${APP_VERSION:-dev}"
     ports:
       - "127.0.0.1:${MINI_APP_PORT:-8080}:80"
     volumes:

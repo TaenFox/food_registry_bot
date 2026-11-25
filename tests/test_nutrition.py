@@ -1,4 +1,6 @@
+import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from pydantic import ValidationError
@@ -65,8 +67,6 @@ def build_metric_payload(item_ids: list[str], *, confidence: str = "medium") -> 
                 ],
             }
         )
-    import json
-
     return json.dumps({"items": items}, ensure_ascii=False)
 
 
@@ -214,6 +214,72 @@ def test_llm_nutrition_service_handles_client_errors() -> None:
         error_code="client_error",
         is_llm=True,
     )
+
+
+def test_llm_nutrition_rechecks_only_inconsistent_items_and_keeps_better_results() -> None:
+    request = NutritionEstimationRequest(items=[
+        {"client_item_id": "a", "name": "булочка с маком", "quantity": 120, "unit": "g"},
+        {"client_item_id": "b", "name": "плов"},
+        {"client_item_id": "c", "name": "оладьи"},
+    ])
+    original = json.loads(build_metric_payload(["a", "b", "c"]))
+    original["items"][0]["metrics"][0]["value"] = 275
+    original["items"][2]["metrics"][0]["value"] = 250
+    retry = json.loads(build_metric_payload(["b", "a"]))
+    retry["items"][0]["metrics"][0]["value"] = 350
+    retry["items"][1]["metrics"][0]["value"] = 239
+    client = SimpleNamespace(
+        provider_name="test", model_name=None,
+        estimate_nutrition_payload=Mock(side_effect=[json.dumps(original), json.dumps(retry)]),
+    )
+
+    result = LLMNutritionEstimationService(client).estimate(request)
+
+    assert isinstance(result, ValidNutritionPayload)
+    first_call, retry_call = client.estimate_nutrition_payload.call_args_list
+    assert first_call.args == (request,)
+    assert retry_call.args[0].items == request.items[:2]
+    assert [item.client_item_id for item in result.payload.items] == ["a", "b", "c"]
+    assert [item.metrics[0].value for item in result.payload.items] == [239, 221, 250]
+
+
+@pytest.mark.parametrize("retry", [LLMNutritionClientError("timeout"), '{"items": []}', ""])
+def test_llm_nutrition_keeps_first_estimate_if_recheck_fails(retry) -> None:
+    request = build_request()
+    original = build_metric_payload([item.client_item_id for item in request.items])
+    client = SimpleNamespace(
+        provider_name="test", model_name=None,
+        estimate_nutrition_payload=Mock(side_effect=[original, retry]),
+    )
+
+    result = LLMNutritionEstimationService(client).estimate(request)
+
+    assert isinstance(result, ValidNutritionPayload)
+    assert result.raw_payload == original
+    assert client.estimate_nutrition_payload.call_count == 2
+
+
+def test_llm_nutrition_skips_label_alcohol_zero_and_discrepancy_at_threshold() -> None:
+    request = NutritionEstimationRequest(items=[
+        {"client_item_id": "label", "name": "йогурт", "nutrition_label": {
+            "basis": "per_100g", "calories": 220, "protein": 7.6, "fat": 2.2, "carbs": 42.8,
+        }},
+        {"client_item_id": "alcohol", "name": "бокал красного вина"},
+        {"client_item_id": "zero_macros", "name": "напиток"},
+        {"client_item_id": "boundary", "name": "овощи"},
+    ])
+    original = json.loads(build_metric_payload([item.client_item_id for item in request.items]))
+    for metric in original["items"][2]["metrics"][1:4]:
+        metric["value"] = 0
+    for metric, value in zip(original["items"][3]["metrics"], [100, 12, 5, 0, 3]):
+        metric["value"] = value
+    client = SimpleNamespace(
+        provider_name="test", model_name=None,
+        estimate_nutrition_payload=Mock(return_value=json.dumps(original)),
+    )
+
+    assert isinstance(LLMNutritionEstimationService(client).estimate(request), ValidNutritionPayload)
+    client.estimate_nutrition_payload.assert_called_once_with(request)
 
 
 def test_factory_uses_static_provider_by_default() -> None:
