@@ -8,7 +8,9 @@ const scale = document.querySelector(".scale");
 const plot = document.querySelector(".plot");
 const chart = plot.querySelector("svg");
 const dates = document.querySelector(".dates");
-const legend = document.querySelector(".legend");
+const dayProgress = document.querySelector(".day-progress");
+const progressAxis = dayProgress.querySelector(".progress-axis");
+const metricProgress = dayProgress.querySelector(".metric-progress");
 const mealList = document.querySelector(".meals");
 const detail = document.querySelector("#metric-detail");
 const chartEmpty = document.querySelector("#plot-empty");
@@ -33,6 +35,7 @@ const fullDate = new Intl.DateTimeFormat("ru", { day: "numeric", month: "long", 
 const shortWeekday = new Intl.DateTimeFormat("ru", { weekday: "short", timeZone: "UTC" });
 const longWeekday = new Intl.DateTimeFormat("ru", { weekday: "long", timeZone: "UTC" });
 let model;
+let chartMaximum;
 let selectedDay;
 let selectedMetric;
 let expiresAt;
@@ -77,8 +80,8 @@ function renderChart() {
     const values = model.days.flatMap(day =>
         model.metrics.map(code => day.metrics[code].percent)
     ).filter(Number.isFinite);
-    const maximum = Math.ceil(Math.max(thresholdHigh + 10, ...values) / 10) * 10;
-    const y = value => 188 - value / maximum * 176;
+    chartMaximum = Math.ceil(Math.max(thresholdHigh + 10, ...values) / 10) * 10;
+    const y = value => 188 - value / chartMaximum * 176;
     let hasGoals = false;
 
     for (const [index, day] of model.days.entries()) {
@@ -98,20 +101,17 @@ function renderChart() {
         }
     }
 
-    const ticks = [maximum, thresholdHigh, thresholdLow, 0];
-    let previousLabelY = -Infinity;
+    const step = 25 * Math.ceil(chartMaximum / 175);
+    const ticks = [chartMaximum, 100, 0];
+    for (let tick = step; tick < chartMaximum; tick += step) {
+        if (ticks.every(value => Math.abs(tick - value) >= chartMaximum / 12)) ticks.push(tick);
+    }
     for (const tick of ticks) {
-        const isLimit = tick === thresholdHigh || tick === thresholdLow;
         const position = y(tick);
-        if (!isLimit) {
-            draw("line", { x1: 0, x2: 400, y1: position, y2: position }, "axis");
-        }
-        if (position - previousLabelY >= 18 && (!isLimit || y(0) - position >= 18)) {
-            const label = element("span", tick + "%", isLimit ? "limit" : "");
-            label.style.setProperty("--y", position / 2 + "%");
-            scale.append(label);
-            previousLabelY = position;
-        }
+        draw("line", { x1: 0, x2: 400, y1: position, y2: position }, "axis");
+        const label = element("span", tick + "%", tick === 100 ? "goal-tick" : "");
+        label.style.setProperty("--y", position / 2 + "%");
+        scale.append(label);
     }
 
     const series = selectedMetric
@@ -148,18 +148,63 @@ function renderChart() {
     goalKey.hidden = !hasGoals;
 }
 
+function progressPosition(percent) {
+    return Math.min(100, Math.max(0, percent / chartMaximum * 100)) + "%";
+}
+
 function renderMetric() {
-    for (const button of legend.querySelectorAll("button")) {
-        button.setAttribute("aria-pressed", String(button.dataset.metric === selectedMetric));
+    const day = model.days[selectedDay];
+    dayProgress.hidden = !model.metrics.length;
+    progressAxis.hidden = !model.metrics.some(code => day.metrics[code].goal > 0);
+    progressAxis.lastElementChild.lastElementChild.textContent = chartMaximum + "%";
+    dayProgress.style.setProperty("--goal-position", progressPosition(100));
+    dayProgress.style.setProperty("--lower-position", progressPosition(100 - model.tolerance));
+    dayProgress.style.setProperty("--upper-position", progressPosition(100 + model.tolerance));
+    for (const button of metricProgress.querySelectorAll("button")) {
+        const code = button.dataset.metric;
+        const observation = day.metrics[code];
+        const track = button.querySelector(".metric-track");
+        const hasPercent = Number.isFinite(observation.percent);
+        const percent = hasPercent ? Math.round(observation.percent) + "%" : "—";
+        button.setAttribute("aria-pressed", String(code === selectedMetric));
+        button.lastElementChild.textContent = percent;
+        const description = hasPercent ? percent + " от цели"
+            : observation.goal === null ? "нет цели" : "нет данных";
+        const partial = hasPercent && !observation.complete ? ", неполные данные" : "";
+        button.setAttribute("aria-label", `${metricLabels[code]} · ${description}${partial}`);
+        track.replaceChildren();
+        if (hasPercent) {
+            const fill = element("span", undefined, "metric-fill");
+            fill.style.width = progressPosition(observation.percent);
+            track.append(fill);
+        }
+        if (observation.goal > 0) {
+            track.append(element("span", undefined, "metric-range"), element("span", undefined, "metric-goal"));
+        }
+        if (!hasPercent) continue;
+        let cumulative = 0;
+        for (const meal of [...day.meals].reverse()) {
+            const value = meal.totals[code].value;
+            if (!(value > 0)) continue;
+            cumulative += value;
+            const mark = element("span", undefined, "metric-entry");
+            mark.style.left = progressPosition(cumulative / observation.goal * 100);
+            track.append(mark);
+        }
     }
     detail.hidden = !selectedMetric;
     detail.textContent = "";
     if (!selectedMetric) return;
 
-    const observation = model.days[selectedDay].metrics[selectedMetric];
-    const unit = selectedMetric === "calories" ? "ккал" : "г";
-    const amount = value => value === null ? "—" : formatter.format(value) + " " + unit;
+    const observation = day.metrics[selectedMetric];
+    const amount = value => formatAmount(value, selectedMetric);
     let text = `${metricLabels[selectedMetric]} · ${amount(observation.value)} из ${amount(observation.goal)}`;
+    if (Number.isFinite(observation.percent)) {
+        const difference = observation.goal - observation.value;
+        const absolute = Math.abs(difference);
+        text += absolute < 0.05 ? " · на уровне цели"
+            : ` · ${difference > 0 ? "до цели" : "сверх цели"} ${amount(absolute)}`;
+    }
     if (observation.goal !== null) {
         text += ` · пороги ${formatter.format(observation.lower)}–${amount(observation.upper)}`;
     }
@@ -441,15 +486,15 @@ function renderControls() {
         dates.append(button);
     }
 
-    legend.replaceChildren();
+    metricProgress.replaceChildren();
     for (const code of model.metrics) {
         const item = element("li", undefined, seriesClass(code));
         const button = element("button");
         button.type = "button";
         button.dataset.metric = code;
-        const swatch = element("i");
-        swatch.setAttribute("aria-hidden", "true");
-        button.append(swatch, document.createTextNode(metricLabels[code]));
+        const track = element("span", undefined, "metric-track");
+        track.setAttribute("aria-hidden", "true");
+        button.append(element("span", metricLabels[code]), track, element("strong"));
         button.addEventListener("click", () => {
             if (expire()) return;
             selectedMetric = selectedMetric === code ? undefined : code;
@@ -459,7 +504,7 @@ function renderControls() {
             renderMeals(model.days[selectedDay]);
         });
         item.append(button);
-        legend.append(item);
+        metricProgress.append(item);
     }
 }
 
@@ -487,7 +532,7 @@ function clearDiary(message) {
     date.textContent = "";
     date.removeAttribute("datetime");
     dates.replaceChildren();
-    legend.replaceChildren();
+    metricProgress.replaceChildren();
     setActionStatus("");
     showStatus(message);
 }

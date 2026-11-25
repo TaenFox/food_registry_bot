@@ -29,12 +29,12 @@
 #diary-trends h1 { font-size: 24px; letter-spacing: -.035em; }
 #diary-trends .unit { margin-top: 10px; color: var(--muted); font-size: 11px; }
 #diary-trends .graph { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 6px; margin-top: 4px; }
-#diary-trends .scale, #diary-trends .plot { position: relative; height: 154px; }
+#diary-trends .scale, #diary-trends .plot { position: relative; height: 218px; }
 #diary-trends .scale span {
   position: absolute; right: 0; top: var(--y); transform: translateY(-50%);
   color: var(--muted); font-size: 11px;
 }
-#diary-trends .scale .limit { font-weight: 650; color: var(--kcal); }
+#diary-trends .scale .goal-tick { font-weight: 650; color: var(--ink); }
 #diary-trends .plot svg { position: relative; width: 100%; height: 100%; display: block; }
 #diary-trends .plot line { vector-effect: non-scaling-stroke; }
 #diary-trends .axis { stroke: var(--rule); stroke-width: 1; }
@@ -67,13 +67,44 @@
 #diary-trends .dates button[aria-pressed="true"] span { background: var(--selection); }
 #diary-trends .dates button span { display: inline-block; padding: 2px 4px; border-radius: 6px; white-space: nowrap; }
 #diary-trends .dates .weekend { color: var(--kcal); }
-#diary-trends .legend { display: flex; flex-wrap: wrap; gap: 5px 10px; padding: 2px 0 0; list-style: none; font-size: 12px; }
-#diary-trends .legend li, #diary-trends .notes span { display: inline-flex; align-items: center; gap: 5px; }
-#diary-trends .legend i { width: 13px; height: 3px; border-radius: 2px; background: var(--series); }
+#diary-trends .notes span:not([hidden]) { display: inline-flex; align-items: center; gap: 5px; }
 #diary-trends .notes { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: var(--muted); }
 #diary-trends .band-key { width: 13px; height: 7px; background: var(--band); border-block: 1px dashed var(--threshold); }
 #diary-trends .goal-key { width: 13px; border-top: 2px solid var(--ink); }
 #diary-trends .dash-key { width: 13px; border-top: 2px dotted var(--muted); }
+#diary-trends .day-progress { margin-top: 9px; }
+#diary-trends .metric-progress { padding: 0; list-style: none; }
+#diary-trends :where(.progress-axis, .metric-progress button) {
+  display: grid; grid-template-columns: 75px minmax(0, 1fr) 42px; column-gap: 7px;
+  align-items: center; padding-inline: 4px;
+}
+#diary-trends .progress-axis { font-size: 11px; color: var(--muted); }
+#diary-trends .progress-axis > span { grid-column: 2; position: relative; display: flex; justify-content: space-between; }
+#diary-trends .progress-axis > span > :nth-child(2) { position: absolute; left: var(--goal-position); transform: translateX(-50%); }
+#diary-trends .metric-progress button {
+  width: 100%; min-height: 30px; border: 0; border-radius: 6px; padding-block: 0;
+  color: inherit; background: transparent; font: inherit; font-size: 12px; text-align: start;
+}
+#diary-trends .metric-progress button[aria-pressed="true"] { background: var(--selection); }
+#diary-trends .metric-progress strong { text-align: end; }
+#diary-trends .metric-track { position: relative; height: 8px; border-radius: 4px; background: var(--panel); }
+#diary-trends .metric-track > span { position: absolute; inset-block: 0; }
+#diary-trends .metric-fill { inset-inline-start: 0; background: var(--series); border-radius: inherit; }
+#diary-trends .metric-range {
+  left: var(--lower-position); width: calc(var(--upper-position) - var(--lower-position));
+  box-sizing: border-box; border-inline: 1px dashed var(--threshold);
+  background: color-mix(in srgb, var(--band) 62%, transparent);
+}
+#diary-trends .metric-track .metric-goal {
+  left: var(--goal-position); width: 2px; transform: translateX(-50%); inset-block: -2px;
+  background: var(--ink); border-radius: 1px; z-index: 1;
+}
+#diary-trends .metric-track .metric-entry {
+  width: 1px; inset-block: 1px; transform: translateX(-50%); background: var(--page);
+}
+#diary-trends .metric-track .metric-entry:last-child {
+  width: 2px; inset-block: 0; background: var(--series); box-shadow: -1px 0 var(--page);
+}
 #diary-trends .meals { margin-top: 10px; }
 #diary-trends .meals ul { padding: 2px 0 0; list-style: none; }
 #diary-trends .meal { border-top: 1px solid var(--rule); padding: 6px 0 4px; }
@@ -98,13 +129,7 @@
   fill: var(--page); stroke: var(--series); stroke-width: 1.5;
   vector-effect: non-scaling-stroke;
 }
-#diary-trends .legend button {
-  background: transparent; border: 0; border-radius: 6px;
-  color: inherit; font: inherit; padding: 5px 2px; min-height: 30px;
-  display: inline-flex; align-items: center; gap: 4px;
-}
-#diary-trends .legend button[aria-pressed="true"] { background: var(--selection); }
-#diary-trends .dates button, #diary-trends .legend button { cursor: pointer; }
+#diary-trends :is(.dates, .metric-progress) button { cursor: pointer; }
 #diary-trends .meal-note { font-size: 12px; color: var(--muted); padding-bottom: 8px; }
 #diary-trends #action-status { margin-top: 8px; padding-bottom: 0; }
 #diary-trends .dish-panel { padding: 8px; margin: 3px 0 7px; background: var(--panel); border-radius: 9px; }
@@ -131,5 +156,5 @@
 #diary-trends .dish-warning { margin-top: 6px; color: var(--warning); font-size: 12px; }
 @media (pointer: coarse) {
   #diary-trends .dish { min-height: 36px; }
-  #diary-trends :is(.legend button,.dish-panel button) { min-height: 44px; }
+  #diary-trends .dish-panel button { min-height: 44px; }
 }
