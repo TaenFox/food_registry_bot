@@ -425,8 +425,8 @@ git pull
 
 ### Telegram Mini App в homelab
 
-1. В Compose из этого репозитория направьте HTTPS на `http://127.0.0.1:8080` на хосте Docker. Контейнер `mini-app` отдаёт страницу и проксирует `/api/diary`, `/api/report`, `/api/settings` и `/api/entries` на `bot:8081`. Если `8080` занят, задайте `MINI_APP_PORT` и используйте этот же порт в конфигурации внешнего прокси.
-2. Если приложение развёрнуто отдельным репозиторием `homelab`, подключите контейнер `bot` к его сети Compose `default` и к сети `homelab-web` с алиасом `food-registry-diary-api`. В Caddy направьте точные пути `/api/diary`, `/api/report`, `/api/settings` и `/api/entries` на `food-registry-diary-api:8081`, остальные пути — на существующий `mini-app:80`. Порт API остаётся внутренним.
+1. В Compose из этого репозитория направьте HTTPS на `http://127.0.0.1:8080` на хосте Docker. Контейнер `mini-app` отдаёт страницу и проксирует `/api/diary`, `/api/report`, `/api/settings`, `/api/entries` и `/api/files` на `bot:8081`. Если `8080` занят, задайте `MINI_APP_PORT` и используйте этот же порт в конфигурации внешнего прокси.
+2. Если приложение развёрнуто отдельным репозиторием `homelab`, подключите контейнер `bot` к его сети Compose `default` и к сети `homelab-web` с алиасом `food-registry-diary-api`. В Caddy направьте точные пути `/api/diary`, `/api/report`, `/api/settings`, `/api/entries` и `/api/files` на `food-registry-diary-api:8081`, остальные пути — на существующий `mini-app:80`. Порт API остаётся внутренним.
 3. Задайте `MINI_APP_URL=https://diary.example.com/` с адресом развёртывания. Для Compose этого репозитория настройка находится в `../food_registry_bot_local/.env`, для отдельного `homelab` — в `FOOD_REGISTRY_BOT_MINI_APP_URL`. При запуске бот настраивает кнопку **Дневник** в меню личного чата. Без URL он восстанавливает меню команд.
 4. После развёртывания откройте адрес в обычном браузере и убедитесь, что отображается только просьба открыть дневник в Telegram. Затем откройте дневник из чата разрешённого пользователя, переключите дату и проверьте цели и записи. Для запуска также из профиля и вкладки приложений можно настроить **Main Mini App** с тем же URL через BotFather.
 
