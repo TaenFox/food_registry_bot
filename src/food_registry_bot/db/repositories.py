@@ -220,6 +220,17 @@ class UserAccessRepository:
         access = self.get_by_telegram_user_id(telegram_user_id)
         return bool(access and access.is_allowed)
 
+    def start_trial_if_new(
+        self, *, telegram_user_id: int, username: str | None, now: datetime,
+    ) -> UserAccess | None:
+        return insert_if_absent(self._session, UserAccess, {
+            "telegram_user_id": telegram_user_id,
+            "username": username,
+            "is_allowed": True,
+            "account_category": AccountCategory.EXTERNAL,
+            "temporary_internal_until": now + timedelta(days=7),
+        }, ("telegram_user_id",))
+
     def get_account_category(self, telegram_user_id: int) -> AccountCategory:
         access = self.get_by_telegram_user_id(telegram_user_id)
         if access is None:

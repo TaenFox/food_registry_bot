@@ -316,7 +316,10 @@ def create_diary_app(
             else:
                 return response(503, {"error": "entry_provider_unavailable"})
         except MiniAppEntryError as exc:
-            return response(exc.status, {"error": exc.code})
+            payload = {"error": exc.code}
+            if exc.message:
+                payload["message"] = exc.message
+            return response(exc.status, payload)
         return response(200, {"summary_date": summary_date.isoformat()})
 
     async def exchange_files(request: web.Request, telegram_user_id: int) -> web.Response:

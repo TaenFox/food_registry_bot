@@ -6,7 +6,6 @@ import hmac
 import json
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
-from threading import Barrier
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from urllib.parse import urlencode
@@ -18,6 +17,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from food_registry_bot.config import Settings
+from food_registry_bot.llm_access.resolver import ResolvedProviderAccess, UserLLMRuntimeBundle
+from food_registry_bot.llm_access.trial import TrialQuota
 from food_registry_bot.conversation import DisabledConversationService
 from food_registry_bot.db.base import Base
 from food_registry_bot.db.models import (
@@ -447,13 +448,6 @@ async def test_simultaneous_entry_retries_commit_only_once(diary_db):
     _, app, extract, estimate = entry_writer(diary_db, [
         {"type": "food", "items": [{"name": "Овсянка", "quantity": 180, "unit": "g"}]},
     ])
-    both_requests = Barrier(2)
-
-    def extract_together(_request):
-        both_requests.wait(timeout=5)
-        return extract.return_value
-
-    extract.side_effect = extract_together
     command = {
         "request_id": str(uuid4()), "text": "Овсянка 180 г",
         "local_date": datetime.now(timezone.utc).date().isoformat(), "local_time": "13:15",
@@ -461,10 +455,46 @@ async def test_simultaneous_entry_retries_commit_only_once(diary_db):
     first, second = await asyncio.gather(submit_entry(app, command), submit_entry(app, command))
     assert first == second
     assert first[0] == 200
+    assert extract.call_count == 1
     assert estimate.call_count == 1
     with diary_db() as session:
         assert session.query(Entry).count() == 1
         assert session.query(MiniAppEntrySubmission).count() == 1
+
+
+async def test_trial_food_quota_is_shared_and_only_charges_new_provider_requests(diary_db, monkeypatch):
+    writer, app, extract, estimate = entry_writer(diary_db, [
+        {"type": "food", "items": [{"name": "Овсянка", "quantity": 180, "unit": "g"}]},
+    ])
+    writer.trial_quota = TrialQuota()
+    now = datetime.now(timezone.utc)
+    with diary_db.begin() as session:
+        access = session.query(UserAccess).filter_by(telegram_user_id=1).one()
+        access.temporary_internal_until = now + timedelta(days=1)
+        user_id = session.query(User).filter_by(telegram_user_id=1).one().id
+    runtime = UserLLMRuntimeBundle(
+        writer.extraction_service, writer.nutrition_service, writer.conversation_service,
+        ResolvedProviderAccess(True, "project", "openai", "test", "key"), None, None,
+    )
+    monkeypatch.setattr(
+        "food_registry_bot.mini_app_entries.build_user_llm_runtime_bundle", lambda **kwargs: runtime,
+    )
+    for _ in range(6):
+        assert writer.trial_quota.consume(
+            user_id, "food", now=now, timezone_name="Asia/Tbilisi", start_hour=4,
+        ) is None
+    command = {
+        "request_id": str(uuid4()), "text": "Овсянка 180 г",
+        "local_date": now.date().isoformat(), "local_time": "13:15",
+    }
+    saved = await submit_entry(app, command)
+    assert saved[0] == 200
+    assert await submit_entry(app, command) == saved
+    status, payload = await submit_entry(app, {**command, "request_id": str(uuid4())})
+    assert status == 429
+    assert payload["error"] == "trial_limit_exceeded"
+    assert "04:00" in payload["message"]
+    assert extract.call_count == estimate.call_count == 1
 
 
 def entry_writer(factory, entries):

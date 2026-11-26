@@ -11,6 +11,7 @@ from food_registry_bot.conversation.factory import create_conversation_service
 from food_registry_bot.config import get_settings
 from food_registry_bot.db.session import create_session_factory
 from food_registry_bot.extraction.factory import create_extraction_service
+from food_registry_bot.llm_access.trial import TrialQuota
 from food_registry_bot.mini_app import MINI_APP_PORT, create_diary_app
 from food_registry_bot.mini_app_entries import MiniAppEntryWriter
 from food_registry_bot.nutrition.factory import create_nutrition_service
@@ -103,6 +104,7 @@ async def run() -> None:
         extraction_service = create_extraction_service(settings)
         nutrition_service = create_nutrition_service(settings)
         conversation_service = create_conversation_service(settings)
+        trial_quota = TrialQuota()
         if settings.mini_app_url:
             diary_runner = web.AppRunner(
                 create_diary_app(
@@ -110,6 +112,7 @@ async def run() -> None:
                     write_entry=MiniAppEntryWriter(
                         session_factory, settings, extraction_service, nutrition_service,
                         conversation_service,
+                        trial_quota=trial_quota,
                     ).write,
                 ),
                 access_log=None,
@@ -130,6 +133,7 @@ async def run() -> None:
             admin_user_ids=settings.admin_user_ids,
             settings=settings,
             app_version=settings.app_version,
+            trial_quota=trial_quota,
         )
         await notify_admins_about_startup(
             bot=bot,

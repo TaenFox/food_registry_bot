@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import date, datetime, time, timezone
+from threading import Condition
 from typing import Literal, Optional, Union
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -44,6 +45,7 @@ from food_registry_bot.journal_write import (
     resolve_diet_service,
 )
 from food_registry_bot.llm_access.resolver import UserLLMRuntimeBundle, build_user_llm_runtime_bundle
+from food_registry_bot.llm_access.trial import TrialQuota, charge_trial_request, trial_has_expired, trial_limit_message
 from food_registry_bot.meal_repeat import copy_food_items
 from food_registry_bot.nutrition.beverage import is_plain_water
 from food_registry_bot.nutrition.contract import NutritionEstimationItemInput
@@ -100,10 +102,11 @@ MINI_APP_ENTRY_COMMAND = TypeAdapter(Union[CreateMiniAppEntry, RepeatMiniAppEntr
 
 
 class MiniAppEntryError(Exception):
-    def __init__(self, status: int, code: str) -> None:
+    def __init__(self, status: int, code: str, message: str | None = None) -> None:
         super().__init__(code)
         self.status = status
         self.code = code
+        self.message = message
 
 
 def resolve_occurred_at(command: CreateMiniAppEntry | RepeatMiniAppEntry | QuickWaterEntry, timezone_name: str) -> datetime:
@@ -224,14 +227,33 @@ class MiniAppEntryWriter:
         extraction_service: JournalExtractionService,
         nutrition_service: NutritionEstimationService,
         conversation_service: ConversationService,
+        *,
+        trial_quota: TrialQuota | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.settings = settings
         self.extraction_service = extraction_service
         self.nutrition_service = nutrition_service
         self.conversation_service = conversation_service
+        self.trial_quota = trial_quota
+        self._in_flight: set[tuple[int, UUID]] = set()
+        self._in_flight_condition = Condition()
 
     def write(
+        self, telegram_user_id: int, admin_user_ids: tuple[int, ...], command: CreateMiniAppEntry,
+    ) -> date:
+        key = telegram_user_id, command.request_id
+        with self._in_flight_condition:
+            self._in_flight_condition.wait_for(lambda: key not in self._in_flight)
+            self._in_flight.add(key)
+        try:
+            return self._write(telegram_user_id, admin_user_ids, command)
+        finally:
+            with self._in_flight_condition:
+                self._in_flight.remove(key)
+                self._in_flight_condition.notify_all()
+
+    def _write(
         self, telegram_user_id: int, admin_user_ids: tuple[int, ...], command: CreateMiniAppEntry,
     ) -> date:
         request_id = command.request_id.hex
@@ -262,7 +284,14 @@ class MiniAppEntryWriter:
             )
             username = user.username
             if runtime.extraction_access is not None and not runtime.extraction_access.is_available:
+                if runtime.extraction_access.source == "personal" and trial_has_expired(session, telegram_user_id):
+                    raise MiniAppEntryError(422, "trial_expired")
                 raise MiniAppEntryError(503, "entry_provider_unavailable")
+            resets_at = charge_trial_request(
+                self.trial_quota, session, user, admin_user_ids, "food", runtime.extraction_access,
+            )
+            if resets_at is not None:
+                raise MiniAppEntryError(429, "trial_limit_exceeded", trial_limit_message("food", resets_at, user.timezone))
 
         result = runtime.extraction_service.extract(request)
         if isinstance(result, InvalidExtractionPayload):
@@ -296,7 +325,17 @@ class MiniAppEntryWriter:
                 food_ids = [entry.id for entry in entries if entry.entry_type is EntryType.FOOD]
                 if food_ids:
                     if runtime.nutrition_access is not None and not runtime.nutrition_access.is_available:
+                        if runtime.nutrition_access.source == "personal" and trial_has_expired(session, telegram_user_id):
+                            raise MiniAppEntryError(422, "trial_expired")
                         raise MiniAppEntryError(503, "entry_provider_unavailable")
+                    if runtime.extraction_access is None:
+                        resets_at = charge_trial_request(
+                            self.trial_quota, session, user, admin_user_ids, "food", runtime.nutrition_access,
+                        )
+                        if resets_at is not None:
+                            raise MiniAppEntryError(
+                                429, "trial_limit_exceeded", trial_limit_message("food", resets_at, user.timezone),
+                            )
                     nutrition = StoredEntryNutritionEstimationUseCase(
                         session, runtime.nutrition_service
                     ).run(entry_ids=food_ids)

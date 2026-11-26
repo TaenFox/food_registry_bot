@@ -16,6 +16,7 @@ function createEntryView({ request, handleAccessError, expire, defaults, onSaved
         entry_not_recognized: "Не удалось распознать запись. Попробуйте уточнить описание.",
         entry_nutrition_failed: "Не удалось рассчитать состав записи. Попробуйте ещё раз.",
         entry_provider_unavailable: "Провайдер недоступен. Проверьте настройки через /provider в боте.",
+        trial_expired: "Пробный доступ к ИИ завершён. Дневник и повтор записей доступны.",
     };
     let submitting = false;
     let attempt;
@@ -77,7 +78,8 @@ function createEntryView({ request, handleAccessError, expire, defaults, onSaved
                 clear();
             } else {
                 if (result.payload.error === "entry_request_conflict") attempt = undefined;
-                status.textContent = errors[result.payload.error] || "Не удалось подтвердить запись. Попробуйте ещё раз.";
+                status.textContent = result.payload.message || errors[result.payload.error]
+                    || "Не удалось подтвердить запись. Попробуйте ещё раз.";
             }
         } catch {
             if (dialog.open) status.textContent = "Не удалось подтвердить запись. Попробуйте ещё раз.";
