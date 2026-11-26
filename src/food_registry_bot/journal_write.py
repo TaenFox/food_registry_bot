@@ -6,7 +6,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session, sessionmaker
 
 from food_registry_bot.config import Settings
-from food_registry_bot.db.models import Entry, LLMIssueStage
+from food_registry_bot.db.models import Entry, EntryType, LLMIssueStage
 from food_registry_bot.db.repositories import (
     EntryItemCreate,
     EntryItemMetricRepository,
@@ -29,6 +29,7 @@ from food_registry_bot.diet import (
 )
 from food_registry_bot.extraction.contract import ExtractedJournalEntry
 from food_registry_bot.extraction.service import ValidExtractionPayload
+from food_registry_bot.nutrition.journal_adapter import preserve_entry_item_source_facts
 
 
 def persist_extracted_entry(
@@ -40,7 +41,7 @@ def persist_extracted_entry(
     occurred_at: datetime,
     source_text: str | None,
 ) -> Entry:
-    return EntryRepository(session).create(
+    saved = EntryRepository(session).create(
         user_id=user_id,
         entry_type=extracted_entry.type,
         occurred_at=occurred_at,
@@ -58,6 +59,12 @@ def persist_extracted_entry(
             for item in extracted_entry.items
         ],
     )
+    if extracted_entry.type is EntryType.FOOD and any(item.is_beverage for item in extracted_entry.items):
+        preserve_entry_item_source_facts(saved)
+        for source, item in zip(extracted_entry.items, sorted(saved.items, key=lambda row: row.position)):
+            if source.is_beverage:
+                item.source_facts = {**(item.source_facts or {}), "beverage": True}
+    return saved
 
 
 def log_llm_issue(

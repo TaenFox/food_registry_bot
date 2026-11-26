@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Callable, Optional, TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, selectinload
@@ -951,16 +951,29 @@ class EntryRepository:
     def list_food_items_for_user(
         self, *, user_id: int, name_query: str, limit: int,
     ) -> list[tuple[EntryItem, datetime]]:
-        statement = (
-            select(EntryItem, Entry.occurred_at)
+        name = func.lower(func.trim(case((EntryItem.name == "water", "вода"), else_=EntryItem.name)))
+        ranked = (
+            select(
+                EntryItem.id.label("item_id"), Entry.occurred_at.label("occurred_at"),
+                func.row_number().over(
+                    partition_by=name,
+                    order_by=(Entry.occurred_at.desc(), Entry.id.desc(), EntryItem.position),
+                ).label("rank"),
+            )
             .join(EntryItem.entry)
-            .where(Entry.user_id == user_id, Entry.entry_type == EntryType.FOOD)
-            .options(selectinload(EntryItem.metrics).selectinload(EntryItemMetric.metric))
-            .order_by(Entry.occurred_at.desc(), Entry.id.desc(), EntryItem.position)
-            .limit(limit)
+            .where(Entry.user_id == user_id, Entry.entry_type.in_((EntryType.FOOD, EntryType.WATER)))
         )
         if name_query:
-            statement = statement.where(EntryItem.name.icontains(name_query, autoescape=True))
+            ranked = ranked.where(name.icontains(name_query, autoescape=True))
+        latest = ranked.subquery()
+        statement = (
+            select(EntryItem, latest.c.occurred_at)
+            .join(latest, latest.c.item_id == EntryItem.id)
+            .where(latest.c.rank == 1)
+            .options(selectinload(EntryItem.metrics).selectinload(EntryItemMetric.metric))
+            .order_by(latest.c.occurred_at.desc(), EntryItem.entry_id.desc(), EntryItem.position)
+            .limit(limit)
+        )
         return [(item, occurred_at) for item, occurred_at in self._session.execute(statement)]
 
 
@@ -1002,35 +1015,29 @@ class EntryRepository:
         occurred_at_from: datetime,
         occurred_at_to: datetime,
     ) -> list[Entry]:
-        statement = (
-            select(Entry)
-            .where(
-                Entry.user_id == user_id,
-                Entry.entry_type == EntryType.FOOD,
-                Entry.occurred_at >= occurred_at_from,
-                Entry.occurred_at < occurred_at_to,
-            )
-            .options(
-                selectinload(Entry.items)
-                .selectinload(EntryItem.metrics)
-                .selectinload(EntryItemMetric.metric)
-            )
-            .order_by(Entry.occurred_at.asc(), Entry.id.asc())
-        )
-        return list(self._session.scalars(statement))
+        return self._list_diary_entries(user_id, occurred_at_from, occurred_at_to, (EntryType.FOOD,))
 
     def list_water_for_user_between(
-        self,
-        *,
-        user_id: int,
-        occurred_at_from: datetime,
-        occurred_at_to: datetime,
+        self, *, user_id: int, occurred_at_from: datetime, occurred_at_to: datetime,
+    ) -> list[Entry]:
+        return self._list_diary_entries(user_id, occurred_at_from, occurred_at_to, (EntryType.WATER,))
+
+    def list_diary_for_user_between(
+        self, *, user_id: int, occurred_at_from: datetime, occurred_at_to: datetime,
+    ) -> list[Entry]:
+        return self._list_diary_entries(
+            user_id, occurred_at_from, occurred_at_to, (EntryType.FOOD, EntryType.WATER),
+        )
+
+    def _list_diary_entries(
+        self, user_id: int, occurred_at_from: datetime, occurred_at_to: datetime,
+        entry_types: tuple[EntryType, ...],
     ) -> list[Entry]:
         statement = (
             select(Entry)
             .where(
                 Entry.user_id == user_id,
-                Entry.entry_type == EntryType.WATER,
+                Entry.entry_type.in_(entry_types),
                 Entry.occurred_at >= occurred_at_from,
                 Entry.occurred_at < occurred_at_to,
             )

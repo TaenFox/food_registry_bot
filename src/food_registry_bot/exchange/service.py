@@ -36,6 +36,7 @@ from food_registry_bot.importing.csv_import import (
     summarize_workout_import_rows,
 )
 from food_registry_bot.nutrition import resolve_local_summary_date
+from food_registry_bot.nutrition.beverage import is_beverage, is_plain_water
 
 IMPORT_FILE_LIMIT = 5
 EXPORT_FILE_LIMIT = 5
@@ -616,7 +617,8 @@ class DataExchangeService:
                     for metric in item.metrics
                     if metric.metric is not None
                 }
-                is_water = entry.entry_type is EntryType.WATER
+                is_water = entry.entry_type is EntryType.WATER or is_plain_water(item)
+                categories = "напиток, вода, гидратация" if is_water else "напиток" if is_beverage(item) else ""
                 rows.append(
                     {
                         "Дата": resolve_local_summary_date(
@@ -626,7 +628,7 @@ class DataExchangeService:
                         ).isoformat(),
                         "Приём пищи": "Напиток" if is_water else (MEAL_TYPE_LABELS.get(entry.meal_type) or ""),
                         "Блюдо / продукт": item.name if not is_water else "water",
-                        "Категории": "напиток, вода, гидратация" if is_water else "",
+                        "Категории": categories,
                         "Количество": str(item.quantity or ""),
                         "Единица": item.unit or "",
                         "Ккал": _format_metric_value(metrics_by_code.get("calories", 0.0)),

@@ -15,6 +15,7 @@ from food_registry_bot.db.repositories import (
     EntryItemMetricValue,
     UserSummaryPreferenceRepository,
 )
+from food_registry_bot.nutrition.beverage import is_plain_water
 from food_registry_bot.nutrition.contract import (
     SUPPORTED_NUTRITION_METRIC_CODES,
     NutritionEstimationItemInput,
@@ -22,7 +23,6 @@ from food_registry_bot.nutrition.contract import (
 from food_registry_bot.nutrition.daily_summary import resolve_local_summary_date
 from food_registry_bot.nutrition.journal_adapter import preserve_entry_item_source_facts
 
-DIARY_METRICS = ("calories", "protein", "fat", "carbs")
 PositiveInteger = Annotated[int, Field(gt=0, le=2_147_483_647)]
 MetricValue = Annotated[FiniteFloat, Field(ge=0)]
 
@@ -97,7 +97,8 @@ def lock_diary_entries(
     entries = session.scalars(
         select(Entry)
         .where(
-            Entry.id.in_(entry_ids), Entry.user_id == user_id, Entry.entry_type == EntryType.FOOD
+            Entry.id.in_(entry_ids), Entry.user_id == user_id,
+            Entry.entry_type.in_((EntryType.FOOD, EntryType.WATER)),
         )
         .order_by(Entry.id)
         .with_for_update()
@@ -174,6 +175,8 @@ def _move_dish(
 
     preserve_entry_item_source_facts(source)
     preserve_entry_item_source_facts(target)
+    if target.entry_type is EntryType.WATER and not is_plain_water(item):
+        target.entry_type = EntryType.FOOD
     position = max((dish.position for dish in target.items), default=-1) + 1
     item.entry = target
     item.position = position
@@ -187,30 +190,33 @@ def _move_dish(
 def _edit_dish(
     session: Session, entry: Entry, item: EntryItem, values: dict[str, float], command: EditDish
 ) -> None:
+    if is_plain_water(item) and command.unit != "ml":
+        raise DiaryEditError(422, "water_requires_ml")
     old_unit = NutritionEstimationItemInput.normalize_unit(item.unit)
     old_quantity = (
         item.quantity
         if old_unit == command.unit and item.quantity is not None and item.quantity > 0
         else None
     )
-    overrides = command.per_100.model_dump(exclude_none=True)
-    if any(
-        code not in overrides and (old_quantity is None or code not in values)
-        for code in DIARY_METRICS
-    ):
-        raise DiaryEditError(422, f"missing_per_100{command.unit}")
+    overrides = command.per_100.model_dump(exclude_unset=True)
 
     current_metrics = {
         metric.metric.code: metric for metric in item.metrics if metric.metric is not None
     }
     updates = []
+    dropped = set()
     for code in SUPPORTED_NUTRITION_METRIC_CODES:
         if code in overrides:
+            if overrides[code] is None:
+                dropped.add(code)
+                continue
             value, confidence = overrides[code] * (command.quantity / 100), "high"
         elif old_quantity is not None and old_quantity != command.quantity and code in values:
             value = values[code] * (command.quantity / old_quantity)
             confidence = current_metrics[code].confidence
         else:
+            if old_quantity is None and code in Per100Values.model_fields and code in values:
+                dropped.add(code)
             continue
         if not math.isfinite(value):
             raise DiaryEditError(422, "invalid_per_100g")
@@ -219,10 +225,12 @@ def _edit_dish(
         )
 
     preserve_entry_item_source_facts(entry)
-    if overrides:
+    if overrides or dropped:
         facts = item.source_facts or {}
-        manual = set(facts.get("manual_metrics", ())) | overrides.keys()
+        manual = (set(facts.get("manual_metrics", ())) - dropped) | overrides.keys()
         item.source_facts = {**facts, "manual_metrics": sorted(manual)}
+    for code in dropped & current_metrics.keys():
+        session.delete(current_metrics[code])
     item.quantity = command.quantity
     item.unit = command.unit
     if updates:
