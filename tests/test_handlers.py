@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from io import BytesIO
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -82,7 +82,7 @@ from food_registry_bot.db.models import (
 from food_registry_bot.config import Settings
 from food_registry_bot.diet import StaticDietEvaluationService
 from food_registry_bot.diet.summary import DietScoreSummary
-from food_registry_bot.db.repositories import DataExchangeFileRepository
+from food_registry_bot.db.repositories import DataExchangeFileRepository, UserAccessRepository
 from food_registry_bot.extraction import (
     ExtractedJournalEntry,
     ExtractedJournalItem,
@@ -94,6 +94,7 @@ from food_registry_bot.extraction import (
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_FULL, CSV_CONTRACT_TYPE_PARTIAL
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_WORKOUT
 from food_registry_bot.llm_access import OpenAIKeyValidationResult
+from food_registry_bot.llm_access.trial import TrialQuota
 from food_registry_bot.nutrition import InvalidNutritionPayload, PeriodReportUseCase, StaticNutritionEstimationService
 from food_registry_bot.nutrition.period_report import resolve_report_cohorts
 
@@ -240,6 +241,8 @@ async def call_handle_report_at(
 
 async def test_start_denies_unallowed_user() -> None:
     session_factory = create_session_factory()
+    with session_factory.begin() as session:
+        session.add(UserAccess(telegram_user_id=DENIED_USER_ID, username="denied_user", is_allowed=False))
     message = SimpleNamespace(
         from_user=SimpleNamespace(id=DENIED_USER_ID, username="denied_user"),
         answer=AsyncMock(),
@@ -309,7 +312,7 @@ async def test_health_denies_unallowed_user() -> None:
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сейчас у тебя нет доступа к боту. Если он нужен, попроси администратора добавить твой Telegram ID.",
+        "Отправь /start, чтобы открыть дневник и начать пробный период.",
     )
 
 
@@ -761,6 +764,45 @@ async def test_external_user_gets_personal_provider_stub_for_conversation_messag
     assert "можно выбрать или удалить добавленный ключ" in response_text
 
 
+async def test_trial_chat_stops_at_dialogue_limit_and_keeps_access_after_expiry(monkeypatch) -> None:
+    session_factory = create_session_factory()
+    message = SimpleNamespace(
+        text="Что съесть на ужин?",
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="trial_user"),
+        answer=AsyncMock(),
+    )
+    await handle_start(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    with session_factory.begin() as session:
+        user_id = session.query(User).filter_by(telegram_user_id=ALLOWED_USER_ID).one().id
+    quota = TrialQuota()
+    now = datetime.now(timezone.utc)
+    for _ in range(20):
+        assert quota.consume(user_id, "conversation", now=now, timezone_name="Europe/Moscow", start_hour=4) is None
+    def unexpected_reply(**_kwargs):
+        raise AssertionError("A blocked request must not call the LLM")
+
+    monkeypatch.setattr(
+        "food_registry_bot.llm_access.resolver.create_conversation_service_for_access",
+        lambda **_kwargs: SimpleNamespace(reply=unexpected_reply),
+    )
+    message.answer.reset_mock()
+    options = {
+        "settings": make_settings(openai_api_key="project-key", enable_openai_provider=True),
+        "admin_user_ids": (ADMIN_ID,), "trial_quota": quota,
+    }
+    await handle_message(message, session_factory, **options)
+    assert "Дневной лимит диалога с ИИ исчерпан" in message.answer.await_args.args[0]
+    assert quota.remaining(user_id, now)["food"] == 7
+
+    with session_factory.begin() as session:
+        access = UserAccessRepository(session).get_by_telegram_user_id(ALLOWED_USER_ID)
+        access.temporary_internal_until = now - timedelta(seconds=1)
+    await handle_message(message, session_factory, **options)
+    assert "Пробный доступ к ИИ завершён" in message.answer.await_args.args[0]
+    await handle_health(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    assert message.answer.await_args.args == ("ok",)
+
+
 async def test_provider_menu_callback_deletes_connection() -> None:
     session_factory = create_session_factory()
     with session_factory() as session:
@@ -1110,7 +1152,7 @@ async def test_admin_panel_users_returns_second_page() -> None:
     assert reply_markup.inline_keyboard[3][0].text == "← Назад"
 
 
-async def test_admin_panel_users_shows_new_denied_user_after_first_contact() -> None:
+async def test_admin_panel_users_shows_new_trial_user_after_start() -> None:
     session_factory = create_session_factory()
     denied_message = SimpleNamespace(
         from_user=SimpleNamespace(id=LARGE_DENIED_USER_ID, username="new_user"),
@@ -1118,6 +1160,17 @@ async def test_admin_panel_users_shows_new_denied_user_after_first_contact() -> 
     )
 
     await handle_start(denied_message, session_factory, admin_user_ids=(ADMIN_ID,))
+    with session_factory.begin() as session:
+        access = UserAccessRepository(session).get_by_telegram_user_id(LARGE_DENIED_USER_ID)
+        assert access.is_allowed is True
+        assert access.account_category is AccountCategory.EXTERNAL
+        expiration = UserAccessRepository.normalize_datetime(access.temporary_internal_until)
+        assert timedelta(days=6, hours=23) < expiration - datetime.now(timezone.utc) <= timedelta(days=7)
+    assert "Пробный доступ к ИИ действует до" in denied_message.answer.await_args_list[0].args[0]
+    await handle_start(denied_message, session_factory, admin_user_ids=(ADMIN_ID,))
+    with session_factory.begin() as session:
+        access = UserAccessRepository(session).get_by_telegram_user_id(LARGE_DENIED_USER_ID)
+        assert UserAccessRepository.normalize_datetime(access.temporary_internal_until) == expiration
 
     callback = SimpleNamespace(
         from_user=SimpleNamespace(id=ADMIN_ID, username="admin"),
@@ -1138,7 +1191,7 @@ async def test_admin_panel_users_shows_new_denied_user_after_first_contact() -> 
     assert callback.message.edit_text.await_args.args == (
         "Пользователи (страница 1, по 10):\n"
         f"- {ADMIN_ID} [admin; internal; профиля нет]\n"
-        f"- {LARGE_DENIED_USER_ID} @new_user [доступ запрещён; unassigned; профиля нет]\n"
+        f"- {LARGE_DENIED_USER_ID} @new_user [доступ разрешён; internal; профиль есть]\n"
         "\n"
         "Выбери пользователя кнопкой ниже.",
     )
@@ -1967,10 +2020,11 @@ async def test_regular_message_denies_unallowed_user_before_processing() -> None
 
     with session_factory() as session:
         assert session.query(Entry).count() == 0
+        assert session.query(UserAccess).count() == 0
 
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
-        "Сейчас у тебя нет доступа к боту. Если он нужен, попроси администратора добавить твой Telegram ID.",
+        "Отправь /start, чтобы открыть дневник и начать пробный период.",
     )
 
 

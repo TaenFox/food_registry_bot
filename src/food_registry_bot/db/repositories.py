@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Callable, Optional, TYPE_CHECKING
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, selectinload
@@ -76,6 +76,7 @@ DEFAULT_SUMMARY_PREFERENCES = {
     "report_noticeable_entry_percentile": 80,
 }
 USER_CONTEXT_COMMENT_ENCRYPTED_PREFIX = "enc:"
+USER_LLM_CONTEXT_COMMENT_MAX_LENGTH = 1000
 
 
 @dataclass(frozen=True)
@@ -219,6 +220,34 @@ class UserAccessRepository:
     def is_allowed(self, telegram_user_id: int) -> bool:
         access = self.get_by_telegram_user_id(telegram_user_id)
         return bool(access and access.is_allowed)
+
+    def start_trial_if_new(
+        self, *, telegram_user_id: int, username: str | None, now: datetime,
+    ) -> UserAccess | None:
+        return insert_if_absent(self._session, UserAccess, {
+            "telegram_user_id": telegram_user_id,
+            "username": username,
+            "is_allowed": True,
+            "account_category": AccountCategory.EXTERNAL,
+            "temporary_internal_until": now + timedelta(days=7),
+        }, ("telegram_user_id",))
+
+    def list_expired_trials(self, *, now: datetime) -> list[UserAccess]:
+        return list(self._session.scalars(
+            select(UserAccess)
+            .where(UserAccess.temporary_internal_until <= now)
+            .order_by(UserAccess.temporary_internal_until, UserAccess.telegram_user_id)
+        ))
+
+    def clear_notified_trial(self, *, telegram_user_id: int, expires_at: datetime) -> None:
+        self._session.execute(
+            update(UserAccess)
+            .where(
+                UserAccess.telegram_user_id == telegram_user_id,
+                UserAccess.temporary_internal_until == expires_at,
+            )
+            .values(temporary_internal_until=None)
+        )
 
     def get_account_category(self, telegram_user_id: int) -> AccountCategory:
         access = self.get_by_telegram_user_id(telegram_user_id)
@@ -404,10 +433,14 @@ class UserLLMProfileRepository:
         if profile is not None:
             return profile, False
 
-        profile = UserLLMProfile(user_id=user_id, selection_mode=UserLLMSelectionMode.PROJECT)
-        self._session.add(profile)
-        self._session.flush()
-        return profile, True
+        profile = insert_if_absent(self._session, UserLLMProfile, {
+            "user_id": user_id, "selection_mode": UserLLMSelectionMode.PROJECT,
+        }, ("user_id",))
+        if profile is not None:
+            return profile, True
+        return self._session.scalars(
+            select(UserLLMProfile).where(UserLLMProfile.user_id == user_id)
+        ).one(), False
 
     def set_selection_mode(
         self,
@@ -441,7 +474,9 @@ class UserLLMProfileRepository:
         user_id: int,
         encryption_secret: str | None,
     ) -> str | None:
-        profile, _created = self.get_or_create(user_id=user_id)
+        profile = self.get_by_user_id(user_id)
+        if profile is None:
+            return None
         return self._deserialize_user_context_comment(
             stored_value=profile.user_context_comment,
             encryption_secret=encryption_secret,
