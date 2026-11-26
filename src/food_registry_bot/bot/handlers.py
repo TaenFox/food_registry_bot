@@ -95,6 +95,7 @@ from food_registry_bot.db.models import (
     EntryType,
     LLMConnectionValidationStatus,
     LLMProvider,
+    User,
     UserLLMSelectionMode,
 )
 from food_registry_bot.db.models import DataExchangeDirection, DataExchangeFile, DataExchangeStatus, LLMIssueStage
@@ -119,6 +120,7 @@ from food_registry_bot.db.repositories import (
     UserRepository,
     SupportedDietView,
     UserSummaryPreferenceRepository,
+    USER_LLM_CONTEXT_COMMENT_MAX_LENGTH,
 )
 from food_registry_bot.exchange import DataExchangeService, DuplicateDataRowError, DuplicateFileError, UnsupportedExchangeFileError
 from food_registry_bot.extraction import (
@@ -146,8 +148,16 @@ from food_registry_bot.llm_access import (
     validate_openai_api_key,
 )
 from food_registry_bot.llm_access.resolver import (
+    ResolvedProviderAccess,
     build_provider_unavailable_message,
     build_user_llm_runtime_bundle,
+)
+from food_registry_bot.llm_access.trial import (
+    TRIAL_DAILY_LIMITS,
+    TrialQuota,
+    charge_trial_request,
+    trial_has_expired,
+    trial_limit_message,
 )
 from food_registry_bot.meal_repeat import copy_food_items
 from food_registry_bot.nutrition import (
@@ -249,7 +259,9 @@ API_KEY_PLACEHOLDER = "<API_KEY>"
 PROVIDER_PLACEHOLDER = "<PROVIDER>"
 SUPPORTED_PERSONAL_PROVIDERS = (LLMProvider.OPENAI, LLMProvider.MISTRAL)
 SUPPORTED_DIET_METRIC_CODES = get_supported_diet_metric_codes()
-USER_LLM_CONTEXT_COMMENT_MAX_LENGTH = 1000
+BOT_ACCESS_DENIED_MESSAGE = (
+    "Сейчас у тебя нет доступа к боту. Если он нужен, попроси администратора добавить твой Telegram ID."
+)
 SETTINGS_SECTION_ROOT = "root"
 SETTINGS_SECTION_GOALS = "goals"
 SETTINGS_SECTION_METRICS = "metrics"
@@ -488,21 +500,16 @@ async def require_user_access(
     session_factory: sessionmaker[Session],
     admin_user_ids: tuple[int, ...],
 ) -> bool:
-    with session_scope(session_factory) as session:
-        telegram_user = message.from_user
-        has_access = user_has_access(message, session, admin_user_ids)
-        if not has_access and telegram_user is not None and not is_admin_user(telegram_user.id, admin_user_ids):
-            UserAccessRepository(session).set_access(
-                telegram_user_id=telegram_user.id,
-                username=telegram_user.username,
-                is_allowed=False,
-            )
-
-    if has_access:
+    telegram_user = message.from_user
+    if telegram_user is not None and is_admin_user(telegram_user.id, admin_user_ids):
         return True
-
+    with session_scope(session_factory) as session:
+        access = UserAccessRepository(session).get_by_telegram_user_id(telegram_user.id) if telegram_user else None
+        if access is not None and access.is_allowed:
+            return True
     await message.answer(
-        "Сейчас у тебя нет доступа к боту. Если он нужен, попроси администратора добавить твой Telegram ID."
+        "Отправь /start, чтобы открыть дневник и начать пробный период."
+        if access is None and telegram_user is not None else BOT_ACCESS_DENIED_MESSAGE
     )
     return False
 
@@ -681,7 +688,9 @@ def format_admin_datetime(value: datetime) -> str:
     return normalized_value.strftime("%Y-%m-%d %H:%M UTC")
 
 
-def build_personal_provider_required_message() -> str:
+def build_personal_provider_required_message(*, trial_expired: bool = False) -> str:
+    if trial_expired:
+        return "Пробный доступ к ИИ завершён. Дневник, отчёты и повтор записей доступны."
     escaped_provider_placeholder = html.escape(PROVIDER_PLACEHOLDER)
     escaped_model_placeholder = html.escape(LLM_MODEL_PLACEHOLDER)
     escaped_api_key_placeholder = html.escape(API_KEY_PLACEHOLDER)
@@ -3836,27 +3845,53 @@ async def handle_start(
     message: Message,
     session_factory: sessionmaker[Session],
     admin_user_ids: tuple[int, ...] = (),
+    trial_quota: TrialQuota | None = None,
 ) -> None:
-    if not await require_user_access(message, session_factory, admin_user_ids):
+    telegram_user = message.from_user
+    if telegram_user is None:
+        await message.answer(BOT_ACCESS_DENIED_MESSAGE)
         return
 
+    now = datetime.now(timezone.utc)
+    trial_until = None
     with session_scope(session_factory) as session:
-        created, user_id = ensure_user_registered(message, session)
-        user = UserRepository(session).get_by_telegram_user_id(message.from_user.id)
+        if not is_admin_user(telegram_user.id, admin_user_ids):
+            repository = UserAccessRepository(session)
+            access = repository.get_by_telegram_user_id(telegram_user.id)
+            if access is None:
+                access = repository.start_trial_if_new(
+                    telegram_user_id=telegram_user.id, username=telegram_user.username, now=now,
+                ) or repository.get_by_telegram_user_id(telegram_user.id)
+            if access is None or not access.is_allowed:
+                await message.answer(BOT_ACCESS_DENIED_MESSAGE)
+                return
+            if access.account_category is not AccountCategory.INTERNAL and access.temporary_internal_until:
+                trial_until = repository.normalize_datetime(access.temporary_internal_until)
+        _, user_id = ensure_user_registered(message, session)
+        user = UserRepository(session).get_by_telegram_user_id(telegram_user.id)
         if user is None:
             raise RuntimeError("User profile was not found after registration")
         user, preference, goal_preference, diets = load_settings_state(session=session, user_id=user_id, user=user)
 
-    await message.answer(
-        build_settings_response(
-            section=SETTINGS_SECTION_ROOT,
-            goal_preference=goal_preference,
-            preference=preference,
-            diets=diets,
-            workout_logging_enabled=user.workout_logging_enabled,
-        ),
-        reply_markup=build_settings_root_keyboard(),
+    response = build_settings_response(
+        section=SETTINGS_SECTION_ROOT,
+        goal_preference=goal_preference,
+        preference=preference,
+        diets=diets,
+        workout_logging_enabled=user.workout_logging_enabled,
     )
+    if trial_until is not None:
+        if trial_until > now:
+            remaining = trial_quota.remaining(user_id, now) if trial_quota else TRIAL_DAILY_LIMITS
+            local_end = trial_until.astimezone(ZoneInfo(user.timezone))
+            response = (
+                f"Пробный доступ к ИИ действует до {local_end:%d.%m в %H:%M} (местное время). "
+                f"На этот пищевой день осталось: разборов еды — {remaining['food']}, "
+                f"сообщений в диалоге — {remaining['conversation']}.\n\n" + response
+            )
+        else:
+            response = "Пробный доступ к ИИ завершён. Дневник и отчёты доступны.\n\n" + response
+    await message.answer(response, reply_markup=build_settings_root_keyboard())
     await send_main_keyboard_message(message)
 
 
@@ -5924,6 +5959,7 @@ async def handle_message(
     message_routing_service: MessageRoutingService = default_message_routing_service,
     settings: Settings | None = None,
     admin_user_ids: tuple[int, ...] = (),
+    trial_quota: TrialQuota | None = None,
 ) -> None:
     if not await require_user_access(message, session_factory, admin_user_ids):
         return
@@ -6001,7 +6037,9 @@ async def handle_message(
                         )
                         await message.answer(
                             (
-                                build_personal_provider_required_message()
+                                build_personal_provider_required_message(
+                                    trial_expired=trial_has_expired(session, message.from_user.id),
+                                )
                                 if should_show_personal_provider_required_stub(
                                     account_category=account_category,
                                     access=runtime_bundle.conversation_access,
@@ -6016,6 +6054,17 @@ async def handle_message(
                 if user is None:
                     raise RuntimeError("User profile was not found after registration")
                 summary_preference, _created = UserSummaryPreferenceRepository(session).get_or_create(user_id=user_id)
+                if runtime_bundle is not None:
+                    resets_at = charge_trial_request(
+                        trial_quota, session, user, admin_user_ids, "conversation",
+                        runtime_bundle.conversation_access,
+                    )
+                    if resets_at is not None:
+                        await message.answer(
+                            trial_limit_message("conversation", resets_at, user.timezone),
+                            reply_markup=build_main_keyboard(), **build_reply_kwargs(message),
+                        )
+                        return
                 session_repository = ConversationSessionRepository(session)
                 if active_conversation_session_id is not None:
                     conversation_session = session.get(ConversationSession, active_conversation_session_id)
@@ -6086,6 +6135,7 @@ async def handle_message(
             return
 
         resolved_extraction_service = extraction_service
+        food_quota_pending = True
         if settings is not None and initial_user_id is not None:
             with session_scope(session_factory) as session:
                 runtime_bundle = build_user_llm_runtime_bundle(
@@ -6106,7 +6156,9 @@ async def handle_message(
                     )
                     await message.answer(
                         (
-                            build_personal_provider_required_message()
+                            build_personal_provider_required_message(
+                                trial_expired=trial_has_expired(session, message.from_user.id),
+                            )
                             if should_show_personal_provider_required_stub(
                                 account_category=account_category,
                                 access=runtime_bundle.extraction_access,
@@ -6116,6 +6168,18 @@ async def handle_message(
                         reply_markup=build_main_keyboard(),
                     )
                     return
+                user = session.get(User, initial_user_id)
+                if runtime_bundle.extraction_access is not None and user is not None:
+                    resets_at = charge_trial_request(
+                        trial_quota, session, user, admin_user_ids, "food", runtime_bundle.extraction_access,
+                    )
+                    if resets_at is not None:
+                        await message.answer(
+                            trial_limit_message("food", resets_at, user.timezone),
+                            reply_markup=build_main_keyboard(), **build_reply_kwargs(message),
+                        )
+                        return
+                    food_quota_pending = False
                 resolved_extraction_service = runtime_bundle.extraction_service
 
         extraction_result = await asyncio.to_thread(resolved_extraction_service.extract, extraction_request)
@@ -6194,7 +6258,9 @@ async def handle_message(
                     )
                     raise FoodWriteFlowError(
                         (
-                            build_personal_provider_required_message()
+                            build_personal_provider_required_message(
+                                trial_expired=trial_has_expired(session, message.from_user.id),
+                            )
                             if should_show_personal_provider_required_stub(
                                 account_category=account_category,
                                 access=runtime_bundle.nutrition_access,
@@ -6202,6 +6268,17 @@ async def handle_message(
                             else build_provider_unavailable_message(runtime_bundle.nutrition_access)
                         )
                     )
+
+                def charge_food_followup(provider: ResolvedProviderAccess | None) -> None:
+                    nonlocal food_quota_pending
+                    if not food_quota_pending or provider is None:
+                        return
+                    resets_at = charge_trial_request(
+                        trial_quota, session, user, admin_user_ids, "food", provider,
+                    )
+                    if resets_at is not None:
+                        raise FoodWriteFlowError(trial_limit_message("food", resets_at, user.timezone))
+                    food_quota_pending = False
 
                 saved_food_entries: list = []
                 saved_diet_entries: list = []
@@ -6269,6 +6346,8 @@ async def handle_message(
                                 )
 
                 if saved_food_entries:
+                    if runtime_bundle is not None:
+                        charge_food_followup(runtime_bundle.nutrition_access)
                     nutrition_flow_result = StoredEntryNutritionEstimationUseCase(
                         session,
                         runtime_bundle.nutrition_service if runtime_bundle is not None else nutrition_service,
@@ -6292,6 +6371,8 @@ async def handle_message(
                     )
                 diet_request = build_diet_evaluation_request_for_supported_diets(saved_diet_entries, enabled_diets)
                 if diet_request is not None:
+                    if runtime_bundle is not None:
+                        charge_food_followup(runtime_bundle.conversation_access)
                     evaluated_diet_service = resolve_diet_service(
                         settings=settings,
                         runtime_bundle=runtime_bundle,
@@ -6321,6 +6402,8 @@ async def handle_message(
                     )
                     coach_comment: str | None = None
                     if saved_food_entries:
+                        if runtime_bundle is not None:
+                            charge_food_followup(runtime_bundle.conversation_access)
                         factual_context = NutritionCoachContextBuilder(session).build(
                             user_id=user_id,
                             timezone_name=user.timezone,

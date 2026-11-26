@@ -11,6 +11,7 @@ from food_registry_bot.bot.message_routing import RuleBasedMessageRoutingService
 from food_registry_bot.conversation import ConversationService
 from food_registry_bot.config import Settings
 from food_registry_bot.extraction import JournalExtractionService
+from food_registry_bot.llm_access.trial import TrialQuota
 from food_registry_bot.nutrition import NutritionEstimationService
 
 
@@ -29,6 +30,7 @@ def create_dispatcher(
     admin_user_ids: tuple[int, ...],
     settings: Settings | None = None,
     app_version: str = "unknown",
+    trial_quota: TrialQuota | None = None,
 ) -> Dispatcher:
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
@@ -41,4 +43,5 @@ def create_dispatcher(
     dispatcher.workflow_data["backfill_tracker"] = AdminBackfillTracker()
     dispatcher.workflow_data["settings"] = settings
     dispatcher.workflow_data["app_version"] = app_version
+    dispatcher.workflow_data["trial_quota"] = trial_quota
     return dispatcher

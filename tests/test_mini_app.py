@@ -6,7 +6,6 @@ import hmac
 import json
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
-from threading import Barrier
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from urllib.parse import urlencode
@@ -18,8 +17,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from food_registry_bot.config import Settings
+from food_registry_bot.llm_access.resolver import ResolvedProviderAccess, UserLLMRuntimeBundle
+from food_registry_bot.llm_access.trial import TrialQuota
 from food_registry_bot.conversation import DisabledConversationService
 from food_registry_bot.db.base import Base
+from food_registry_bot.db.repositories import UserLLMProfileRepository
 from food_registry_bot.db.models import (
     DailyGoalSnapshot,
     Entry,
@@ -305,7 +307,8 @@ async def test_mini_app_settings_share_preferences_and_preserve_goal_snapshots(d
             calorie_goal=1800, protein_goal=90, fat_goal=60, carbs_goal=210, fiber_goal=25, water_goal=2000,
         ))
         user_id = user.id
-    app = create_diary_app(diary_db, token=TOKEN, admin_user_ids=())
+    secret = "fixture-context-secret"
+    app = create_diary_app(diary_db, token=TOKEN, admin_user_ids=(), context_encryption_secret=secret)
     init_data = telegram_init_data(1)
 
     async def settings(command=None, *, authorization=init_data):
@@ -317,6 +320,10 @@ async def test_mini_app_settings_share_preferences_and_preserve_goal_snapshots(d
     status, defaults = await settings()
     assert status == 200
     assert defaults["goals"]["protein"] == 90
+    assert defaults["timezone"] == "UTC"
+    assert "Asia/Tbilisi" in defaults["choices"]["timezone"]
+    assert defaults["user_context_comment"] == ""
+    assert defaults["context_available"] is True
     assert defaults["goal_steps"] == {
         "calories": 100, "protein": 5, "fat": 5, "carbs": 5, "fiber": 5, "water": 100,
     }
@@ -336,6 +343,8 @@ async def test_mini_app_settings_share_preferences_and_preserve_goal_snapshots(d
         "report_goal_tolerance_percent": 15,
         "report_noticeable_entry_percentile": 85,
         "diets": {"gastritis": True},
+        "timezone": "Asia/Tbilisi",
+        "user_context_comment": "Ем без добавленного сахара",
     }
     assert await settings(command, authorization=None) == (401, {"error": "invalid_authorization"})
     assert await settings({**command, "goals": {"protein": "95"}}) == (400, {"error": "invalid_settings"})
@@ -343,6 +352,8 @@ async def test_mini_app_settings_share_preferences_and_preserve_goal_snapshots(d
         400, {"error": "invalid_settings"},
     )
     assert await settings({**command, "diets": {"unknown": True}}) == (422, {"error": "unknown_diet"})
+    assert await settings({"timezone": "UTC+04:00"}) == (400, {"error": "invalid_settings"})
+    assert await settings({"user_context_comment": "я" * 1001}) == (400, {"error": "invalid_settings"})
     assert (await settings())[1]["goals"] == defaults["goals"]
 
     status, updated = await settings(command)
@@ -354,18 +365,41 @@ async def test_mini_app_settings_share_preferences_and_preserve_goal_snapshots(d
         if key not in {"goals", "metrics", "diets"})
     assert (await settings({"metrics": {"fat": False}}))[1]["goals"] == updated["goals"]
     assert (await settings(authorization=telegram_init_data(2)))[1]["goals"] == defaults["goals"]
+    assert (await settings(authorization=telegram_init_data(2)))[1]["user_context_comment"] == ""
     _, diary = await request_diary(app, init_data=init_data)
     assert diary["metrics"] == ["protein", "carbs", "fiber"]
+    assert diary["timezone"] == "Asia/Tbilisi"
     _, report = await request_diary(app, init_data=init_data, path="/api/report")
     assert [metric["code"] for metric in report["metrics"]] == ["protein", "carbs", "fiber"]
-
+    with diary_db.begin() as session:
+        repo = UserLLMProfileRepository(session)
+        stored = repo.get_by_user_id(user_id).user_context_comment
+        assert stored.startswith("enc:") and command["user_context_comment"] not in stored
+        assert repo.get_user_context_comment(user_id=user_id, encryption_secret=secret) == command["user_context_comment"]
+        repo.set_user_context_comment(user_id=user_id, user_context_comment="Из команды /context", encryption_secret=secret)
+    assert (await settings())[1]["user_context_comment"] == "Из команды /context"
+    assert (await settings({"user_context_comment": ""}))[1]["user_context_comment"] == ""
     with diary_db() as session:
+        assert UserLLMProfileRepository(session).get_by_user_id(user_id).user_context_comment is None
         assert session.query(UserGoalPreference).filter_by(user_id=user_id).one().fiber_goal == 30
         assert session.query(UserSummaryPreference).filter_by(user_id=user_id).one().show_fat is False
         assert session.get(User, user_id).workout_logging_enabled
         snapshot = session.query(DailyGoalSnapshot).filter_by(summary_date=today).one()
         assert (snapshot.protein_goal, snapshot.fiber_goal, snapshot.nutrition_day_start_hour) == (90, 25, 4)
+        assert snapshot.timezone == "UTC"
 
+
+async def test_mini_app_settings_can_update_timezone_without_context_encryption(diary_db):
+    with diary_db.begin() as session:
+        session.add_all([User(telegram_user_id=1, timezone="UTC"), UserAccess(telegram_user_id=1, is_allowed=True)])
+    app = create_diary_app(diary_db, token=TOKEN, admin_user_ids=())
+    params = {"path": "/api/settings", "init_data": telegram_init_data(1)}
+    assert (await request_diary(app, **params))[1]["context_available"] is False
+    assert await request_diary(app, **params, method="POST", command={
+        "timezone": "Asia/Tbilisi", "user_context_comment": "Контекст",
+    }) == (503, {"error": "context_unavailable"})
+    assert (await request_diary(app, **params))[1]["timezone"] == "UTC"
+    assert (await request_diary(app, **params, method="POST", command={"timezone": "Asia/Tbilisi"}))[0] == 200
 
 async def test_create_entry_sets_local_time_and_does_not_duplicate_a_retry(diary_db):
     _, app, extract, estimate = entry_writer(diary_db, [
@@ -447,13 +481,6 @@ async def test_simultaneous_entry_retries_commit_only_once(diary_db):
     _, app, extract, estimate = entry_writer(diary_db, [
         {"type": "food", "items": [{"name": "Овсянка", "quantity": 180, "unit": "g"}]},
     ])
-    both_requests = Barrier(2)
-
-    def extract_together(_request):
-        both_requests.wait(timeout=5)
-        return extract.return_value
-
-    extract.side_effect = extract_together
     command = {
         "request_id": str(uuid4()), "text": "Овсянка 180 г",
         "local_date": datetime.now(timezone.utc).date().isoformat(), "local_time": "13:15",
@@ -461,10 +488,46 @@ async def test_simultaneous_entry_retries_commit_only_once(diary_db):
     first, second = await asyncio.gather(submit_entry(app, command), submit_entry(app, command))
     assert first == second
     assert first[0] == 200
+    assert extract.call_count == 1
     assert estimate.call_count == 1
     with diary_db() as session:
         assert session.query(Entry).count() == 1
         assert session.query(MiniAppEntrySubmission).count() == 1
+
+
+async def test_trial_food_quota_is_shared_and_only_charges_new_provider_requests(diary_db, monkeypatch):
+    writer, app, extract, estimate = entry_writer(diary_db, [
+        {"type": "food", "items": [{"name": "Овсянка", "quantity": 180, "unit": "g"}]},
+    ])
+    writer.trial_quota = TrialQuota()
+    now = datetime.now(timezone.utc)
+    with diary_db.begin() as session:
+        access = session.query(UserAccess).filter_by(telegram_user_id=1).one()
+        access.temporary_internal_until = now + timedelta(days=1)
+        user_id = session.query(User).filter_by(telegram_user_id=1).one().id
+    runtime = UserLLMRuntimeBundle(
+        writer.extraction_service, writer.nutrition_service, writer.conversation_service,
+        ResolvedProviderAccess(True, "project", "openai", "test", "key"), None, None,
+    )
+    monkeypatch.setattr(
+        "food_registry_bot.mini_app_entries.build_user_llm_runtime_bundle", lambda **kwargs: runtime,
+    )
+    for _ in range(6):
+        assert writer.trial_quota.consume(
+            user_id, "food", now=now, timezone_name="Asia/Tbilisi", start_hour=4,
+        ) is None
+    command = {
+        "request_id": str(uuid4()), "text": "Овсянка 180 г",
+        "local_date": now.date().isoformat(), "local_time": "13:15",
+    }
+    saved = await submit_entry(app, command)
+    assert saved[0] == 200
+    assert await submit_entry(app, command) == saved
+    status, payload = await submit_entry(app, {**command, "request_id": str(uuid4())})
+    assert status == 429
+    assert payload["error"] == "trial_limit_exceeded"
+    assert "04:00" in payload["message"]
+    assert extract.call_count == estimate.call_count == 1
 
 
 def entry_writer(factory, entries):
