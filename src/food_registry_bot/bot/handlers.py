@@ -1767,6 +1767,9 @@ def build_today_summary_response_with_preferences(
         lines.append(line)
 
     parts: list[str] = []
+    if ("water" in enabled_metric_codes and water_summary is not None
+            and water_summary.fluid_total_ml > water_summary.total_ml):
+        lines.append(f"Выпито всего: {water_summary.fluid_total_ml} мл")
     if lines:
         parts.append("<pre>" + html.escape("\n".join(lines)) + "</pre>")
     if diet_block is not None:
@@ -2387,7 +2390,7 @@ def build_period_report_response(
 
     has_visible_data = (
         (show_nutrition_metrics and report.food_data_day_count > 0)
-        or (show_water and report.water_data_day_count > 0)
+        or (show_water and (report.water_data_day_count > 0 or report.fluid_total_ml > 0))
         or has_any_workout_data
         or diet_block is not None
     )
@@ -2402,6 +2405,8 @@ def build_period_report_response(
         lines.append(f"Дней с данными по еде: {report.food_data_day_count}")
     if show_water:
         lines.append(f"Дней с данными по воде: {report.water_data_day_count}")
+        if report.fluid_total_ml > round(report.average_water_ml * report.water_data_day_count):
+            lines.append(f"Выпито за период: {report.fluid_total_ml} мл")
     if has_any_workout_data:
         lines.append(f"Дней с тренировками: {report.workout_day_count}")
 

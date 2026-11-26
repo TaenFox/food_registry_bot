@@ -369,14 +369,14 @@ async def test_mini_app_settings_share_preferences_and_preserve_goal_snapshots(d
 
 async def test_create_entry_sets_local_time_and_does_not_duplicate_a_retry(diary_db):
     _, app, extract, estimate = entry_writer(diary_db, [
-        {"type": "food", "items": [{"name": "Гречка", "quantity": 150, "unit": "g"}]},
+        {"type": "food", "items": [{"name": "Кофе", "quantity": 150, "unit": "ml", "is_beverage": True}]},
         {"type": "water", "items": [{"name": "water", "quantity": 250, "unit": "ml"}]},
     ])
     local_date = (datetime.now(timezone.utc) + timedelta(hours=4)).date()
     food_day = local_date - timedelta(days=1)
     command = {
         "request_id": str(uuid4()),
-        "text": "Гречка 150 г и вода 250 мл",
+        "text": "Кофе 150 мл и вода 250 мл",
         "local_date": local_date.isoformat(),
         "local_time": "02:15",
     }
@@ -400,6 +400,7 @@ async def test_create_entry_sets_local_time_and_does_not_duplicate_a_retry(diary
         assert (food.entry_type, water.entry_type) == (EntryType.FOOD, EntryType.WATER)
         assert food.occurred_at == water.occurred_at == datetime.combine(food_day, time(22, 15))
         assert food.source_text == command["text"]
+        assert food.items[0].source_facts["beverage"] is True
         assert water.items[0].quantity == 250
         assert session.query(MiniAppEntrySubmission).count() == 1
         assert session.query(DailyGoalSnapshot).one().summary_date == food_day
@@ -411,6 +412,7 @@ async def test_create_entry_sets_local_time_and_does_not_duplicate_a_retry(diary
     assert day["meals"][0]["time"] == "02:15"
     assert day["metrics"]["fiber"]["value"] == 4
     assert day["metrics"]["calories"]["goal"] == 1800
+    assert day["fluid_total_ml"] == 400 and day["metrics"]["water"]["value"] == 250
 
     with diary_db.begin() as session:
         for entry in session.query(Entry).all():
@@ -569,7 +571,7 @@ async def test_diary_preserves_daily_goals_and_meal_groups_with_partial_data(dia
 
     assert status == 200
     assert 0 < payload["expires_in_ms"] <= 3_600_000
-    assert payload["metrics"] == ["calories", "protein", "carbs", "fiber"]
+    assert payload["metrics"] == ["calories", "protein", "carbs", "fiber", "water"]
     assert len(payload["days"]) == 5
     assert "Чужая запись" not in str(payload)
     assert "Приватный исходный текст сообщения" not in str(payload)
@@ -647,7 +649,9 @@ def editable_diary(diary_db):
         target_dish.position = 5
         foreign, _ = meal(other, early, "чужое блюдо", quantity=200)
         previous, _ = meal(owner, late - timedelta(days=1), "груша")
-        water, _ = meal(owner, early, "вода", quantity=250, entry_type=EntryType.WATER)
+        water, water_dish = meal(owner, early, "water", quantity=250, entry_type=EntryType.WATER)
+        water_dish.unit = "ml"
+        water_dish.metrics.clear()
         source.source_text = "Запиши 120 г риса"
         source.extraction_raw_payload = json.dumps(
             {
@@ -706,7 +710,7 @@ async def test_repeat_meal_searches_own_history_and_copies_one_entry(editable_di
     status, recent = await history("")
     assert status == 200
     by_entry = {item["entry_id"]: item for item in recent["items"]}
-    assert set(by_entry) == {ids["source"], ids["target"], ids["previous"]}
+    assert set(by_entry) == {ids["source"], ids["target"], ids["previous"], ids["water"]}
     assert [item["name"] for item in (await history("груш"))[1]["items"]] == ["груша"]
     assert (await history("%"))[1]["items"] == []
     chicken = by_entry[ids["target"]]
@@ -753,6 +757,93 @@ async def test_repeat_meal_rejects_foreign_stale_or_unscalable_items(editable_di
         assert session.query(MiniAppEntrySubmission).count() == 0
 
 
+async def test_search_keeps_latest_portion_before_applying_limit(editable_diary):
+    factory, ids = editable_diary
+    with factory.begin() as session:
+        previous = session.get(Entry, ids["previous"])
+        for hour in range(30):
+            session.add(Entry(
+                user_id=previous.user_id, entry_type=EntryType.FOOD,
+                occurred_at=previous.occurred_at + timedelta(hours=hour + 1),
+                items=[EntryItem(name="сыр", position=0, quantity=20 + hour, unit="g")],
+            ))
+        previous.items[0].name = "сыр мягкий"
+    app = create_diary_app(factory, token=TOKEN, admin_user_ids=())
+    status, payload = await request_diary(
+        app, path="/api/entries", init_data=telegram_init_data(1), query="?" + urlencode({"q": "сыр"}),
+    )
+    assert status == 200
+    assert [(item["name"], item["quantity"]) for item in payload["items"]] == [("сыр", 49), ("сыр мягкий", None)]
+
+
+async def test_water_and_beverages_share_diary_and_keep_separate_totals(editable_diary):
+    factory, ids = editable_diary
+    with factory.begin() as session:
+        target = session.get(Entry, ids["target"])
+        target.items[0].name = "кофе"
+        target.items[0].unit = "ml"
+        target.items[0].source_facts = {"beverage": True}
+        session.add(EntryItem(entry_id=target.id, position=7, name="суп", quantity=200, unit="ml"))
+        water_entry = session.get(Entry, ids["water"])
+        food_day = (water_entry.occurred_at - timedelta(hours=4)).date()
+
+    app = create_diary_app(factory, token=TOKEN, admin_user_ids=())
+    quick = {"action": "water_250", "request_id": str(uuid4()),
+             "local_date": food_day.isoformat(), "local_time": "12:00"}
+    assert await submit_entry(app, quick) == (200, {"summary_date": food_day.isoformat()})
+    assert await submit_entry(app, quick) == (200, {"summary_date": food_day.isoformat()})
+
+    _, data = await request_diary(app, init_data=telegram_init_data(1))
+    day = next(day for day in data["days"] if day["date"] == food_day.isoformat())
+    assert day["fluid_total_ml"] == 580
+    assert day["metrics"]["water"]["value"] == 500
+    assert day["metrics"]["water"]["percent"] == 25
+    assert (await request_diary(app, path="/api/report", init_data=telegram_init_data(1)))[1]["fluid_total_ml"] == 580
+    old_water = find_meal(data, ids["water"])["dishes"][0]
+    assert old_water["water"] and all(value is None for value in old_water["metrics"].values())
+    edit = {"action": "edit", "entry_id": ids["water"], "item_id": old_water["id"],
+            "revision": old_water["revision"], "unit": "ml", "quantity": 300}
+    status, updated = await mutate_diary(app, edit)
+    assert status == 200
+    current = find_meal(updated, ids["water"])["dishes"][0]
+    assert current["quantity"] == 300 and all(value is None for value in current["metrics"].values())
+    status, updated = await mutate_diary(app, {**edit, "revision": current["revision"],
+                                             "per_100": {"calories": 5, "protein": 0}})
+    assert status == 200
+    current = find_meal(updated, ids["water"])["dishes"][0]
+    assert current["metrics"]["calories"] == 15 and current["metrics"]["protein"] == 0
+    status, moved = await mutate_diary(app, {
+        "action": "move", "entry_id": ids["water"], "item_id": current["id"],
+        "target_entry_id": ids["target"], "confirm_delete": True,
+    })
+    assert status == 200
+    group = find_meal(moved, ids["target"])
+    assert group["totals"]["water"]["value"] == 300
+    current = group["dishes"][-1]
+    status, cleared = await mutate_diary(app, {**edit, "entry_id": ids["target"],
+                                               "revision": current["revision"],
+                                               "per_100": {"calories": None}})
+    assert status == 200
+    assert find_meal(cleared, ids["target"])["dishes"][-1]["metrics"]["calories"] is None
+    coffee, _, water = find_meal(cleared, ids["target"])["dishes"]
+    repeat = {
+        "request_id": str(uuid4()), "local_date": food_day.isoformat(), "local_time": "12:15",
+        "items": [{"entry_id": ids["target"], "item_id": item["id"], "revision": item["revision"]}
+                  for item in (coffee, water)],
+    }
+    assert await submit_entry(app, repeat) == (200, {"summary_date": food_day.isoformat()})
+    _, repeated = await request_diary(app, init_data=telegram_init_data(1))
+    day = next(day for day in repeated["days"] if day["date"] == food_day.isoformat())
+    assert day["fluid_total_ml"] == 1010 and day["metrics"]["water"]["value"] == 850
+    status, deleted = await mutate_diary(app, {
+        "action": "delete", "entry_id": ids["target"], "item_id": water["id"],
+        "revision": water["revision"],
+    })
+    assert status == 200
+    day = next(day for day in deleted["days"] if day["date"] == food_day.isoformat())
+    assert day["fluid_total_ml"] == 710 and day["metrics"]["water"]["value"] == 550
+
+
 async def test_move_last_dish_checks_confirmation_and_preserves_facts(editable_diary):
     factory, ids = editable_diary
     app = create_diary_app(factory, token=TOKEN, admin_user_ids=())
@@ -774,8 +865,8 @@ async def test_move_last_dish_checks_confirmation_and_preserves_facts(editable_d
         {"error": "entry_missing"},
     )
     assert await mutate_diary(app, {**command, "target_entry_id": ids["water"]}) == (
-        404,
-        {"error": "entry_missing"},
+        409,
+        {"error": "confirm_empty_entry"},
     )
     assert await mutate_diary(app, {**command, "target_entry_id": ids["previous"]}) == (
         400,
@@ -804,7 +895,7 @@ async def test_move_last_dish_checks_confirmation_and_preserves_facts(editable_d
     )
 
 
-async def test_edit_unknown_weight_requires_four_values_and_rejects_stale_edit(editable_diary):
+async def test_edit_unknown_weight_accepts_optional_metrics_and_rejects_stale_edit(editable_diary):
     factory, ids = editable_diary
     app = create_diary_app(factory, token=TOKEN, admin_user_ids=())
     _, before = await request_diary(app, init_data=telegram_init_data(1))
@@ -816,7 +907,6 @@ async def test_edit_unknown_weight_requires_four_values_and_rejects_stale_edit(e
         "revision": dish["revision"],
         "weight": 150,
     }
-    assert await mutate_diary(app, base) == (422, {"error": "missing_per_100g"})
     assert await mutate_diary(app, {**base, "weight": 0}) == (400, {"error": "invalid_edit"})
     assert await mutate_diary(app, base, user_id=2) == (403, {"error": "access_denied"})
     command = {**base, "per_100g": {"calories": 180, "protein": 5, "fat": 2, "carbs": 31}}
@@ -907,7 +997,6 @@ async def test_edit_drink_preserves_saved_volume_and_scales_metrics(editable_dia
         "unit": "ml",
         "per_100": {"calories": 35},
     }
-    assert await mutate_diary(app, {**command, "unit": "g"}) == (422, {"error": "missing_per_100g"})
     status, after = await mutate_diary(app, command)
 
     assert status == 200

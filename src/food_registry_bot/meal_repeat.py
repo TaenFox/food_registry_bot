@@ -20,10 +20,11 @@ def copy_food_items(
     user_id: int,
     occurred_at: datetime,
     portions: list[tuple[EntryItem, int | None]],
+    entry_type: EntryType = EntryType.FOOD,
 ) -> Entry:
     entry = EntryRepository(session).create(
         user_id=user_id,
-        entry_type=EntryType.FOOD,
+        entry_type=entry_type,
         occurred_at=occurred_at,
         items=[
             EntryItemCreate(
@@ -38,6 +39,8 @@ def copy_food_items(
     )
     metrics = EntryItemMetricRepository(session)
     for target, (source, quantity) in zip(sorted(entry.items, key=lambda item: item.position), portions):
+        if (source.source_facts or {}).get("beverage") is True:
+            target.source_facts = {"beverage": True}
         ratio = quantity / source.quantity if quantity is not None and source.quantity else 1
         values = []
         for metric in source.metrics:

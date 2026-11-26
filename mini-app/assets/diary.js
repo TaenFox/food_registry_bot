@@ -17,6 +17,9 @@ const chartEmpty = document.querySelector("#plot-empty");
 const thresholdKey = document.querySelector("#threshold-key");
 const goalKey = document.querySelector("#goal-key");
 const actionStatus = document.querySelector("#action-status");
+const waterGoal = document.querySelector("#diary-water-goal");
+const fluidTotal = document.querySelector("#diary-fluid-total");
+const quickWater = document.querySelector("#quick-water");
 const screenNavigation = document.querySelector("#screen-navigation");
 const screenPicker = screenNavigation.querySelector(".screen-picker");
 const screenOptions = screenNavigation.querySelector("#screen-options");
@@ -28,7 +31,7 @@ const editableMetricLabels = {
     fat: "Жиры",
     carbs: "Углеводы",
 };
-const metricLabels = { ...editableMetricLabels, fiber: "Клетчатка" };
+const metricLabels = { ...editableMetricLabels, fiber: "Клетчатка", water: "Вода" };
 const portionUnits = { g: "г", ml: "мл" };
 const formatter = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
 const fullDate = new Intl.DateTimeFormat("ru", { day: "numeric", month: "long", timeZone: "UTC" });
@@ -44,6 +47,7 @@ let openedDish;
 let savingDish = false;
 let activeScreen = "diary";
 let diaryStale = false;
+let waterAttempt;
 
 function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -154,6 +158,13 @@ function progressPosition(percent) {
 
 function renderMetric() {
     const day = model.days[selectedDay];
+    const water = day.metrics.water;
+    waterGoal.hidden = !water || water.goal === null;
+    if (!waterGoal.hidden) {
+        waterGoal.textContent = `Вода · ${water.value === null ? "—" : formatter.format(water.value)} из ${formatAmount(water.goal, "water")}`;
+        if (water.value !== null && !water.complete) waterGoal.textContent += " · неполные данные";
+    }
+    fluidTotal.textContent = "Выпито всего · " + formatAmount(day.fluid_total_ml ?? 0, "water");
     dayProgress.hidden = !model.metrics.length;
     progressAxis.hidden = !model.metrics.some(code => day.metrics[code].goal > 0);
     progressAxis.lastElementChild.lastElementChild.textContent = chartMaximum + "%";
@@ -213,8 +224,8 @@ function renderMetric() {
 }
 
 function formatAmount(value, code) {
-    const unit = code === "calories" ? "ккал" : "г";
-    return value === null ? "—" : formatter.format(value) + " " + unit;
+    const unit = code === "calories" ? "ккал" : code === "water" ? "мл" : "г";
+    return value == null ? "—" : formatter.format(value) + " " + unit;
 }
 
 function portionUnit(unit) {
@@ -282,6 +293,10 @@ function editDishForm(meal, dish) {
         unitSelect.append(option);
     }
     unitSelect.value = savedUnit || "g";
+    if (dish.water) {
+        unitSelect.value = "ml";
+        unitSelect.disabled = true;
+    }
     unitField.append(unitSelect);
     portion.append(quantityField, unitField);
     form.append(portion);
@@ -294,7 +309,9 @@ function editDishForm(meal, dish) {
     const initial = {};
     for (const code of Object.keys(editableMetricLabels)) {
         const unit = code === "calories" ? "ккал" : "г";
-        fields.append(numberField(`${editableMetricLabels[code]}, ${unit}`, code));
+        const field = numberField(`${editableMetricLabels[code]}, ${unit}`, code);
+        field.querySelector("input").required = false;
+        fields.append(field);
     }
     fieldset.append(basis, fields);
     form.append(fieldset, formActions(dish.id, "Сохранить"));
@@ -320,7 +337,8 @@ function editDishForm(meal, dish) {
         const data = new FormData(form);
         const per100 = {};
         for (const code of Object.keys(editableMetricLabels)) {
-            const value = Number(data.get(code));
+            const input = data.get(code);
+            const value = input === "" ? (initial[code] === undefined ? undefined : null) : Number(input);
             if (initial[code] !== value) per100[code] = value;
         }
         saveDish(form, {
@@ -410,7 +428,7 @@ function renderMeals(day) {
         mealList.append(element("p", "У части записей неполные данные о питании.", "meal-note"));
     }
     if (!day.meals.length) {
-        mealList.append(element("p", "За этот пищевой день пока нет записей о еде.", "meal-note"));
+        mealList.append(element("p", "За этот пищевой день пока нет записей о еде и напитках.", "meal-note"));
     }
     for (const meal of day.meals) {
         const group = element("article", undefined, "meal");
@@ -444,9 +462,8 @@ function renderMeals(day) {
             if (unit && dish.quantity > 0) {
                 name.append(element("span", ` · ${formatter.format(dish.quantity)} ${portionUnits[unit]}`, "portion"));
             }
-            control.append(name, element(
-                "span", code ? formatAmount(dish.metrics[code], code) : "", "amount"
-            ));
+            const value = code === "water" && dish.water && unit === "ml" ? dish.quantity : dish.metrics[code];
+            control.append(name, element("span", code ? formatAmount(value, code) : "", "amount"));
             row.append(control);
             if (expanded) row.append(dishPanel(day, meal, dish));
             list.append(row);
@@ -522,6 +539,7 @@ function showStatus(message) {
 
 function clearDiary(message) {
     model = undefined;
+    waterAttempt = undefined;
     openedDish = undefined;
     clearTimeout(expiryTimer);
     reportView.close();
@@ -609,7 +627,7 @@ async function saveDish(form, command, successMessage) {
     savingDish = true;
     setNavigationBusy(true);
     setActionStatus("Сохраняю…");
-    const controls = [...form.elements];
+    const controls = [...form.elements].filter(control => !control.disabled);
     controls.forEach(control => { control.disabled = true; });
     try {
         const result = await diaryRequest(command);
@@ -629,8 +647,8 @@ async function saveDish(form, command, successMessage) {
             if (!latest.response.ok) throw new Error("Diary refresh failed");
             installDiary(latest);
             if (model) setActionStatus("Запись изменилась. Дневник обновлён, повторите действие.");
-        } else if (["missing_per_100g", "missing_per_100ml"].includes(result.payload.error)) {
-            setActionStatus(`Укажите все значения КБЖУ на 100 ${portionUnits[command.unit]}.`);
+        } else if (result.payload.error === "water_requires_ml") {
+            setActionStatus("Объём воды указывается в миллилитрах.");
         } else if (result.payload.error === "different_food_day") {
             setActionStatus("Перенос доступен только внутри одного пищевого дня.");
         } else {
@@ -685,6 +703,7 @@ function showScreenOptions(open) {
 function setNavigationBusy(busy) {
     screenPicker.disabled = busy;
     entryButton.disabled = busy;
+    quickWater.disabled = busy;
     if (busy) showScreenOptions(false);
 }
 
@@ -707,6 +726,35 @@ async function entrySaved(summaryDate) {
     await refreshDiary(summaryDate);
     if (activeScreen === "report" && model) reportView.open();
 }
+
+quickWater.addEventListener("click", async () => {
+    if (!model || quickWater.disabled || expire()) return;
+    const day = model.days[selectedDay];
+    if (waterAttempt?.day !== day.date) {
+        const initial = entryDefaults();
+        if (!day.current) initial.time = String(Math.max(12, model.day_start_hour ?? 4)).padStart(2, "0") + ":00";
+        waterAttempt = { day: day.date, command: { action: "water_250", local_date: initial.date,
+            local_time: initial.time, request_id: crypto.randomUUID() } };
+    }
+    setNavigationBusy(true);
+    setActionStatus("Сохраняю воду…");
+    try {
+        const result = await miniAppRequest("/api/entries", { command: waterAttempt.command });
+        if (expire() || handleAccessError(result)) return;
+        if (!result.response.ok) {
+            waterAttempt = undefined;
+            setActionStatus("Не удалось записать воду. Попробуйте ещё раз.");
+            return;
+        }
+        waterAttempt = undefined;
+        await entrySaved(result.payload.summary_date);
+        if (model) setActionStatus("Добавлено 250 мл воды.");
+    } catch {
+        if (model) setActionStatus("Не удалось подтвердить запись воды. Нажмите «+250 мл» ещё раз.");
+    } finally {
+        setNavigationBusy(false);
+    }
+});
 
 const reportView = createReportView({
     request: (groups, signal) => miniAppRequest("/api/report?groups=" + groups, { signal }),

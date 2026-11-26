@@ -59,6 +59,7 @@ class PeriodReport(BaseModel):
     period_day_count: int = Field(gt=0)
     average_nutrition_totals: DailyNutritionTotals
     average_water_ml: float = Field(ge=0)
+    fluid_total_ml: int = Field(default=0, ge=0)
     food_data_day_count: int = Field(ge=0)
     water_data_day_count: int = Field(ge=0)
     workout_day_count: int = Field(ge=0)
@@ -137,6 +138,7 @@ class PeriodReportUseCase:
         )
         nutrition_totals_sum = DailyNutritionTotals()
         water_total_ml = 0
+        fluid_total_ml = 0
         food_data_day_count = 0
         water_data_day_count = 0
         incomplete_food_day_count = 0
@@ -175,6 +177,7 @@ class PeriodReportUseCase:
                 summary_date=summary_date,
                 nutrition_day_start_hour=nutrition_day_start_hour,
             )
+            fluid_total_ml += water_summary.fluid_total_ml
             if water_summary.included_entry_count > 0 or water_summary.excluded_entry_count > 0:
                 water_data_day_count += 1
                 water_total_ml += water_summary.total_ml
@@ -296,6 +299,7 @@ class PeriodReportUseCase:
             period_day_count=period_day_count,
             average_nutrition_totals=average_nutrition_totals,
             average_water_ml=average_water_ml,
+            fluid_total_ml=fluid_total_ml,
             food_data_day_count=food_data_day_count,
             water_data_day_count=water_data_day_count,
             workout_day_count=workout_day_count,

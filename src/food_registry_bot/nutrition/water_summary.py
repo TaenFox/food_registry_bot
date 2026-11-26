@@ -5,9 +5,10 @@ from datetime import date
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
-from food_registry_bot.db.models import Entry
+from food_registry_bot.db.models import Entry, EntryType
 from food_registry_bot.db.repositories import EntryRepository
 from food_registry_bot.nutrition.daily_summary import resolve_day_bounds_utc
+from food_registry_bot.nutrition.beverage import beverage_volume, is_plain_water
 
 
 class DailyWaterSummary(BaseModel):
@@ -16,6 +17,7 @@ class DailyWaterSummary(BaseModel):
     summary_date: date
     timezone: str = Field(min_length=1, max_length=64)
     total_ml: int = Field(ge=0)
+    fluid_total_ml: int = Field(default=0, ge=0)
     included_entry_count: int = Field(ge=0)
     excluded_entry_count: int = Field(ge=0)
     is_complete: bool
@@ -44,44 +46,35 @@ class DailyWaterSummaryUseCase:
             timezone_name=timezone_name,
             nutrition_day_start_hour=nutrition_day_start_hour,
         )
-        entries = self._entry_repository.list_water_for_user_between(
+        entries = self._entry_repository.list_diary_for_user_between(
             user_id=user_id,
             occurred_at_from=occurred_at_from,
             occurred_at_to=occurred_at_to,
         )
 
-        total_ml = 0
-        included_entry_count = 0
-        excluded_entry_count = 0
-        for entry in entries:
-            entry_total_ml = self._resolve_entry_total_ml(entry)
-            if entry_total_ml is None:
-                excluded_entry_count += 1
-                continue
-            total_ml += entry_total_ml
-            included_entry_count += 1
+        return summarize_water_entries(entries, summary_date=summary_date, timezone_name=timezone_name)
 
-        return DailyWaterSummary(
-            summary_date=summary_date,
-            timezone=timezone_name,
-            total_ml=total_ml,
-            included_entry_count=included_entry_count,
-            excluded_entry_count=excluded_entry_count,
-            is_complete=excluded_entry_count == 0,
-        )
 
-    @staticmethod
-    def _resolve_entry_total_ml(entry: Entry) -> int | None:
-        if not entry.items:
-            return None
-
-        total_ml = 0
-        for item in entry.items:
-            if item.name != "water":
-                return None
-            if item.unit != "ml":
-                return None
-            if item.quantity is None or item.quantity <= 0:
-                return None
-            total_ml += item.quantity
-        return total_ml
+def summarize_water_entries(
+    entries: list[Entry], *, summary_date: date, timezone_name: str,
+) -> DailyWaterSummary:
+    total_ml = fluid_total_ml = included = excluded = 0
+    for entry in entries:
+        fluid_total_ml += sum(beverage_volume(item) or 0 for item in entry.items)
+        items = [item for item in entry.items if is_plain_water(item)]
+        if entry.entry_type is EntryType.WATER and (not items or len(items) != len(entry.items)):
+            excluded += 1
+            continue
+        if not items:
+            continue
+        amounts = [beverage_volume(item) for item in items]
+        if any(amount is None for amount in amounts):
+            excluded += 1
+        else:
+            included += 1
+            total_ml += sum(amount for amount in amounts if amount is not None)
+    return DailyWaterSummary(
+        summary_date=summary_date, timezone=timezone_name, total_ml=total_ml,
+        fluid_total_ml=fluid_total_ml, included_entry_count=included,
+        excluded_entry_count=excluded, is_complete=excluded == 0,
+    )

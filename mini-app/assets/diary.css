@@ -16,6 +16,7 @@
   --fat: light-dark(#a4491e, #ffad7d);
   --carbs: light-dark(#225bb0, #86b8ff);
   --fiber: light-dark(#626b24, #c1ca6d);
+  --water: light-dark(#23688b, #89cde9);
   --selection: light-dark(#e2eaf2, #2c3c50);
   --panel: light-dark(#eef2f6, #222c3a);
   --action: light-dark(#233e63, #adc9ef);
@@ -53,6 +54,7 @@
 #diary-trends .fat { --series: var(--fat); }
 #diary-trends .carbs { --series: var(--carbs); }
 #diary-trends .fiber { --series: var(--fiber); }
+#diary-trends .water { --series: var(--water); }
 #diary-trends .series.kcal { stroke-width: 2.8; }
 #diary-trends .series.highlighted { stroke-width: 3.5; }
 #diary-trends :is(.series,.point).subdued { opacity: .25; }
@@ -73,6 +75,16 @@
 #diary-trends .goal-key { width: 13px; border-top: 2px solid var(--ink); }
 #diary-trends .dash-key { width: 13px; border-top: 2px dotted var(--muted); }
 #diary-trends .day-progress { margin-top: 9px; }
+#diary-trends .diary-water {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  margin-top: 6px; padding-top: 4px; border-top: 1px solid var(--rule); font-size: 12px;
+}
+#diary-trends #diary-fluid-total { color: var(--muted); }
+#diary-trends #quick-water {
+  min-height: 44px; padding: 5px 9px; border: 1px solid var(--rule); border-radius: 8px;
+  font: inherit; font-weight: 650; color: var(--water); background: var(--panel); white-space: nowrap;
+}
+#diary-trends #quick-water:disabled { opacity: .55; }
 #diary-trends .metric-progress { padding: 0; list-style: none; }
 #diary-trends :where(.progress-axis, .metric-progress button) {
   display: grid; grid-template-columns: 75px minmax(0, 1fr) 42px; column-gap: 7px;

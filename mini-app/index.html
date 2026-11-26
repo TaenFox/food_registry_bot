@@ -44,6 +44,13 @@
         <ul class="metric-progress"></ul>
         <p id="metric-detail" class="notes" aria-live="polite" hidden></p>
       </section>
+      <div class="diary-water" aria-label="Вода и напитки">
+        <div>
+          <p id="diary-water-goal" hidden></p>
+          <p id="diary-fluid-total" aria-live="polite"></p>
+        </div>
+        <button type="button" id="quick-water" aria-label="Добавить 250 мл воды">+250 мл</button>
+      </div>
       <p id="action-status" class="meal-note" role="status" hidden></p>
       <section class="meals" aria-label="Приёмы пищи за выбранный день"></section>
     </article>
@@ -65,6 +72,7 @@
           <h2 id="report-summary-title">Сводка</h2>
           <div class="report-metric-head" aria-hidden="true"><span>Метрика</span><span>В среднем</span><span>В цели</span></div>
           <div class="report-metrics" role="group" aria-label="Выбрать метрику для графика"></div>
+          <p class="report-fluids report-note" hidden></p>
           <p class="report-coverage report-note" aria-live="polite"></p>
         </section>
         <section class="report-dynamics" aria-labelledby="report-dynamics-title">
