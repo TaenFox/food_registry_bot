@@ -246,6 +246,7 @@ def read_report(session: Session, user: User, now: datetime, group_count: int) -
 def create_diary_app(
     session_factory: sessionmaker[Session], *, token: str, admin_user_ids: tuple[int, ...],
     write_entry: Callable[[int, tuple[int, ...], CreateMiniAppEntry], date] | None = None,
+    context_encryption_secret: str | None = None,
 ) -> web.Application:
     def load(
         telegram_user_id: int, now: datetime, path: str,
@@ -259,9 +260,15 @@ def create_diary_app(
                 if user is None:
                     return 404, {"error": "profile_missing"}
                 if path == "/api/settings":
-                    if isinstance(command, SettingsPatch) and not apply_settings(session, user, command):
-                        return 422, {"error": "unknown_diet"}
-                    return 200, read_settings(session, user)
+                    if isinstance(command, SettingsPatch):
+                        if command.user_context_comment is not None and not (
+                            context_encryption_secret and context_encryption_secret.strip()
+                        ):
+                            return 503, {"error": "context_unavailable"}
+                        if not apply_settings(session, user, command,
+                                              context_encryption_secret=context_encryption_secret):
+                            return 422, {"error": "unknown_diet"}
+                    return 200, read_settings(session, user, context_encryption_secret=context_encryption_secret)
                 if group_count is not None:
                     return 200, read_report(session, user, now, group_count)
                 if command is not None:

@@ -120,6 +120,7 @@ from food_registry_bot.db.repositories import (
     UserRepository,
     SupportedDietView,
     UserSummaryPreferenceRepository,
+    USER_LLM_CONTEXT_COMMENT_MAX_LENGTH,
 )
 from food_registry_bot.exchange import DataExchangeService, DuplicateDataRowError, DuplicateFileError, UnsupportedExchangeFileError
 from food_registry_bot.extraction import (
@@ -257,7 +258,6 @@ API_KEY_PLACEHOLDER = "<API_KEY>"
 PROVIDER_PLACEHOLDER = "<PROVIDER>"
 SUPPORTED_PERSONAL_PROVIDERS = (LLMProvider.OPENAI, LLMProvider.MISTRAL)
 SUPPORTED_DIET_METRIC_CODES = get_supported_diet_metric_codes()
-USER_LLM_CONTEXT_COMMENT_MAX_LENGTH = 1000
 BOT_ACCESS_DENIED_MESSAGE = (
     "Сейчас у тебя нет доступа к боту. Если он нужен, попроси администратора добавить твой Telegram ID."
 )

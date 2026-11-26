@@ -21,6 +21,7 @@ from food_registry_bot.llm_access.resolver import ResolvedProviderAccess, UserLL
 from food_registry_bot.llm_access.trial import TrialQuota
 from food_registry_bot.conversation import DisabledConversationService
 from food_registry_bot.db.base import Base
+from food_registry_bot.db.repositories import UserLLMProfileRepository
 from food_registry_bot.db.models import (
     DailyGoalSnapshot,
     Entry,
@@ -306,7 +307,8 @@ async def test_mini_app_settings_share_preferences_and_preserve_goal_snapshots(d
             calorie_goal=1800, protein_goal=90, fat_goal=60, carbs_goal=210, fiber_goal=25, water_goal=2000,
         ))
         user_id = user.id
-    app = create_diary_app(diary_db, token=TOKEN, admin_user_ids=())
+    secret = "fixture-context-secret"
+    app = create_diary_app(diary_db, token=TOKEN, admin_user_ids=(), context_encryption_secret=secret)
     init_data = telegram_init_data(1)
 
     async def settings(command=None, *, authorization=init_data):
@@ -318,6 +320,10 @@ async def test_mini_app_settings_share_preferences_and_preserve_goal_snapshots(d
     status, defaults = await settings()
     assert status == 200
     assert defaults["goals"]["protein"] == 90
+    assert defaults["timezone"] == "UTC"
+    assert "Asia/Tbilisi" in defaults["choices"]["timezone"]
+    assert defaults["user_context_comment"] == ""
+    assert defaults["context_available"] is True
     assert defaults["goal_steps"] == {
         "calories": 100, "protein": 5, "fat": 5, "carbs": 5, "fiber": 5, "water": 100,
     }
@@ -337,6 +343,8 @@ async def test_mini_app_settings_share_preferences_and_preserve_goal_snapshots(d
         "report_goal_tolerance_percent": 15,
         "report_noticeable_entry_percentile": 85,
         "diets": {"gastritis": True},
+        "timezone": "Asia/Tbilisi",
+        "user_context_comment": "Ем без добавленного сахара",
     }
     assert await settings(command, authorization=None) == (401, {"error": "invalid_authorization"})
     assert await settings({**command, "goals": {"protein": "95"}}) == (400, {"error": "invalid_settings"})
@@ -344,6 +352,8 @@ async def test_mini_app_settings_share_preferences_and_preserve_goal_snapshots(d
         400, {"error": "invalid_settings"},
     )
     assert await settings({**command, "diets": {"unknown": True}}) == (422, {"error": "unknown_diet"})
+    assert await settings({"timezone": "UTC+04:00"}) == (400, {"error": "invalid_settings"})
+    assert await settings({"user_context_comment": "я" * 1001}) == (400, {"error": "invalid_settings"})
     assert (await settings())[1]["goals"] == defaults["goals"]
 
     status, updated = await settings(command)
@@ -355,18 +365,41 @@ async def test_mini_app_settings_share_preferences_and_preserve_goal_snapshots(d
         if key not in {"goals", "metrics", "diets"})
     assert (await settings({"metrics": {"fat": False}}))[1]["goals"] == updated["goals"]
     assert (await settings(authorization=telegram_init_data(2)))[1]["goals"] == defaults["goals"]
+    assert (await settings(authorization=telegram_init_data(2)))[1]["user_context_comment"] == ""
     _, diary = await request_diary(app, init_data=init_data)
     assert diary["metrics"] == ["protein", "carbs", "fiber"]
+    assert diary["timezone"] == "Asia/Tbilisi"
     _, report = await request_diary(app, init_data=init_data, path="/api/report")
     assert [metric["code"] for metric in report["metrics"]] == ["protein", "carbs", "fiber"]
-
+    with diary_db.begin() as session:
+        repo = UserLLMProfileRepository(session)
+        stored = repo.get_by_user_id(user_id).user_context_comment
+        assert stored.startswith("enc:") and command["user_context_comment"] not in stored
+        assert repo.get_user_context_comment(user_id=user_id, encryption_secret=secret) == command["user_context_comment"]
+        repo.set_user_context_comment(user_id=user_id, user_context_comment="Из команды /context", encryption_secret=secret)
+    assert (await settings())[1]["user_context_comment"] == "Из команды /context"
+    assert (await settings({"user_context_comment": ""}))[1]["user_context_comment"] == ""
     with diary_db() as session:
+        assert UserLLMProfileRepository(session).get_by_user_id(user_id).user_context_comment is None
         assert session.query(UserGoalPreference).filter_by(user_id=user_id).one().fiber_goal == 30
         assert session.query(UserSummaryPreference).filter_by(user_id=user_id).one().show_fat is False
         assert session.get(User, user_id).workout_logging_enabled
         snapshot = session.query(DailyGoalSnapshot).filter_by(summary_date=today).one()
         assert (snapshot.protein_goal, snapshot.fiber_goal, snapshot.nutrition_day_start_hour) == (90, 25, 4)
+        assert snapshot.timezone == "UTC"
 
+
+async def test_mini_app_settings_can_update_timezone_without_context_encryption(diary_db):
+    with diary_db.begin() as session:
+        session.add_all([User(telegram_user_id=1, timezone="UTC"), UserAccess(telegram_user_id=1, is_allowed=True)])
+    app = create_diary_app(diary_db, token=TOKEN, admin_user_ids=())
+    params = {"path": "/api/settings", "init_data": telegram_init_data(1)}
+    assert (await request_diary(app, **params))[1]["context_available"] is False
+    assert await request_diary(app, **params, method="POST", command={
+        "timezone": "Asia/Tbilisi", "user_context_comment": "Контекст",
+    }) == (503, {"error": "context_unavailable"})
+    assert (await request_diary(app, **params))[1]["timezone"] == "UTC"
+    assert (await request_diary(app, **params, method="POST", command={"timezone": "Asia/Tbilisi"}))[0] == 200
 
 async def test_create_entry_sets_local_time_and_does_not_duplicate_a_retry(diary_db):
     _, app, extract, estimate = entry_writer(diary_db, [

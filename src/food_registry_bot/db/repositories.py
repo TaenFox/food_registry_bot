@@ -76,6 +76,7 @@ DEFAULT_SUMMARY_PREFERENCES = {
     "report_noticeable_entry_percentile": 80,
 }
 USER_CONTEXT_COMMENT_ENCRYPTED_PREFIX = "enc:"
+USER_LLM_CONTEXT_COMMENT_MAX_LENGTH = 1000
 
 
 @dataclass(frozen=True)
@@ -452,7 +453,9 @@ class UserLLMProfileRepository:
         user_id: int,
         encryption_secret: str | None,
     ) -> str | None:
-        profile, _created = self.get_or_create(user_id=user_id)
+        profile = self.get_by_user_id(user_id)
+        if profile is None:
+            return None
         return self._deserialize_user_context_comment(
             stored_value=profile.user_context_comment,
             encryption_secret=encryption_secret,

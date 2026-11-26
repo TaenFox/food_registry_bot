@@ -97,8 +97,67 @@ function createSettingsView({ request, handleAccessError, expire, setBusy, refre
         return row;
     }
 
+    function timezoneField(zones) {
+        const fields = element("div", undefined, "settings-stack");
+        const searchLabel = element("label", "Поиск по городу или часовому поясу");
+        const search = element("input");
+        search.type = "search";
+        search.autocomplete = "off";
+        searchLabel.append(search);
+        const zoneLabel = element("label", "Часовой пояс");
+        const select = element("select");
+        zoneLabel.append(select);
+        const device = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+        function showZones() {
+            const query = search.value.trim().toLowerCase().replaceAll(" ", "_");
+            const matches = zones.filter(zone => zone !== draft.timezone && zone.toLowerCase().includes(query));
+            select.replaceChildren(...[draft.timezone, ...matches].map(zone => {
+                const option = element("option", zone.replaceAll("_", " "));
+                option.value = zone;
+                return option;
+            }));
+            select.value = draft.timezone;
+        }
+        function choose(zone) {
+            draft.timezone = zone;
+            search.value = "";
+            showZones();
+            updateDraft();
+        }
+        search.addEventListener("input", showZones);
+        search.addEventListener("keydown", event => {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                select.focus();
+            }
+        });
+        select.addEventListener("change", () => choose(select.value));
+        fields.append(searchLabel, zoneLabel);
+        if (zones.includes(device)) {
+            fields.append(actionButton("Использовать часовой пояс устройства", () => choose(device)));
+        }
+        showZones();
+        return fields;
+    }
+
+    function contextField(available, maxLength) {
+        if (!available) return element("p", "Сейчас пользовательский контекст недоступен.", "settings-note");
+        const label = element("label", "Контекст для ИИ", "settings-stack");
+        const input = element("textarea");
+        input.rows = 4;
+        input.maxLength = maxLength;
+        input.value = draft.user_context_comment;
+        input.addEventListener("input", () => {
+            draft.user_context_comment = input.value.trim();
+            updateDraft();
+        });
+        label.append(input);
+        return label;
+    }
+
     function install(payload) {
-        const { goal_steps, choices, diets, expires_in_ms, ...values } = payload;
+        const { goal_steps, choices, diets, expires_in_ms, context_available, context_max_length, ...values } = payload;
         current = { ...values, diets: Object.fromEntries(diets.map(diet => [diet.code, diet.selected])) };
         draft = { ...current, goals: { ...current.goals }, metrics: { ...current.metrics },
             diets: { ...current.diets } };
@@ -110,6 +169,7 @@ function createSettingsView({ request, handleAccessError, expire, setBusy, refre
             toggle(goalMetrics[code], value, checked => { draft.metrics[code] = checked; })),
             settingToggle("workout_logging_enabled", "Тренировки"));
         rows.reports.replaceChildren(
+            timezoneField(choices.timezone),
             choice(payload, "nutrition_day_start_hour", "Начало пищевого дня",
                 hour => String(hour).padStart(2, "0") + ":00"),
             choice(payload, "report_goal_tolerance_percent", "Допуск к цели", value => "±" + value + "%"),
@@ -123,6 +183,7 @@ function createSettingsView({ request, handleAccessError, expire, setBusy, refre
         dietSection.hidden = !diets.length;
         rows.diets.replaceChildren(...diets.map(diet =>
             toggle(diet.name, diet.selected, checked => { draft.diets[diet.code] = checked; })));
+        rows.context.replaceChildren(contextField(context_available, context_max_length));
         loading.hidden = true;
         form.hidden = false;
         updateDraft();

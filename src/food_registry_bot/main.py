@@ -109,6 +109,7 @@ async def run() -> None:
             diary_runner = web.AppRunner(
                 create_diary_app(
                     session_factory, token=settings.bot_token, admin_user_ids=settings.admin_user_ids,
+                    context_encryption_secret=settings.personal_api_keys_secret,
                     write_entry=MiniAppEntryWriter(
                         session_factory, settings, extraction_service, nutrition_service,
                         conversation_service,
