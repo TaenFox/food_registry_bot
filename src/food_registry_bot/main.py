@@ -7,6 +7,7 @@ from aiohttp import web
 
 from food_registry_bot.bot.commands import setup_bot_commands, setup_diary_menu_button
 from food_registry_bot.bot.factory import create_bot, create_dispatcher
+from food_registry_bot.bot.trial_notifications import run_trial_expiry_notifications
 from food_registry_bot.conversation.factory import create_conversation_service
 from food_registry_bot.config import get_settings
 from food_registry_bot.db.session import create_session_factory
@@ -99,6 +100,7 @@ async def run() -> None:
 
     bot = create_bot(settings.bot_token)
     diary_runner = None
+    trial_notification_task: asyncio.Task[None] | None = None
     try:
         session_factory = create_session_factory()
         extraction_service = create_extraction_service(settings)
@@ -144,6 +146,10 @@ async def run() -> None:
         )
         if restart_marker is not None:
             clear_restart_marker(settings.restart_marker_file)
+        if settings.admin_user_ids:
+            trial_notification_task = asyncio.create_task(run_trial_expiry_notifications(
+                bot=bot, session_factory=session_factory, admin_user_id=settings.admin_user_ids[0],
+            ))
         await dispatcher.start_polling(bot, close_bot_session=False)
     except Exception as exc:
         write_restart_marker(
@@ -153,6 +159,9 @@ async def run() -> None:
         raise
     finally:
         try:
+            if trial_notification_task is not None:
+                trial_notification_task.cancel()
+                await asyncio.gather(trial_notification_task, return_exceptions=True)
             if diary_runner is not None:
                 await diary_runner.cleanup()
             await bot.session.close()

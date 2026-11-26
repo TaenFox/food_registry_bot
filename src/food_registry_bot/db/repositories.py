@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Callable, Optional, TYPE_CHECKING
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, selectinload
@@ -231,6 +231,23 @@ class UserAccessRepository:
             "account_category": AccountCategory.EXTERNAL,
             "temporary_internal_until": now + timedelta(days=7),
         }, ("telegram_user_id",))
+
+    def list_expired_trials(self, *, now: datetime) -> list[UserAccess]:
+        return list(self._session.scalars(
+            select(UserAccess)
+            .where(UserAccess.temporary_internal_until <= now)
+            .order_by(UserAccess.temporary_internal_until, UserAccess.telegram_user_id)
+        ))
+
+    def clear_notified_trial(self, *, telegram_user_id: int, expires_at: datetime) -> None:
+        self._session.execute(
+            update(UserAccess)
+            .where(
+                UserAccess.telegram_user_id == telegram_user_id,
+                UserAccess.temporary_internal_until == expires_at,
+            )
+            .values(temporary_internal_until=None)
+        )
 
     def get_account_category(self, telegram_user_id: int) -> AccountCategory:
         access = self.get_by_telegram_user_id(telegram_user_id)
