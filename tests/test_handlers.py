@@ -94,6 +94,7 @@ from food_registry_bot.extraction import (
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_FULL, CSV_CONTRACT_TYPE_PARTIAL
 from food_registry_bot.importing.csv_import import CSV_CONTRACT_TYPE_WORKOUT
 from food_registry_bot.llm_access import OpenAIKeyValidationResult
+from food_registry_bot.llm_access.trial import TrialQuota
 from food_registry_bot.nutrition import InvalidNutritionPayload, PeriodReportUseCase, StaticNutritionEstimationService
 from food_registry_bot.nutrition.period_report import resolve_report_cohorts
 
@@ -761,6 +762,45 @@ async def test_external_user_gets_personal_provider_stub_for_conversation_messag
     assert "/provider_save" in response_text
     assert "Управление сохранёнными подключениями" in response_text
     assert "можно выбрать или удалить добавленный ключ" in response_text
+
+
+async def test_trial_chat_stops_at_dialogue_limit_and_keeps_access_after_expiry(monkeypatch) -> None:
+    session_factory = create_session_factory()
+    message = SimpleNamespace(
+        text="Что съесть на ужин?",
+        from_user=SimpleNamespace(id=ALLOWED_USER_ID, username="trial_user"),
+        answer=AsyncMock(),
+    )
+    await handle_start(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    with session_factory.begin() as session:
+        user_id = session.query(User).filter_by(telegram_user_id=ALLOWED_USER_ID).one().id
+    quota = TrialQuota()
+    now = datetime.now(timezone.utc)
+    for _ in range(20):
+        assert quota.consume(user_id, "conversation", now=now, timezone_name="Europe/Moscow", start_hour=4) is None
+    def unexpected_reply(**_kwargs):
+        raise AssertionError("A blocked request must not call the LLM")
+
+    monkeypatch.setattr(
+        "food_registry_bot.llm_access.resolver.create_conversation_service_for_access",
+        lambda **_kwargs: SimpleNamespace(reply=unexpected_reply),
+    )
+    message.answer.reset_mock()
+    options = {
+        "settings": make_settings(openai_api_key="project-key", enable_openai_provider=True),
+        "admin_user_ids": (ADMIN_ID,), "trial_quota": quota,
+    }
+    await handle_message(message, session_factory, **options)
+    assert "Дневной лимит диалога с ИИ исчерпан" in message.answer.await_args.args[0]
+    assert quota.remaining(user_id, now)["food"] == 7
+
+    with session_factory.begin() as session:
+        access = UserAccessRepository(session).get_by_telegram_user_id(ALLOWED_USER_ID)
+        access.temporary_internal_until = now - timedelta(seconds=1)
+    await handle_message(message, session_factory, **options)
+    assert "Пробный доступ к ИИ завершён" in message.answer.await_args.args[0]
+    await handle_health(message, session_factory, admin_user_ids=(ADMIN_ID,))
+    assert message.answer.await_args.args == ("ok",)
 
 
 async def test_provider_menu_callback_deletes_connection() -> None:

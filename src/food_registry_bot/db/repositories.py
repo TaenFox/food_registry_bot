@@ -416,10 +416,14 @@ class UserLLMProfileRepository:
         if profile is not None:
             return profile, False
 
-        profile = UserLLMProfile(user_id=user_id, selection_mode=UserLLMSelectionMode.PROJECT)
-        self._session.add(profile)
-        self._session.flush()
-        return profile, True
+        profile = insert_if_absent(self._session, UserLLMProfile, {
+            "user_id": user_id, "selection_mode": UserLLMSelectionMode.PROJECT,
+        }, ("user_id",))
+        if profile is not None:
+            return profile, True
+        return self._session.scalars(
+            select(UserLLMProfile).where(UserLLMProfile.user_id == user_id)
+        ).one(), False
 
     def set_selection_mode(
         self,

@@ -74,19 +74,19 @@ class TrialQuota:
 
 def charge_trial_request(
     quota: TrialQuota | None, session: Session, user: User, admin_user_ids: tuple[int, ...],
-    action: TrialAction, *providers: ResolvedProviderAccess | None,
+    action: TrialAction, provider: ResolvedProviderAccess | None,
 ) -> datetime | None:
     if quota is None or user.telegram_user_id in admin_user_ids:
         return None
-    if not any(provider and provider.is_available and provider.source == "project" for provider in providers):
+    if provider is None or not provider.is_available or provider.source != "project":
         return None
     repository = UserAccessRepository(session)
     access = repository.get_by_telegram_user_id(user.telegram_user_id)
     if access is None or access.account_category is AccountCategory.INTERNAL:
         return None
-    now = datetime.now(timezone.utc)
-    if not repository.is_temporary_internal_active(access, now=now):
+    if access.temporary_internal_until is None:
         return None
+    now = datetime.now(timezone.utc)
     preference = UserSummaryPreferenceRepository(session).get_by_user_id(user.id)
     return quota.consume(
         user.id, action, now=now, timezone_name=user.timezone,

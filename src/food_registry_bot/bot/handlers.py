@@ -148,6 +148,7 @@ from food_registry_bot.llm_access import (
     validate_openai_api_key,
 )
 from food_registry_bot.llm_access.resolver import (
+    ResolvedProviderAccess,
     build_provider_unavailable_message,
     build_user_llm_runtime_bundle,
 )
@@ -6134,7 +6135,7 @@ async def handle_message(
             return
 
         resolved_extraction_service = extraction_service
-        check_nutrition_quota = False
+        food_quota_pending = True
         if settings is not None and initial_user_id is not None:
             with session_scope(session_factory) as session:
                 runtime_bundle = build_user_llm_runtime_bundle(
@@ -6168,9 +6169,7 @@ async def handle_message(
                     )
                     return
                 user = session.get(User, initial_user_id)
-                if runtime_bundle.extraction_access is None:
-                    check_nutrition_quota = True
-                elif user is not None:
+                if runtime_bundle.extraction_access is not None and user is not None:
                     resets_at = charge_trial_request(
                         trial_quota, session, user, admin_user_ids, "food", runtime_bundle.extraction_access,
                     )
@@ -6180,6 +6179,7 @@ async def handle_message(
                             reply_markup=build_main_keyboard(), **build_reply_kwargs(message),
                         )
                         return
+                    food_quota_pending = False
                 resolved_extraction_service = runtime_bundle.extraction_service
 
         extraction_result = await asyncio.to_thread(resolved_extraction_service.extract, extraction_request)
@@ -6269,12 +6269,16 @@ async def handle_message(
                         )
                     )
 
-                if contains_food_entries and check_nutrition_quota and runtime_bundle is not None:
+                def charge_food_followup(provider: ResolvedProviderAccess | None) -> None:
+                    nonlocal food_quota_pending
+                    if not food_quota_pending or provider is None:
+                        return
                     resets_at = charge_trial_request(
-                        trial_quota, session, user, admin_user_ids, "food", runtime_bundle.nutrition_access,
+                        trial_quota, session, user, admin_user_ids, "food", provider,
                     )
                     if resets_at is not None:
                         raise FoodWriteFlowError(trial_limit_message("food", resets_at, user.timezone))
+                    food_quota_pending = False
 
                 saved_food_entries: list = []
                 saved_diet_entries: list = []
@@ -6342,6 +6346,8 @@ async def handle_message(
                                 )
 
                 if saved_food_entries:
+                    if runtime_bundle is not None:
+                        charge_food_followup(runtime_bundle.nutrition_access)
                     nutrition_flow_result = StoredEntryNutritionEstimationUseCase(
                         session,
                         runtime_bundle.nutrition_service if runtime_bundle is not None else nutrition_service,
@@ -6365,6 +6371,8 @@ async def handle_message(
                     )
                 diet_request = build_diet_evaluation_request_for_supported_diets(saved_diet_entries, enabled_diets)
                 if diet_request is not None:
+                    if runtime_bundle is not None:
+                        charge_food_followup(runtime_bundle.conversation_access)
                     evaluated_diet_service = resolve_diet_service(
                         settings=settings,
                         runtime_bundle=runtime_bundle,
@@ -6394,6 +6402,8 @@ async def handle_message(
                     )
                     coach_comment: str | None = None
                     if saved_food_entries:
+                        if runtime_bundle is not None:
+                            charge_food_followup(runtime_bundle.conversation_access)
                         factual_context = NutritionCoachContextBuilder(session).build(
                             user_id=user_id,
                             timezone_name=user.timezone,
