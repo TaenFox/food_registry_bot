@@ -33,9 +33,10 @@ from food_registry_bot.mini_app_entries import (
     MINI_APP_ENTRY_COMMAND,
     CreateMiniAppEntry,
     MiniAppEntryError,
+    QuickWaterEntry,
     RepeatMiniAppEntry,
     entry_user,
-    write_repeated_entry,
+    write_prepared_entry,
 )
 from food_registry_bot.mini_app_files import (
     MAX_UPLOAD_BYTES,
@@ -45,6 +46,7 @@ from food_registry_bot.mini_app_files import (
     run_file_exchange,
 )
 from food_registry_bot.mini_app_settings import SettingsPatch, apply_settings, read_settings
+from food_registry_bot.nutrition.beverage import beverage_volume, is_beverage, is_plain_water, nutrition_items
 from food_registry_bot.nutrition.contract import SUPPORTED_NUTRITION_METRIC_CODES
 from food_registry_bot.nutrition.daily_summary import (
     resolve_day_bounds_utc,
@@ -56,6 +58,7 @@ from food_registry_bot.nutrition.period_report import (
     resolve_report_cohorts,
 )
 from food_registry_bot.nutrition.workout_credit import DailyWorkoutCalorieCreditUseCase
+from food_registry_bot.nutrition.water_summary import summarize_water_entries
 
 MINI_APP_PORT = 8081
 INIT_DATA_MAX_AGE = timedelta(hours=1)
@@ -66,7 +69,7 @@ def metric_total(dishes: list[dict], code: str) -> dict:
     known = [dish["metrics"][code] for dish in dishes if dish["metrics"][code] is not None]
     return {
         "value": sum(known) if known else None,
-        "complete": bool(known) and len(known) == len(dishes),
+        "complete": bool(known) and all(dish["water"] or dish["metrics"][code] is not None for dish in dishes),
     }
 
 
@@ -74,13 +77,15 @@ def diary_dish_data(item: EntryItem) -> dict:
     values = dish_metric_values(item)
     return {
         "id": item.id,
-        "name": item.name,
+        "name": "Вода" if is_plain_water(item) else item.name,
         "quantity": item.quantity,
         "unit": item.unit,
         "revision": dish_revision(item, values),
         "calories": values.get("calories"),
         "metrics": {code: values.get(code) for code in SUPPORTED_NUTRITION_METRIC_CODES},
         "complete": all(code in values for code in SUPPORTED_NUTRITION_METRIC_CODES),
+        "water": is_plain_water(item),
+        "beverage": is_beverage(item),
     }
 
 
@@ -93,6 +98,12 @@ def diary_local_time(occurred_at: datetime, user_timezone: ZoneInfo) -> datetime
 def meal_data(entry: Entry, user_timezone: ZoneInfo) -> dict:
     dishes = [diary_dish_data(item) for item in sorted(entry.items, key=lambda item: item.position)]
     totals = {code: metric_total(dishes, code) for code in SUPPORTED_NUTRITION_METRIC_CODES}
+    water_items = [item for item in entry.items if is_plain_water(item)]
+    water_volumes = [beverage_volume(item) for item in water_items]
+    totals["water"] = {
+        "value": sum(water_volumes) if water_volumes and all(value is not None for value in water_volumes) else None,
+        "complete": bool(water_volumes) and all(value is not None for value in water_volumes),
+    }
     return {
         "id": entry.id,
         "time": diary_local_time(entry.occurred_at, user_timezone).strftime("%H:%M"),
@@ -111,6 +122,8 @@ def read_diary(session: Session, user: User, now: datetime) -> dict:
         code for code in SUPPORTED_NUTRITION_METRIC_CODES
         if preference is None or getattr(preference, f"show_{code}")
     ]
+    if preference is None or preference.show_water:
+        metrics.append("water")
     today = resolve_local_summary_date(
         reference_at=now, timezone_name=user.timezone, nutrition_day_start_hour=start_hour
     )
@@ -124,11 +137,13 @@ def read_diary(session: Session, user: User, now: datetime) -> dict:
         start, end = resolve_day_bounds_utc(
             summary_date=day, timezone_name=user.timezone, nutrition_day_start_hour=start_hour
         )
-        entries = repository.list_food_for_user_between(
+        entries = repository.list_diary_for_user_between(
             user_id=user.id, occurred_at_from=start, occurred_at_to=end
         )
         meals = [meal_data(entry, user_timezone) for entry in reversed(entries)]
-        dishes = [dish for meal in meals for dish in meal["dishes"]]
+        nutrition_ids = {item.id for entry in entries for item in nutrition_items(entry)}
+        dishes = [dish for meal in meals for dish in meal["dishes"] if dish["id"] in nutrition_ids]
+        water_summary = summarize_water_entries(entries, summary_date=day, timezone_name=user.timezone)
         snapshot = snapshots.get_by_user_id_and_date(user_id=user.id, summary_date=day)
         goals = {code: getattr(snapshot, GOAL_FIELDS[code], None) for code in metrics}
         if goals.get("calories") and user.workout_logging_enabled:
@@ -143,7 +158,11 @@ def read_diary(session: Session, user: User, now: datetime) -> dict:
 
         observations = {}
         for code in metrics:
-            total = metric_total(dishes, code)
+            total = (
+                {"value": water_summary.total_ml if water_summary.included_entry_count else None,
+                 "complete": water_summary.is_complete and bool(water_summary.included_entry_count)}
+                if code == "water" else metric_total(dishes, code)
+            )
             value = total["value"]
             goal = goals[code] or None
             observations[code] = {
@@ -159,16 +178,20 @@ def read_diary(session: Session, user: User, now: datetime) -> dict:
             {
                 "date": day.isoformat(),
                 "current": day == today,
-                "complete": not metrics or (
-                    all(meal["dishes"] for meal in meals)
-                    and all(dish["metrics"][code] is not None for dish in dishes for code in metrics)
+                "complete": all(
+                    dish["water"] or dish["metrics"][code] is not None
+                    for dish in dishes for code in metrics if code != "water"
                 ),
+                "fluid_total_ml": water_summary.fluid_total_ml,
                 "metrics": observations,
                 "meals": meals,
             }
         )
 
-    return {"metrics": metrics, "tolerance": tolerance, "days": days, "timezone": user.timezone}
+    return {
+        "metrics": metrics, "tolerance": tolerance, "days": days,
+        "timezone": user.timezone, "day_start_hour": start_hour,
+    }
 
 
 def read_report(session: Session, user: User, now: datetime, group_count: int) -> dict:
@@ -214,6 +237,7 @@ def read_report(session: Session, user: User, now: datetime, group_count: int) -
         "date_from": report.summary_date_from.isoformat(),
         "date_to": report.summary_date_to.isoformat(),
         "days": report.period_day_count,
+        "fluid_total_ml": report.fluid_total_ml if "water" in codes else None,
         "tolerance": tolerance,
         "metrics": metrics,
     }
@@ -283,9 +307,9 @@ def create_diary_app(
         except ValidationError:
             return response(400, invalid)
         try:
-            if isinstance(command, RepeatMiniAppEntry):
+            if isinstance(command, (RepeatMiniAppEntry, QuickWaterEntry)):
                 summary_date = await asyncio.to_thread(
-                    write_repeated_entry, session_factory, telegram_user_id, admin_user_ids, command,
+                    write_prepared_entry, session_factory, telegram_user_id, admin_user_ids, command,
                 )
             elif write_entry is not None:
                 summary_date = await asyncio.to_thread(write_entry, telegram_user_id, admin_user_ids, command)

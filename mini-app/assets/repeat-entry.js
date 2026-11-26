@@ -48,10 +48,10 @@ function createRepeatEntryView({ request, findHistory, handleAccessError, expire
         const valid = entries.length > 0 && entries.every(({ quantity }) =>
             quantity === null || (Number.isInteger(quantity) && quantity > 0 && quantity <= 2_147_483_647));
         submit.disabled = submitting || !valid || draft.size > maxItems;
-        const totals = Object.fromEntries(Object.keys(metricLabels).map(code => {
+        const totals = Object.fromEntries([...Object.keys(editableMetricLabels), "fiber"].map(code => {
             const known = entries.map(item => scaledValue(item, code)).filter(Number.isFinite);
             return [code, { value: known.length && valid ? known.reduce((sum, value) => sum + value, 0) : null,
-                complete: known.length === entries.length }];
+                complete: entries.every(item => item.dish.water || Number.isFinite(scaledValue(item, code))) }];
         }));
         for (const item of entries) {
             const value = scaledValue(item, "calories");
@@ -143,7 +143,11 @@ function createRepeatEntryView({ request, findHistory, handleAccessError, expire
             const label = element("div");
             const sourceDate = fullDate.format(new Date(dish.occurred_at.slice(0, 10)));
             label.append(element("strong", `${dish.name} · ${portion(dish)}`),
-                element("span", `${sourceDate} · ${dish.occurred_at.slice(11, 16)}`, "repeat-meta"));
+                element("span", `Последний раз ${sourceDate} · ${dish.occurred_at.slice(11, 16)}`, "repeat-meta"));
+            const macros = Object.entries({ calories: "", protein: "Б ", fat: "Ж ", carbs: "У ", fiber: "Клетчатка " })
+                .filter(([code]) => Number.isFinite(dish.metrics[code]))
+                .map(([code, title]) => title + formatAmount(dish.metrics[code], code));
+            if (macros.length) label.append(element("span", macros.join(" · "), "repeat-meta"));
             const mark = element("span", "", "history-mark");
             mark.setAttribute("aria-hidden", "true");
             choice.append(label, mark);

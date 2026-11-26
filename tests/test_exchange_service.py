@@ -216,6 +216,8 @@ def test_create_export_files_and_mark_processed(tmp_path: Path) -> None:
     storage = LocalDataExchangeStorage(base_dir=tmp_path / "data_exchange")
     csv_path = tmp_path / "import.csv"
     build_sample_csv(csv_path)
+    with csv_path.open("a", encoding="utf-8") as file:
+        file.write("2026-05-20,Напиток,Кофе,напиток,100,мл,5,1,0,0,0,,,\n")
     service = DataExchangeService(session, storage=storage)
 
     sha256, validation_result = service.validate_import_file(
@@ -241,6 +243,7 @@ def test_create_export_files_and_mark_processed(tmp_path: Path) -> None:
     assert export_file.status is DataExchangeStatus.READY
     assert export_file.contract_type == CSV_CONTRACT_TYPE_FULL
     assert export_path.exists()
+    assert ",Кофе,напиток,100,мл," in export_path.read_text(encoding="utf-8")
 
     service.mark_export_downloaded(exchange_file=export_file)
 

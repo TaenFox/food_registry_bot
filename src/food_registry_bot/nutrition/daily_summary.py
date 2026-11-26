@@ -7,8 +7,9 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
-from food_registry_bot.db.models import Entry
+from food_registry_bot.db.models import Entry, EntryItem, EntryType
 from food_registry_bot.db.repositories import EntryRepository
+from food_registry_bot.nutrition.beverage import is_plain_water, nutrition_items
 from food_registry_bot.nutrition.contract import SUPPORTED_NUTRITION_METRIC_CODES
 
 
@@ -128,7 +129,7 @@ class DailyNutritionSummaryUseCase:
             timezone_name=timezone_name,
             nutrition_day_start_hour=nutrition_day_start_hour,
         )
-        entries = self._entry_repository.list_food_for_user_between(
+        entries = self._entry_repository.list_diary_for_user_between(
             user_id=user_id,
             occurred_at_from=occurred_at_from,
             occurred_at_to=occurred_at_to,
@@ -144,7 +145,10 @@ class DailyNutritionSummaryUseCase:
         day_totals = _empty_totals()
         excluded_entry_count = 0
         for entry in entries:
-            entry_summary = self._build_entry_summary(entry)
+            items = nutrition_items(entry)
+            if not items and (entry.entry_type is EntryType.WATER or entry.items):
+                continue
+            entry_summary = self._build_entry_summary(entry, items)
             if entry_summary is None:
                 excluded_entry_count += 1
                 continue
@@ -162,15 +166,17 @@ class DailyNutritionSummaryUseCase:
             is_complete=excluded_entry_count == 0,
         )
 
-    def _build_entry_summary(self, entry: Entry) -> DailyNutritionEntrySummary | None:
+    def _build_entry_summary(self, entry: Entry, items: list[EntryItem]) -> DailyNutritionEntrySummary | None:
         item_summaries: list[DailyNutritionItemSummary] = []
         entry_totals = _empty_totals()
-        for item in sorted(entry.items, key=lambda current: current.position):
+        for item in sorted(items, key=lambda current: current.position):
             metric_values = {
                 metric.metric.code: metric.value
                 for metric in item.metrics
                 if metric.metric is not None
             }
+            if is_plain_water(item):
+                metric_values = dict.fromkeys(self._required_metric_codes, 0.0) | metric_values
             if not self._required_metric_codes.issubset(metric_values):
                 return None
 

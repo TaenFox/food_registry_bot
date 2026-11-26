@@ -423,6 +423,9 @@ class CsvNutritionImporter:
             )
             item = entry.items[0]
             if row.entry_type is EntryType.FOOD:
+                categories = row.raw_values.get("categories") or ""
+                if any(category.strip().casefold() == "напиток" for category in categories.split(",")):
+                    item.source_facts = {"beverage": True}
                 self._metric_repository.upsert_metrics(
                     entry_item_id=item.id,
                     metric_values=[

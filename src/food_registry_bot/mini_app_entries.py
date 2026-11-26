@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import date, datetime, time, timezone
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -17,6 +17,8 @@ from food_registry_bot.config import Settings
 from food_registry_bot.conversation import ConversationService
 from food_registry_bot.db.models import Entry, EntryItem, EntryType, LLMIssueStage, MiniAppEntrySubmission, User
 from food_registry_bot.db.repositories import (
+    EntryItemCreate,
+    EntryRepository,
     UserDietPreferenceRepository,
     UserRepository,
     UserSummaryPreferenceRepository,
@@ -43,6 +45,7 @@ from food_registry_bot.journal_write import (
 )
 from food_registry_bot.llm_access.resolver import UserLLMRuntimeBundle, build_user_llm_runtime_bundle
 from food_registry_bot.meal_repeat import copy_food_items
+from food_registry_bot.nutrition.beverage import is_plain_water
 from food_registry_bot.nutrition.contract import NutritionEstimationItemInput
 from food_registry_bot.nutrition.daily_summary import resolve_local_summary_date
 from food_registry_bot.nutrition.goals import DailyNutritionGoalSnapshotUseCase
@@ -84,7 +87,16 @@ class RepeatMiniAppEntry(BaseModel):
         return self
 
 
-MINI_APP_ENTRY_COMMAND = TypeAdapter(Union[CreateMiniAppEntry, RepeatMiniAppEntry])
+class QuickWaterEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    action: Literal["water_250"]
+    request_id: UUID
+    local_date: date
+    local_time: time
+
+
+MINI_APP_ENTRY_COMMAND = TypeAdapter(Union[CreateMiniAppEntry, RepeatMiniAppEntry, QuickWaterEntry])
 
 
 class MiniAppEntryError(Exception):
@@ -94,7 +106,7 @@ class MiniAppEntryError(Exception):
         self.code = code
 
 
-def resolve_occurred_at(command: CreateMiniAppEntry | RepeatMiniAppEntry, timezone_name: str) -> datetime:
+def resolve_occurred_at(command: CreateMiniAppEntry | RepeatMiniAppEntry | QuickWaterEntry, timezone_name: str) -> datetime:
     if command.local_time.tzinfo is not None:
         raise MiniAppEntryError(422, "invalid_entry_time")
     local = datetime.combine(command.local_date, command.local_time)
@@ -146,9 +158,36 @@ def claim_entry_submission(session: Session, user_id: int, request_id: str, fing
     return False
 
 
-def write_repeated_entry(
+def _repeat_entry_items(
+    session: Session, user: User, occurred_at: datetime, command: RepeatMiniAppEntry,
+) -> None:
+    try:
+        entries = lock_diary_entries(
+            session, user.id, {item.entry_id for item in command.items}, lock_metrics=True,
+        )
+    except DiaryEditError as exc:
+        raise MiniAppEntryError(exc.status, exc.code) from exc
+    sources = {item.id: item for entry in entries.values() for item in entry.items}
+    portions: list[tuple[EntryItem, int | None]] = []
+    for requested in command.items:
+        item = sources.get(requested.item_id)
+        if (item is None or item.entry_id != requested.entry_id
+                or dish_revision(item, dish_metric_values(item)) != requested.revision):
+            raise MiniAppEntryError(409, "dish_changed")
+        if requested.quantity is not None and requested.quantity != item.quantity:
+            if (not item.quantity or item.quantity < 0
+                    or NutritionEstimationItemInput.normalize_unit(item.unit) not in ("g", "ml")):
+                raise MiniAppEntryError(422, "portion_not_scalable")
+        portions.append((item, requested.quantity))
+    entry_type = EntryType.WATER if all(is_plain_water(item) for item, _ in portions) else EntryType.FOOD
+    copy_food_items(
+        session, user_id=user.id, occurred_at=occurred_at, portions=portions, entry_type=entry_type,
+    )
+
+
+def write_prepared_entry(
     session_factory: sessionmaker[Session], telegram_user_id: int, admin_user_ids: tuple[int, ...],
-    command: RepeatMiniAppEntry,
+    command: RepeatMiniAppEntry | QuickWaterEntry,
 ) -> date:
     request_id = command.request_id.hex
     fingerprint = hashlib.sha256(command.model_dump_json(exclude={"request_id"}).encode()).hexdigest()
@@ -159,25 +198,17 @@ def write_repeated_entry(
         if not claim_entry_submission(session, user.id, request_id, fingerprint):
             return summary_date
 
-        try:
-            entries = lock_diary_entries(
-                session, user.id, {item.entry_id for item in command.items}, lock_metrics=True,
+        if isinstance(command, QuickWaterEntry):
+            entry = EntryRepository(session).create(
+                user_id=user.id, occurred_at=occurred_at, entry_type=EntryType.WATER,
+                items=[EntryItemCreate(name="water", quantity=250, unit="ml")],
             )
-        except DiaryEditError as exc:
-            raise MiniAppEntryError(exc.status, exc.code) from exc
-        sources = {item.id: item for entry in entries.values() for item in entry.items}
-        portions: list[tuple[EntryItem, int | None]] = []
-        for requested in command.items:
-            item = sources.get(requested.item_id)
-            if (item is None or item.entry_id != requested.entry_id
-                    or dish_revision(item, dish_metric_values(item)) != requested.revision):
-                raise MiniAppEntryError(409, "dish_changed")
-            if requested.quantity is not None and requested.quantity != item.quantity:
-                if (not item.quantity or item.quantity < 0
-                        or NutritionEstimationItemInput.normalize_unit(item.unit) not in ("g", "ml")):
-                    raise MiniAppEntryError(422, "portion_not_scalable")
-            portions.append((item, requested.quantity))
-        copy_food_items(session, user_id=user.id, occurred_at=occurred_at, portions=portions)
+            diets = UserDietPreferenceRepository(session).list_enabled_for_user(user_id=user.id)
+            fixed = build_fixed_diet_payload_for_water_entries([entry], diets)
+            if fixed is not None:
+                persist_diet_scores(session=session, entries=[entry], evaluation_payload=fixed)
+        else:
+            _repeat_entry_items(session, user, occurred_at, command)
         DailyNutritionGoalSnapshotUseCase(session).get_or_create(
             user_id=user.id, summary_date=summary_date, timezone_name=user.timezone,
             nutrition_day_start_hour=start_hour,

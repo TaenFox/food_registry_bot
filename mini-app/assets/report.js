@@ -162,6 +162,9 @@ function createReportView({ request, handleAccessError, expire }) {
 
     function render() {
         range.textContent = dateRange(payload.date_from, payload.date_to, true);
+        const fluids = root.querySelector(".report-fluids");
+        fluids.hidden = !Number.isFinite(payload.fluid_total_ml);
+        if (!fluids.hidden) fluids.textContent = "Выпито за период · " + amount(payload.fluid_total_ml, "мл");
         for (const period of payload.periods) {
             const button = periodButtons.find(button => Number(button.dataset.groups) === period.groups);
             button.lastElementChild.textContent = period.days + " " + daySuffix[dayWords.select(period.days)];

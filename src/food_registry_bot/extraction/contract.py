@@ -17,6 +17,7 @@ class ExtractedJournalItem(BaseModel):
     unit: Optional[str] = Field(default=None, min_length=1, max_length=32)
     metrics: List["ExtractedJournalMetric"] = Field(default_factory=list)
     nutrition_label: Optional[NutritionLabelData] = None
+    is_beverage: bool = False
 
     @field_validator("name")
     @classmethod

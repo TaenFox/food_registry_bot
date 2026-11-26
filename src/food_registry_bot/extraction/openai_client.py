@@ -105,6 +105,8 @@ class OpenAIResponsesExtractionClient:
             "Use 'food', 'water', or 'workout' for entry type and keep separate entries when one message contains mixed journal facts. "
             "For water entries, always set item.name to exactly 'water'. "
             "If water quantity is present, use unit 'ml'. "
+            "For food items that are beverages (coffee, tea, milk, juice, etc.), set is_beverage to true. "
+            "Keep these items in the food entry so nutrition can be estimated; never mark soups or sauces as beverages. "
             "For workout entries, item.name should be the workout or activity name. "
             "If workout duration is explicitly stated, use item.quantity with unit 'min'. "
             "If workout calories are explicitly visible and reliable, put them into item.metrics as code 'workout_calories'. "
