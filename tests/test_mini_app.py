@@ -283,7 +283,8 @@ async def test_report_uses_annual_groups_and_saved_goals(diary_db, monkeypatch):
     legacy = next(day for day in diary["days"] if day["date"] == "2026-01-02")
     assert legacy["plain_water_ml"] == 1000
     assert legacy["metrics"]["water"] == {
-        "value": 1000, "goal": None, "percent": None, "lower": None, "upper": None, "complete": True,
+        "value": 1000, "goal": 2000, "percent": 50, "lower": 1900, "upper": 2100,
+        "complete": True, "goal_is_reference": True,
     }
 
     status, refreshed = await request_diary(app, path="/api/report", init_data=init_data, query="?groups=4")
@@ -298,6 +299,43 @@ async def test_report_uses_annual_groups_and_saved_goals(diary_db, monkeypatch):
     assert await request_diary(app, path="/api/report", init_data=init_data, query="?groups=10000") == (
         400, {"error": "invalid_group_count"},
     )
+
+
+async def test_diary_drink_history_uses_saved_or_current_goal_without_writing_snapshots(diary_db):
+    now = datetime.now(timezone.utc)
+    today = (now - timedelta(hours=4)).date()
+    yesterday = today - timedelta(days=1)
+    with diary_db.begin() as session:
+        user = User(telegram_user_id=1, timezone="UTC")
+        session.add_all([user, UserAccess(telegram_user_id=1, is_allowed=True)])
+        session.flush()
+        session.add(UserGoalPreference(
+            user_id=user.id, calorie_goal=1800, protein_goal=90, fat_goal=60,
+            carbs_goal=210, fiber_goal=25, water_goal=2500,
+        ))
+        session.add(DailyGoalSnapshot(
+            user_id=user.id, summary_date=today, timezone="UTC", nutrition_day_start_hour=4,
+            calorie_goal=1800, protein_goal=90, fat_goal=60, carbs_goal=210, fiber_goal=25, water_goal=2000,
+        ))
+        for day in (yesterday, today):
+            session.add(Entry(
+                user_id=user.id, entry_type=EntryType.FOOD,
+                occurred_at=datetime.combine(day, time(5), tzinfo=timezone.utc),
+                items=[
+                    EntryItem(name="water", position=0, unit="ml", quantity=750),
+                    EntryItem(name="сок", position=1, unit="ml", quantity=250, source_facts={"beverage": True}),
+                ],
+            ))
+    app = create_diary_app(diary_db, token=TOKEN, admin_user_ids=())
+    status, payload = await request_diary(app, init_data=telegram_init_data(1, now=now))
+    assert status == 200
+    for day, goal, percent in zip(payload["days"][-2:], (2500, 2000), (40, 50)):
+        observation = day["metrics"]["water"]
+        assert (day["plain_water_ml"], observation["value"]) == (750, 1000)
+        assert (observation["goal"], observation["percent"], observation["goal_is_reference"]) == (goal, percent, True)
+    with diary_db() as session:
+        snapshot = session.query(DailyGoalSnapshot).one()
+        assert (snapshot.summary_date, snapshot.water_goal_includes_beverages) == (today, False)
 
 
 async def test_mini_app_settings_share_preferences_and_preserve_goal_snapshots(diary_db):

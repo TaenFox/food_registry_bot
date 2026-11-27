@@ -173,7 +173,7 @@ function renderMetric() {
         const hasVolumeOnly = code === "water" && !observation.goal && Number.isFinite(observation.value);
         button.setAttribute("aria-pressed", String(code === selectedMetric));
         button.lastElementChild.textContent = hasVolumeOnly ? formatAmount(observation.value, code) : percent;
-        const description = hasPercent ? percent + " от цели"
+        const description = hasPercent ? percent + (observation.goal_is_reference ? " от ориентира" : " от цели")
             : hasVolumeOnly ? formatAmount(observation.value, code) + ", нет цели"
                 : observation.goal === null ? "нет цели" : "нет данных";
         const partial = hasPercent && !observation.complete ? ", неполные данные" : "";
@@ -205,12 +205,17 @@ function renderMetric() {
     const observation = day.metrics[selectedMetric];
     const amount = value => formatAmount(value, selectedMetric);
     let text = `${metricLabels[selectedMetric]} · ${amount(observation.value)}`;
-    if (observation.goal !== null) text += ` из ${amount(observation.goal)}`;
+    if (observation.goal !== null) {
+        text += observation.goal_is_reference
+            ? ` · ориентир ${amount(observation.goal)}`
+            : ` из ${amount(observation.goal)}`;
+    }
     if (Number.isFinite(observation.percent)) {
         const difference = observation.goal - observation.value;
         const absolute = Math.abs(difference);
-        text += absolute < 0.05 ? " · на уровне цели"
-            : ` · ${difference > 0 ? "до цели" : "сверх цели"} ${amount(absolute)}`;
+        const target = observation.goal_is_reference ? "ориентира" : "цели";
+        text += absolute < 0.05 ? ` · на уровне ${target}`
+            : ` · ${difference > 0 ? "до" : "сверх"} ${target} ${amount(absolute)}`;
     }
     if (observation.goal !== null) {
         text += ` · пороги ${formatter.format(observation.lower)}–${amount(observation.upper)}`;
