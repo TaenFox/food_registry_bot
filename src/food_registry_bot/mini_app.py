@@ -14,10 +14,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from food_registry_bot.bot.access import can_access_bot
 from food_registry_bot.db.models import Entry, EntryItem, User
 from food_registry_bot.db.repositories import (
+    DEFAULT_DAILY_GOALS,
     DailyGoalSnapshotRepository,
     EntryRepository,
     GOAL_FIELDS,
     SUPPORTED_GOAL_METRIC_CODES,
+    UserGoalPreferenceRepository,
     UserRepository,
     UserSummaryPreferenceRepository,
 )
@@ -124,6 +126,11 @@ def read_diary(session: Session, user: User, now: datetime) -> dict:
     ]
     if preference is None or preference.show_water:
         metrics.append("water")
+    current_fluid_goal = DEFAULT_DAILY_GOALS["water"]
+    if "water" in metrics:
+        goal_preference = UserGoalPreferenceRepository(session).get_by_user_id(user.id)
+        if goal_preference is not None:
+            current_fluid_goal = goal_preference.water_goal
     today = resolve_local_summary_date(
         reference_at=now, timezone_name=user.timezone, nutrition_day_start_hour=start_hour
     )
@@ -146,8 +153,8 @@ def read_diary(session: Session, user: User, now: datetime) -> dict:
         water_summary = summarize_water_entries(entries, summary_date=day, timezone_name=user.timezone)
         snapshot = snapshots.get_by_user_id_and_date(user_id=user.id, summary_date=day)
         goals = {code: getattr(snapshot, GOAL_FIELDS[code], None) for code in metrics}
-        if "water" in goals and not (snapshot and snapshot.water_goal_includes_beverages):
-            goals["water"] = None
+        if "water" in goals and snapshot is None and water_summary.fluid_has_data:
+            goals["water"] = current_fluid_goal
         if goals.get("calories") and user.workout_logging_enabled:
             goals["calories"] += round(
                 workout_credit.run(
@@ -175,6 +182,8 @@ def read_diary(session: Session, user: User, now: datetime) -> dict:
                 "upper": goal * (1 + tolerance / 100) if goal else None,
                 "complete": total["complete"],
             }
+            if code == "water" and goal is not None and not (snapshot and snapshot.water_goal_includes_beverages):
+                observations[code]["goal_is_reference"] = True
 
         days.append(
             {
