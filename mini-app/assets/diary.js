@@ -17,8 +17,7 @@ const chartEmpty = document.querySelector("#plot-empty");
 const thresholdKey = document.querySelector("#threshold-key");
 const goalKey = document.querySelector("#goal-key");
 const actionStatus = document.querySelector("#action-status");
-const waterGoal = document.querySelector("#diary-water-goal");
-const fluidTotal = document.querySelector("#diary-fluid-total");
+const plainWaterTotal = document.querySelector("#diary-plain-water");
 const quickWater = document.querySelector("#quick-water");
 const screenNavigation = document.querySelector("#screen-navigation");
 const screenPicker = screenNavigation.querySelector(".screen-picker");
@@ -31,7 +30,7 @@ const editableMetricLabels = {
     fat: "Жиры",
     carbs: "Углеводы",
 };
-const metricLabels = { ...editableMetricLabels, fiber: "Клетчатка", water: "Вода" };
+const metricLabels = { ...editableMetricLabels, fiber: "Клетчатка", water: "Выпито" };
 const portionUnits = { g: "г", ml: "мл" };
 const formatter = new Intl.NumberFormat("ru", { maximumFractionDigits: 1 });
 const fullDate = new Intl.DateTimeFormat("ru", { day: "numeric", month: "long", timeZone: "UTC" });
@@ -158,13 +157,7 @@ function progressPosition(percent) {
 
 function renderMetric() {
     const day = model.days[selectedDay];
-    const water = day.metrics.water;
-    waterGoal.hidden = !water || water.goal === null;
-    if (!waterGoal.hidden) {
-        waterGoal.textContent = `Вода · ${water.value === null ? "—" : formatter.format(water.value)} из ${formatAmount(water.goal, "water")}`;
-        if (water.value !== null && !water.complete) waterGoal.textContent += " · неполные данные";
-    }
-    fluidTotal.textContent = "Выпито всего · " + formatAmount(day.fluid_total_ml ?? 0, "water");
+    plainWaterTotal.textContent = "Из них обычная вода · " + formatAmount(day.plain_water_ml ?? 0, "water");
     dayProgress.hidden = !model.metrics.length;
     progressAxis.hidden = !model.metrics.some(code => day.metrics[code].goal > 0);
     progressAxis.lastElementChild.lastElementChild.textContent = chartMaximum + "%";
@@ -177,10 +170,12 @@ function renderMetric() {
         const track = button.querySelector(".metric-track");
         const hasPercent = Number.isFinite(observation.percent);
         const percent = hasPercent ? Math.round(observation.percent) + "%" : "—";
+        const hasVolumeOnly = code === "water" && !observation.goal && Number.isFinite(observation.value);
         button.setAttribute("aria-pressed", String(code === selectedMetric));
-        button.lastElementChild.textContent = percent;
+        button.lastElementChild.textContent = hasVolumeOnly ? formatAmount(observation.value, code) : percent;
         const description = hasPercent ? percent + " от цели"
-            : observation.goal === null ? "нет цели" : "нет данных";
+            : hasVolumeOnly ? formatAmount(observation.value, code) + ", нет цели"
+                : observation.goal === null ? "нет цели" : "нет данных";
         const partial = hasPercent && !observation.complete ? ", неполные данные" : "";
         button.setAttribute("aria-label", `${metricLabels[code]} · ${description}${partial}`);
         track.replaceChildren();
@@ -209,7 +204,8 @@ function renderMetric() {
 
     const observation = day.metrics[selectedMetric];
     const amount = value => formatAmount(value, selectedMetric);
-    let text = `${metricLabels[selectedMetric]} · ${amount(observation.value)} из ${amount(observation.goal)}`;
+    let text = `${metricLabels[selectedMetric]} · ${amount(observation.value)}`;
+    if (observation.goal !== null) text += ` из ${amount(observation.goal)}`;
     if (Number.isFinite(observation.percent)) {
         const difference = observation.goal - observation.value;
         const absolute = Math.abs(difference);
@@ -462,7 +458,8 @@ function renderMeals(day) {
             if (unit && dish.quantity > 0) {
                 name.append(element("span", ` · ${formatter.format(dish.quantity)} ${portionUnits[unit]}`, "portion"));
             }
-            const value = code === "water" && dish.water && unit === "ml" ? dish.quantity : dish.metrics[code];
+            const value = code === "water" && dish.beverage && unit === "ml" && dish.quantity > 0
+                ? dish.quantity : dish.metrics[code];
             control.append(name, element("span", code ? formatAmount(value, code) : "", "amount"));
             row.append(control);
             if (expanded) row.append(dishPanel(day, meal, dish));

@@ -4,7 +4,7 @@ import enum
 from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Enum, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, false, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from food_registry_bot.db.base import Base
@@ -282,6 +282,7 @@ class DailyGoalSnapshot(Base):
     carbs_goal: Mapped[int] = mapped_column(Integer)
     fiber_goal: Mapped[int] = mapped_column(Integer)
     water_goal: Mapped[int] = mapped_column(Integer)
+    water_goal_includes_beverages: Mapped[bool] = mapped_column(Boolean, server_default=false())
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

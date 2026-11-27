@@ -147,7 +147,7 @@ class PeriodReportUseCase:
         goal_value_day_counts = {metric_code: 0 for metric_code in ("calories", "protein", "fat", "carbs", "fiber", "water")}
         goal_hit_day_counts = {metric_code: 0 for metric_code in ("calories", "protein", "fat", "carbs", "fiber", "water")}
         goal_applicable_day_counts = {metric_code: 0 for metric_code in ("calories", "protein", "fat", "carbs", "fiber", "water")}
-        observations: dict[str, dict[date, tuple[float, float]]] = {
+        observations: dict[str, dict[date, tuple[float, float | None]]] = {
             code: {} for code in dynamics_metric_codes
         }
 
@@ -178,10 +178,10 @@ class PeriodReportUseCase:
                 nutrition_day_start_hour=nutrition_day_start_hour,
             )
             fluid_total_ml += water_summary.fluid_total_ml
-            if water_summary.included_entry_count > 0 or water_summary.excluded_entry_count > 0:
+            if water_summary.fluid_has_data:
                 water_data_day_count += 1
-                water_total_ml += water_summary.total_ml
-                if not water_summary.is_complete:
+                water_total_ml += water_summary.fluid_total_ml
+                if not water_summary.fluid_is_complete:
                     incomplete_water_day_count += 1
 
             goal_snapshot = self._goal_snapshot_use_case.get_or_create(
@@ -224,19 +224,21 @@ class PeriodReportUseCase:
                         tolerance_percent=report_goal_tolerance_percent,
                     ):
                         goal_hit_day_counts[metric_code] += 1
-            if water_summary.included_entry_count > 0 and water_summary.excluded_entry_count == 0:
-                goal_applicable_day_counts["water"] += 1
-                if _is_within_goal_tolerance(
-                    metric_value=float(water_summary.total_ml),
-                    goal_value=goal_snapshot.water_goal,
-                    tolerance_percent=report_goal_tolerance_percent,
-                ):
-                    goal_hit_day_counts["water"] += 1
-            if water_summary.included_entry_count > 0 or water_summary.excluded_entry_count > 0:
-                goal_value_sums["water"] += float(goal_snapshot.water_goal)
-                goal_value_day_counts["water"] += 1
+            if water_summary.fluid_has_data:
+                fluid_goal = goal_snapshot.water_goal if goal_snapshot.water_goal_includes_beverages else None
                 if "water" in observations:
-                    observations["water"][summary_date] = (water_summary.total_ml, goal_snapshot.water_goal)
+                    observations["water"][summary_date] = (water_summary.fluid_total_ml, fluid_goal)
+                if fluid_goal is not None:
+                    goal_value_sums["water"] += fluid_goal
+                    goal_value_day_counts["water"] += 1
+                    if water_summary.fluid_is_complete:
+                        goal_applicable_day_counts["water"] += 1
+                        if _is_within_goal_tolerance(
+                            metric_value=water_summary.fluid_total_ml,
+                            goal_value=fluid_goal,
+                            tolerance_percent=report_goal_tolerance_percent,
+                        ):
+                            goal_hit_day_counts["water"] += 1
 
         average_nutrition_totals = DailyNutritionTotals()
         if food_data_day_count > 0:
@@ -255,6 +257,7 @@ class PeriodReportUseCase:
             metric_code: goal_value_sums[metric_code] / goal_value_day_counts[metric_code]
             for metric_code in goal_value_sums
             if goal_value_day_counts[metric_code] > 0
+            and (metric_code != "water" or goal_value_day_counts[metric_code] == water_data_day_count)
         }
         diet_score_summaries = summarize_diet_scores(
             entries=[
@@ -329,7 +332,7 @@ class PeriodReportUseCase:
         cohorts = resolve_report_cohorts(summary_date_to, cohort_count)
         summary_date_from = cohorts[0][0]
         period_day_count = (summary_date_to - summary_date_from).days + 1
-        observations: dict[date, tuple[float, float]] = {}
+        observations: dict[date, tuple[float, float | None]] = {}
         for day_offset in range(period_day_count):
             summary_date = summary_date_from + timedelta(days=day_offset)
             goal_snapshot = self._goal_snapshot_use_case.get_or_create(
@@ -345,8 +348,9 @@ class PeriodReportUseCase:
                     summary_date=summary_date,
                     nutrition_day_start_hour=nutrition_day_start_hour,
                 )
-                if water_summary.included_entry_count or water_summary.excluded_entry_count:
-                    observations[summary_date] = (water_summary.total_ml, goal_snapshot.water_goal)
+                if water_summary.fluid_has_data:
+                    goal = goal_snapshot.water_goal if goal_snapshot.water_goal_includes_beverages else None
+                    observations[summary_date] = (water_summary.fluid_total_ml, goal)
                 continue
 
             calorie_goal_adjustment = 0
@@ -461,12 +465,14 @@ class PeriodReportUseCase:
 
 
 def _build_dynamics_rows(
-    cohorts: list[tuple[date, date]], observations: dict[date, tuple[float, float]]
+    cohorts: list[tuple[date, date]], observations: dict[date, tuple[float, float | None]]
 ) -> list[PeriodMetricDynamicsRow]:
     rows = []
     for start, end in cohorts:
         days = [observation for day, observation in observations.items() if start <= day <= end]
-        goals = [goal for _, goal in days]
+        goals = [goal for _, goal in days if goal is not None]
+        if len(goals) != len(days):
+            goals = []
         rows.append(
             PeriodMetricDynamicsRow(
                 summary_date_from=start,

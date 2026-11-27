@@ -226,7 +226,7 @@ def build_settings_metrics_keyboard(
             [_build_settings_toggle_button("Жиры", show_fat, "toggle_fat")],
             [_build_settings_toggle_button("Углеводы", show_carbs, "toggle_carbs")],
             [_build_settings_toggle_button("Клетчатка", show_fiber, "toggle_fiber")],
-            [_build_settings_toggle_button("Вода", show_water, "toggle_water")],
+            [_build_settings_toggle_button("Выпито", show_water, "toggle_water")],
             [_build_settings_toggle_button("Тренировки", workout_logging_enabled, "toggle_workout_logging")],
             [InlineKeyboardButton(text="К разделам", callback_data=SummarySettingsCallback(action="back_root").pack())],
             _build_close_row(SummarySettingsCallback(action="close").pack()),

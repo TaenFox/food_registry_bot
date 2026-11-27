@@ -98,11 +98,11 @@ def diary_local_time(occurred_at: datetime, user_timezone: ZoneInfo) -> datetime
 def meal_data(entry: Entry, user_timezone: ZoneInfo) -> dict:
     dishes = [diary_dish_data(item) for item in sorted(entry.items, key=lambda item: item.position)]
     totals = {code: metric_total(dishes, code) for code in SUPPORTED_NUTRITION_METRIC_CODES}
-    water_items = [item for item in entry.items if is_plain_water(item)]
-    water_volumes = [beverage_volume(item) for item in water_items]
+    beverage_volumes = [beverage_volume(item) for item in entry.items if is_beverage(item)]
+    known_volumes = [value for value in beverage_volumes if value is not None]
     totals["water"] = {
-        "value": sum(water_volumes) if water_volumes and all(value is not None for value in water_volumes) else None,
-        "complete": bool(water_volumes) and all(value is not None for value in water_volumes),
+        "value": sum(known_volumes) if known_volumes else None,
+        "complete": bool(known_volumes) and len(known_volumes) == len(beverage_volumes),
     }
     return {
         "id": entry.id,
@@ -146,6 +146,8 @@ def read_diary(session: Session, user: User, now: datetime) -> dict:
         water_summary = summarize_water_entries(entries, summary_date=day, timezone_name=user.timezone)
         snapshot = snapshots.get_by_user_id_and_date(user_id=user.id, summary_date=day)
         goals = {code: getattr(snapshot, GOAL_FIELDS[code], None) for code in metrics}
+        if "water" in goals and not (snapshot and snapshot.water_goal_includes_beverages):
+            goals["water"] = None
         if goals.get("calories") and user.workout_logging_enabled:
             goals["calories"] += round(
                 workout_credit.run(
@@ -159,8 +161,8 @@ def read_diary(session: Session, user: User, now: datetime) -> dict:
         observations = {}
         for code in metrics:
             total = (
-                {"value": water_summary.total_ml if water_summary.included_entry_count else None,
-                 "complete": water_summary.is_complete and bool(water_summary.included_entry_count)}
+                {"value": water_summary.fluid_total_ml if water_summary.fluid_has_data else None,
+                 "complete": water_summary.fluid_has_data and water_summary.fluid_is_complete}
                 if code == "water" else metric_total(dishes, code)
             )
             value = total["value"]
@@ -183,6 +185,7 @@ def read_diary(session: Session, user: User, now: datetime) -> dict:
                     for dish in dishes for code in metrics if code != "water"
                 ),
                 "fluid_total_ml": water_summary.fluid_total_ml,
+                "plain_water_ml": water_summary.total_ml,
                 "metrics": observations,
                 "meals": meals,
             }

@@ -82,6 +82,7 @@ class NutritionCoachFactualContext(BaseModel):
     timezone: str = Field(min_length=1, max_length=64)
     nutrition_day_start_hour: int = Field(ge=0, le=23)
     user_context_comment: Optional[str] = None
+    water_goal_includes_beverages: bool = False
     day_totals: dict[str, float]
     goal_progress: dict[str, NutritionCoachMetricProgress]
     active_diets: list[NutritionCoachActiveDiet] = Field(default_factory=list)
@@ -195,13 +196,14 @@ class NutritionCoachContextBuilder:
             timezone=timezone_name,
             nutrition_day_start_hour=nutrition_day_start_hour,
             user_context_comment=user_context_comment,
+            water_goal_includes_beverages=goal_progress.water_goal_includes_beverages,
             day_totals={
                 "calories": nutrition_summary.totals.calories,
                 "protein": nutrition_summary.totals.protein,
                 "fat": nutrition_summary.totals.fat,
                 "carbs": nutrition_summary.totals.carbs,
                 "fiber": nutrition_summary.totals.fiber,
-                "water": float(water_summary.total_ml),
+                "water": goal_progress.water.consumed_value,
             },
             goal_progress=_build_metric_progress_map(goal_progress),
             active_diets=[
@@ -244,6 +246,9 @@ class NutritionCoachContextBuilder:
             ],
             nutrition_summary_is_complete=nutrition_summary.is_complete,
             excluded_food_entry_count=nutrition_summary.excluded_entry_count,
-            water_summary_is_complete=water_summary.is_complete,
+            water_summary_is_complete=(
+                water_summary.fluid_is_complete
+                if goal_progress.water_goal_includes_beverages else water_summary.is_complete
+            ),
             excluded_water_entry_count=water_summary.excluded_entry_count,
         )

@@ -9,7 +9,7 @@ function createSettingsView({ request, handleAccessError, expire, setBusy, refre
     const retry = loading.querySelector(".settings-retry");
     const status = form.querySelector(".settings-status");
     const save = form.querySelector(".settings-save");
-    const goalMetrics = { ...metricLabels, water: "Вода" };
+    const goalMetrics = metricLabels;
     const dietSection = form.querySelector('[data-section="diets"]');
     const rows = Object.fromEntries(
         [...sections.querySelectorAll(".settings-rows")].map(container =>
