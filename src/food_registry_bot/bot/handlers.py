@@ -224,7 +224,7 @@ GOAL_METRIC_LABELS = {
     "fat": "жиры",
     "carbs": "углеводы",
     "fiber": "клетчатка",
-    "water": "вода",
+    "water": "выпито",
 }
 SUMMARY_DISPLAY_MODE_LABELS = {
     "text": "текст",
@@ -1778,7 +1778,10 @@ def build_today_summary_response_with_preferences(
     parts: list[str] = []
     if ("water" in enabled_metric_codes and water_summary is not None
             and water_summary.fluid_total_ml > water_summary.total_ml):
-        lines.append(f"Выпито всего: {water_summary.fluid_total_ml} мл")
+        if goal_progress is not None and goal_progress.water_goal_includes_beverages:
+            lines.append(f"Из них обычная вода: {water_summary.total_ml} мл")
+        else:
+            lines.append(f"Выпито: {water_summary.fluid_total_ml} мл")
     if lines:
         parts.append("<pre>" + html.escape("\n".join(lines)) + "</pre>")
     if diet_block is not None:
@@ -1789,7 +1792,10 @@ def build_today_summary_response_with_preferences(
         incompleteness_notes.append(
             f"Есть записей еды без полного набора метрик: {summary.excluded_entry_count}. Итог дня пока неполный."
         )
-    if water_summary is not None and not water_summary.is_complete:
+    if (water_summary is not None and goal_progress is not None
+            and goal_progress.water_goal_includes_beverages and not water_summary.fluid_is_complete):
+        incompleteness_notes.append("У части напитков неизвестен объём. Итог выпитого пока неполный.")
+    elif water_summary is not None and not water_summary.is_complete:
         incompleteness_notes.append(
             f"Есть записей воды с неподдерживаемым форматом: {water_summary.excluded_entry_count}. Итог воды пока неполный."
         )
@@ -1810,7 +1816,7 @@ def get_enabled_summary_metric_codes(preference) -> tuple[str, ...]:
 def build_settings_root_response() -> str:
     return (
         "Настройки:\n"
-        "- Цели: дневные цели по калориям, БЖУ, клетчатке и воде.\n"
+        "- Цели: дневные цели по калориям, БЖУ, клетчатке и объёму напитков.\n"
         "- Метрики: какие показатели учитывать в итогах дня и отчётах.\n"
         "- Отображение: формат summary, прогресс дня и дельта после записи.\n"
         "- Отчёты: начало пищевого дня, допуск к цели и порог заметных записей.\n"
@@ -1829,14 +1835,14 @@ def build_settings_goals_response(*, goal_preference) -> str:
         [
             "Раздел «Цели»:",
             "Настрой дневные цели кнопками ниже.",
-            "Шаг изменения: 100 ккал, 10 г для БЖУ и клетчатки, 100 мл для воды.",
+            "Шаг изменения: 100 ккал, 10 г для БЖУ и клетчатки, 100 мл для напитков.",
             "",
             f"- калории: {goal_preference.calorie_goal} ккал",
             f"- белки: {goal_preference.protein_goal} г",
             f"- жиры: {goal_preference.fat_goal} г",
             f"- углеводы: {goal_preference.carbs_goal} г",
             f"- клетчатка: {goal_preference.fiber_goal} г",
-            f"- вода: {goal_preference.water_goal} мл",
+            f"- выпито: {goal_preference.water_goal} мл",
         ]
     )
 
@@ -1862,7 +1868,7 @@ def build_settings_metrics_response(
             f"- жиры: {statuses[show_fat]}",
             f"- углеводы: {statuses[show_carbs]}",
             f"- клетчатка: {statuses[show_fiber]}",
-            f"- вода: {statuses[show_water]}",
+            f"- выпито: {statuses[show_water]}",
             f"- тренировки: {statuses[workout_logging_enabled]}",
         ]
     )
@@ -2413,9 +2419,7 @@ def build_period_report_response(
     if show_nutrition_metrics:
         lines.append(f"Дней с данными по еде: {report.food_data_day_count}")
     if show_water:
-        lines.append(f"Дней с данными по воде: {report.water_data_day_count}")
-        if report.fluid_total_ml > round(report.average_water_ml * report.water_data_day_count):
-            lines.append(f"Выпито за период: {report.fluid_total_ml} мл")
+        lines.append(f"Дней с данными по напиткам: {report.water_data_day_count}")
     if has_any_workout_data:
         lines.append(f"Дней с тренировками: {report.workout_day_count}")
 
@@ -2438,7 +2442,7 @@ def build_period_report_response(
             goal_value=report.average_goal_values.get("water"),
             tolerance_percent=report_goal_tolerance_percent,
         )
-        average_lines.append(f"{prefix} вода: {round(report.average_water_ml, 1)} мл")
+        average_lines.append(f"{prefix} выпито: {round(report.average_water_ml, 1)} мл")
 
     if average_lines:
         lines.extend(["", "Среднее по дням с данными", *average_lines])
@@ -2469,7 +2473,7 @@ def build_period_report_response(
     if show_nutrition_metrics and report.incomplete_food_day_count > 0:
         notes.append(f"Неполных дней по еде: {report.incomplete_food_day_count}.")
     if show_water and report.incomplete_water_day_count > 0:
-        notes.append(f"Неполных дней по воде: {report.incomplete_water_day_count}.")
+        notes.append(f"Неполных дней по напиткам: {report.incomplete_water_day_count}.")
     if notes:
         lines.extend(["", *notes])
 
@@ -3286,6 +3290,7 @@ def build_goal_response(
     timezone_name: str,
     nutrition_day_start_hour: int,
 ) -> str:
+    snapshot_label = "выпито" if goal_snapshot.water_goal_includes_beverages else "обычная вода"
     lines = [
         "Текущие цели:",
         f"- калории: {goal_preference.calorie_goal} ккал",
@@ -3293,14 +3298,14 @@ def build_goal_response(
         f"- жиры: {goal_preference.fat_goal} г",
         f"- углеводы: {goal_preference.carbs_goal} г",
         f"- клетчатка: {goal_preference.fiber_goal} г",
-        f"- вода: {goal_preference.water_goal} мл",
+        f"- выпито: {goal_preference.water_goal} мл",
         f"Пищевой день {summary_date.isoformat()}:",
         f"- калории: {goal_snapshot.calorie_goal} ккал",
         f"- белки: {goal_snapshot.protein_goal} г",
         f"- жиры: {goal_snapshot.fat_goal} г",
         f"- углеводы: {goal_snapshot.carbs_goal} г",
         f"- клетчатка: {goal_snapshot.fiber_goal} г",
-        f"- вода: {goal_snapshot.water_goal} мл",
+        f"- {snapshot_label}: {goal_snapshot.water_goal} мл",
         f"Часовой пояс дня: {timezone_name}.",
         f"Начало пищевого дня: {nutrition_day_start_hour:02d}:00.",
     ]

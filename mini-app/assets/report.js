@@ -23,7 +23,7 @@ function createReportView({ request, handleAccessError, expire }) {
         fat: { name: "Жиры", unit: "г", color: "var(--fat)" },
         carbs: { name: "Углеводы", unit: "г", color: "var(--carbs)" },
         fiber: { name: "Клетчатка", unit: "г", color: "var(--fiber)" },
-        water: { name: "Вода", unit: "мл", color: "var(--water)" },
+        water: { name: "Выпито", unit: "мл", color: "var(--water)" },
     };
     const shortDate = new Intl.DateTimeFormat("ru", { day: "2-digit", month: "2-digit", timeZone: "UTC" });
     const dayWords = new Intl.PluralRules("ru");

@@ -876,6 +876,7 @@ class DailyGoalSnapshotRepository:
         carbs_goal: int,
         fiber_goal: int,
         water_goal: int,
+        water_goal_includes_beverages: bool = False,
     ) -> DailyGoalSnapshot:
         snapshot = insert_if_absent(
             self._session,
@@ -891,6 +892,7 @@ class DailyGoalSnapshotRepository:
                 "carbs_goal": carbs_goal,
                 "fiber_goal": fiber_goal,
                 "water_goal": water_goal,
+                "water_goal_includes_beverages": water_goal_includes_beverages,
             },
             ("user_id", "summary_date"),
         )

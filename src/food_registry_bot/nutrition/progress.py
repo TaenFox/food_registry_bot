@@ -29,6 +29,7 @@ class DailyNutritionGoalProgress(BaseModel):
     carbs: MetricGoalProgress
     fiber: MetricGoalProgress
     water: MetricGoalProgress
+    water_goal_includes_beverages: bool = False
 
 
 class DailyNutritionGoalProgressUseCase:
@@ -69,9 +70,12 @@ class DailyNutritionGoalProgressUseCase:
             ),
             water=self._build_metric_progress(
                 metric_code="water",
-                consumed_value=water_summary.total_ml,
+                consumed_value=(
+                    water_summary.fluid_total_ml if snapshot.water_goal_includes_beverages else water_summary.total_ml
+                ),
                 goal_value=snapshot.water_goal,
             ),
+            water_goal_includes_beverages=bool(snapshot.water_goal_includes_beverages),
         )
 
     @staticmethod

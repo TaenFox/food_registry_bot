@@ -283,7 +283,7 @@ async def test_start_creates_user_for_allowed_user() -> None:
     assert message.answer.await_count == 2
     assert message.answer.await_args_list[0].args == (
         "Настройки:\n"
-        "- Цели: дневные цели по калориям, БЖУ, клетчатке и воде.\n"
+        "- Цели: дневные цели по калориям, БЖУ, клетчатке и объёму напитков.\n"
         "- Метрики: какие показатели учитывать в итогах дня и отчётах.\n"
         "- Отображение: формат summary, прогресс дня и дельта после записи.\n"
         "- Отчёты: начало пищевого дня, допуск к цели и порог заметных записей.\n"
@@ -4119,7 +4119,7 @@ async def test_report_returns_period_averages_by_days_with_data() -> None:
             "Отчёт: 17.05.2026-24.05.2026\n"
             "Дней в периоде: 8\n"
             "Дней с данными по еде: 3\n"
-            "Дней с данными по воде: 2\n"
+            "Дней с данными по напиткам: 2\n"
             "\n"
             "Среднее по дням с данными\n"
             "📉 калории: 266.7 ккал\n"
@@ -4127,7 +4127,7 @@ async def test_report_returns_period_averages_by_days_with_data() -> None:
             "📉 жиры: 10.0 г\n"
             "📉 углеводы: 33.3 г\n"
             "📉 клетчатка: 4.0 г\n"
-            "📉 вода: 1000.0 мл\n"
+            "📉 выпито: 1000.0 мл\n"
             "\n"
             "Цели считаются с допуском 10%.\n"
             "- калории: 0 из 2 дней\n"
@@ -4135,7 +4135,7 @@ async def test_report_returns_period_averages_by_days_with_data() -> None:
             "- жиры: 0 из 2 дней\n"
             "- углеводы: 0 из 2 дней\n"
             "- клетчатка: 0 из 2 дней\n"
-            "- вода: 0 из 2 дней\n"
+            "- выпито: 0 из 2 дней\n"
             "\n"
             "Неполных дней по еде: 1."
         ),
@@ -4318,7 +4318,7 @@ async def test_report_uses_goal_status_prefixes_for_average_lines() -> None:
     assert "📈 жиры: 70.0 г" in rendered
     assert "🎯 углеводы: 210.0 г" in rendered
     assert "🎯 клетчатка: 25.0 г" in rendered
-    assert "📈 вода: 2500.0 мл" in rendered
+    assert "📈 выпито: 2500.0 мл" in rendered
 
 
 async def test_report_shows_diet_block_with_item_and_day_counts() -> None:
@@ -5323,7 +5323,7 @@ async def test_settings_returns_current_summary_preferences() -> None:
     message.answer.assert_awaited_once()
     assert message.answer.await_args.args == (
         "Настройки:\n"
-        "- Цели: дневные цели по калориям, БЖУ, клетчатке и воде.\n"
+        "- Цели: дневные цели по калориям, БЖУ, клетчатке и объёму напитков.\n"
         "- Метрики: какие показатели учитывать в итогах дня и отчётах.\n"
         "- Отображение: формат summary, прогресс дня и дельта после записи.\n"
         "- Отчёты: начало пищевого дня, допуск к цели и порог заметных записей.\n"
@@ -5411,7 +5411,7 @@ async def test_toggle_summary_metric_updates_preference_and_message() -> None:
         "- жиры: включено\n"
         "- углеводы: включено\n"
         "- клетчатка: включено\n"
-        "- вода: включено\n"
+        "- выпито: включено\n"
         "- тренировки: выключено",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
@@ -5763,7 +5763,7 @@ async def test_toggle_workout_logging_updates_user_and_message() -> None:
         "- жиры: включено\n"
         "- углеводы: включено\n"
         "- клетчатка: включено\n"
-        "- вода: включено\n"
+        "- выпито: включено\n"
         "- тренировки: включено",
     )
     reply_markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
@@ -6068,13 +6068,13 @@ async def test_goal_returns_default_goals_when_preference_is_not_created() -> No
     assert message.answer.await_args.args == (
         "Раздел «Цели»:\n"
         "Настрой дневные цели кнопками ниже.\n"
-        "Шаг изменения: 100 ккал, 10 г для БЖУ и клетчатки, 100 мл для воды.\n\n"
+        "Шаг изменения: 100 ккал, 10 г для БЖУ и клетчатки, 100 мл для напитков.\n\n"
         "- калории: 1800 ккал\n"
         "- белки: 90 г\n"
         "- жиры: 60 г\n"
         "- углеводы: 210 г\n"
         "- клетчатка: 25 г\n"
-        "- вода: 2000 мл",
+        "- выпито: 2000 мл",
     )
     reply_markup = message.answer.await_args.kwargs["reply_markup"]
     assert flatten_inline_button_texts(reply_markup)[:5] == ["−100", "−50", "К", "+50", "+100"]
@@ -6155,7 +6155,7 @@ async def test_goal_decrement_respects_minimum_step() -> None:
         saved_goal = session.query(UserGoalPreference).one()
 
     assert saved_goal.water_goal == 100
-    assert "вода: 100 мл" in callback.message.edit_text.await_args.args[0]
+    assert "выпито: 100 мл" in callback.message.edit_text.await_args.args[0]
 
 
 async def test_settings_root_open_callback_updates_message() -> None:
