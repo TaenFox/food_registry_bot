@@ -79,7 +79,7 @@
   display: flex; justify-content: space-between; align-items: center; gap: 8px;
   margin-top: 6px; padding-top: 4px; border-top: 1px solid var(--rule); font-size: 12px;
 }
-#diary-trends #diary-fluid-total { color: var(--muted); }
+#diary-trends #diary-plain-water { color: var(--muted); }
 #diary-trends #quick-water {
   min-height: 44px; padding: 5px 9px; border: 1px solid var(--rule); border-radius: 8px;
   font: inherit; font-weight: 650; color: var(--water); background: var(--panel); white-space: nowrap;
@@ -87,7 +87,7 @@
 #diary-trends #quick-water:disabled { opacity: .55; }
 #diary-trends .metric-progress { padding: 0; list-style: none; }
 #diary-trends :where(.progress-axis, .metric-progress button) {
-  display: grid; grid-template-columns: 75px minmax(0, 1fr) 42px; column-gap: 7px;
+  display: grid; grid-template-columns: 75px minmax(0, 1fr) 64px; column-gap: 7px;
   align-items: center; padding-inline: 4px;
 }
 #diary-trends .progress-axis { font-size: 11px; color: var(--muted); }

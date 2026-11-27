@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from food_registry_bot.db.models import Entry, EntryType
 from food_registry_bot.db.repositories import EntryRepository
 from food_registry_bot.nutrition.daily_summary import resolve_day_bounds_utc
-from food_registry_bot.nutrition.beverage import beverage_volume, is_plain_water
+from food_registry_bot.nutrition.beverage import beverage_volume, is_beverage, is_plain_water
 
 
 class DailyWaterSummary(BaseModel):
@@ -18,6 +18,8 @@ class DailyWaterSummary(BaseModel):
     timezone: str = Field(min_length=1, max_length=64)
     total_ml: int = Field(ge=0)
     fluid_total_ml: int = Field(default=0, ge=0)
+    fluid_has_data: bool = False
+    fluid_is_complete: bool = True
     included_entry_count: int = Field(ge=0)
     excluded_entry_count: int = Field(ge=0)
     is_complete: bool
@@ -59,11 +61,17 @@ def summarize_water_entries(
     entries: list[Entry], *, summary_date: date, timezone_name: str,
 ) -> DailyWaterSummary:
     total_ml = fluid_total_ml = included = excluded = 0
+    fluid_has_data = False
+    fluid_is_complete = True
     for entry in entries:
-        fluid_total_ml += sum(beverage_volume(item) or 0 for item in entry.items)
+        beverages = [beverage_volume(item) for item in entry.items if is_beverage(item)]
+        fluid_total_ml += sum(value or 0 for value in beverages)
+        fluid_has_data |= bool(beverages) or entry.entry_type is EntryType.WATER
+        fluid_is_complete &= all(value is not None for value in beverages)
         items = [item for item in entry.items if is_plain_water(item)]
         if entry.entry_type is EntryType.WATER and (not items or len(items) != len(entry.items)):
             excluded += 1
+            fluid_is_complete = False
             continue
         if not items:
             continue
@@ -76,5 +84,6 @@ def summarize_water_entries(
     return DailyWaterSummary(
         summary_date=summary_date, timezone=timezone_name, total_ml=total_ml,
         fluid_total_ml=fluid_total_ml, included_entry_count=included,
+        fluid_has_data=fluid_has_data, fluid_is_complete=fluid_is_complete,
         excluded_entry_count=excluded, is_complete=excluded == 0,
     )

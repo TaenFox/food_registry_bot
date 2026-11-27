@@ -276,7 +276,15 @@ async def test_report_uses_annual_groups_and_saved_goals(diary_db, monkeypatch):
         "min_goal_value": 2000, "max_goal_value": 2400,
     }
     assert by_code["water"]["average"] == 1000
-    assert by_code["water"]["goal_days"] == 1
+    assert by_code["water"]["goal_days"] == 0
+    assert by_code["water"]["groups"][-1]["average_goal_value"] is None
+    status, diary = await request_diary(app, init_data=init_data)
+    assert status == 200
+    legacy = next(day for day in diary["days"] if day["date"] == "2026-01-02")
+    assert legacy["plain_water_ml"] == 1000
+    assert legacy["metrics"]["water"] == {
+        "value": 1000, "goal": None, "percent": None, "lower": None, "upper": None, "complete": True,
+    }
 
     status, refreshed = await request_diary(app, path="/api/report", init_data=init_data, query="?groups=4")
     assert status == 200
@@ -446,7 +454,9 @@ async def test_create_entry_sets_local_time_and_does_not_duplicate_a_retry(diary
     assert day["meals"][0]["time"] == "02:15"
     assert day["metrics"]["fiber"]["value"] == 4
     assert day["metrics"]["calories"]["goal"] == 1800
-    assert day["fluid_total_ml"] == 400 and day["metrics"]["water"]["value"] == 250
+    assert (day["fluid_total_ml"], day["plain_water_ml"]) == (400, 250)
+    assert day["metrics"]["water"]["value"] == 400
+    assert day["metrics"]["water"]["percent"] == 20
 
     with diary_db.begin() as session:
         for entry in session.query(Entry).all():
@@ -858,10 +868,14 @@ async def test_water_and_beverages_share_diary_and_keep_separate_totals(editable
 
     _, data = await request_diary(app, init_data=telegram_init_data(1))
     day = next(day for day in data["days"] if day["date"] == food_day.isoformat())
-    assert day["fluid_total_ml"] == 580
-    assert day["metrics"]["water"]["value"] == 500
-    assert day["metrics"]["water"]["percent"] == 25
-    assert (await request_diary(app, path="/api/report", init_data=telegram_init_data(1)))[1]["fluid_total_ml"] == 580
+    assert (day["fluid_total_ml"], day["plain_water_ml"]) == (580, 500)
+    assert day["metrics"]["water"]["value"] == 580
+    assert day["metrics"]["water"]["percent"] == pytest.approx(29)
+    assert find_meal(data, ids["target"])["totals"]["water"]["value"] == 80
+    _, report = await request_diary(app, path="/api/report", init_data=telegram_init_data(1))
+    assert report["fluid_total_ml"] == 580
+    drinks_metric = next(metric for metric in report["metrics"] if metric["code"] == "water")
+    assert (drinks_metric["average"], drinks_metric["goal_days"]) == (580, 1)
     old_water = find_meal(data, ids["water"])["dishes"][0]
     assert old_water["water"] and all(value is None for value in old_water["metrics"].values())
     edit = {"action": "edit", "entry_id": ids["water"], "item_id": old_water["id"],
@@ -881,7 +895,7 @@ async def test_water_and_beverages_share_diary_and_keep_separate_totals(editable
     })
     assert status == 200
     group = find_meal(moved, ids["target"])
-    assert group["totals"]["water"]["value"] == 300
+    assert group["totals"]["water"]["value"] == 380
     current = group["dishes"][-1]
     status, cleared = await mutate_diary(app, {**edit, "entry_id": ids["target"],
                                                "revision": current["revision"],
@@ -897,14 +911,14 @@ async def test_water_and_beverages_share_diary_and_keep_separate_totals(editable
     assert await submit_entry(app, repeat) == (200, {"summary_date": food_day.isoformat()})
     _, repeated = await request_diary(app, init_data=telegram_init_data(1))
     day = next(day for day in repeated["days"] if day["date"] == food_day.isoformat())
-    assert day["fluid_total_ml"] == 1010 and day["metrics"]["water"]["value"] == 850
+    assert (day["fluid_total_ml"], day["plain_water_ml"], day["metrics"]["water"]["value"]) == (1010, 850, 1010)
     status, deleted = await mutate_diary(app, {
         "action": "delete", "entry_id": ids["target"], "item_id": water["id"],
         "revision": water["revision"],
     })
     assert status == 200
     day = next(day for day in deleted["days"] if day["date"] == food_day.isoformat())
-    assert day["fluid_total_ml"] == 710 and day["metrics"]["water"]["value"] == 550
+    assert (day["fluid_total_ml"], day["plain_water_ml"], day["metrics"]["water"]["value"]) == (710, 550, 710)
 
 
 async def test_move_last_dish_checks_confirmation_and_preserves_facts(editable_diary):
